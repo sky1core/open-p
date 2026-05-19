@@ -19,16 +19,14 @@ The current implementation supports trusted local workspaces:
 - read one or more `stream-json` user events from stdin with `--input-format stream-json --output-format stream-json`
 - write a structured JSON result with `--output-format json`
 - write JSONL result events with `--output-format stream-json`
-- accept `-p`/`--print` as compatibility no-ops
 - validate `--json-schema` structured output and emit `structured_output` in JSON result events
 - emit a minimal `system init` event in stream-json mode before assistant/result events
 - emit default stream-json assistant updates as scoped cumulative snapshots that callers should treat as whole-message replacements
 - expose `--include-partial-messages` for callers that want Claude-style partial `stream_event` deltas when snapshots are prefix-compatible
-- support `claude -p --output-format stream-json --verbose --permission-mode ...` call sites through an optional command shim
 - return non-zero exit codes for usage, backend, timeout, and protocol failures
 
 The final result is derived from Claude Code structured output. In text-prompt mode that source is the scoped local session log; in stream-json WorkerBridge mode it is the internal Claude Code stream-json stdout result. Default `stream-json` assistant events are emitted from scoped structured assistant snapshots, not from terminal screen text. Those default assistant events may be cumulative snapshots rather than fine-grained deltas; consumers should replace the displayed assistant text with the latest snapshot for the active turn. `--include-partial-messages` is the explicit opt-in path for Claude-style partial `stream_event` lifecycle and delta events. open-p does not read private transport credentials. Command-name compatibility is available only through the optional shim workflow; it is not installed as the default package executable.
-The `stream-json` output mode follows the supported `claude -p --output-format stream-json` public event shape with the documented cumulative-snapshot exception above and must not publish `open-p`-specific stdout fields.
+The `stream-json` output mode follows the supported `claude` stream-json public event shape with the documented cumulative-snapshot exception above and must not publish `open-p`-specific stdout fields.
 
 ## Name
 
@@ -70,25 +68,27 @@ The shim sets `OPENP_CLAUDE_CODE_BIN` to the real Claude Code binary before invo
 
 The runner observes structured artifacts or structured stdout produced by the backend CLI and treats terminal rendering as an execution surface, not as a response API.
 
-## Initial CLI Shape
+## CLI Shape
 
 ```bash
-openp "prompt"
-echo "prompt" | openp
-openp --session-id <uuid> "prompt"
-openp --resume <uuid> "prompt"
-openp --timeout 60 "prompt"
-openp --output-format json "prompt"
-openp -p --output-format json --json-schema '{"type":"object"}' "prompt"
-openp --output-format stream-json "prompt"
-openp --output-format stream-json --include-partial-messages "prompt"
-printf '{"type":"user","message":{"content":"prompt"}}\n' | openp --input-format stream-json --output-format stream-json
-printf '{"type":"user","message":{"content":"prompt"}}\n' | openp --input-format stream-json --output-format stream-json --include-partial-messages
+openp claude "prompt"
+echo "prompt" | openp claude
+openp claude --session-id <uuid> "prompt"
+openp claude --resume <uuid> "prompt"
+openp claude --timeout 60 "prompt"
+openp claude --output-format json "prompt"
+openp claude --output-format json --json-schema '{"type":"object"}' "prompt"
+openp claude --output-format stream-json "prompt"
+openp claude --output-format stream-json --include-partial-messages "prompt"
+printf '{"type":"user","message":{"content":"prompt"}}\n' | openp claude --input-format stream-json --output-format stream-json
+printf '{"type":"user","message":{"content":"prompt"}}\n' | openp claude --input-format stream-json --output-format stream-json --include-partial-messages
 printf '%s\n%s\n' \
   '{"type":"user","message":{"content":"first prompt"}}' \
   '{"type":"user","message":{"content":"second prompt"}}' \
-  | openp --input-format stream-json --output-format stream-json
+  | openp claude --input-format stream-json --output-format stream-json
 ```
+
+The first argument (`claude`) is the backend subcommand. It selects the `claude-code` backend. A backend is always required; there is no implicit default.
 
 ## Workspace Trust
 
