@@ -40,7 +40,7 @@ export interface TurnResult {
 
 export interface BackendRunOptions {
   readonly cwd: string;
-  readonly provider: 'tmux';
+  readonly provider: string;
   readonly backendSessionId: string;
   readonly resume: boolean;
   readonly timeoutMs: number;

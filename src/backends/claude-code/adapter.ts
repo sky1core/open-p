@@ -3,6 +3,7 @@ import { runAbortableOperation, throwIfAborted } from '../../core/abort.js';
 import { execFileText } from '../../core/command.js';
 import { SessionLockStore } from '../../core/session-lock.js';
 import { SessionStateStore, validateSessionStateCompatibility } from '../../core/session-state.js';
+import type { Backend } from '../../core/backend.js';
 import type { BackendRunOptions, TurnRequest, TurnResult } from '../../core/types.js';
 import type { PtyProvider } from '../../runners/types.js';
 import { readinessTimeoutMs, waitForClaudeCodeInputReady } from './interactive.js';
@@ -17,7 +18,7 @@ import { resolveInteractivePermissionMode } from './permission-mode.js';
 import { shouldPublishPrefixIntermediate } from './screen-monitor.js';
 import { withThinkingSummariesSettings } from './settings.js';
 
-export class ClaudeCodeBackend {
+export class ClaudeCodeBackend implements Backend {
   constructor(private readonly provider: PtyProvider) {}
 
   async runTurn(request: TurnRequest, options: BackendRunOptions): Promise<TurnResult> {

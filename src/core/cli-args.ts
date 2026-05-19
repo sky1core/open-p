@@ -7,8 +7,8 @@ import type { OutputFormat } from './output.js';
 export type InputFormat = 'text' | 'stream-json';
 
 export interface CliOptions {
-  readonly backend: 'claude-code';
-  readonly provider: 'tmux';
+  readonly backend: string;
+  readonly provider: string;
   readonly backendSessionId: string;
   readonly resume: boolean;
   readonly timeoutMs: number;
@@ -71,8 +71,6 @@ const BACKEND_PASS_THROUGH_VALUE_FLAGS = new Set([
 ]);
 
 const BACKEND_PASS_THROUGH_BOOLEAN_FLAGS = new Set([
-  '-p',
-  '--print',
   '--verbose',
   '--brief',
   '--include-partial-messages',
@@ -80,8 +78,8 @@ const BACKEND_PASS_THROUGH_BOOLEAN_FLAGS = new Set([
   '--allow-dangerously-skip-permissions',
 ]);
 
-export function parseCliArgs(argv: readonly string[]): CliOptions {
-  let backend: CliOptions['backend'] = 'claude-code';
+export function parseCliArgs(argv: readonly string[], knownBackends?: ReadonlySet<string>): CliOptions {
+  let backend: string | null = null;
   let provider: CliOptions['provider'] = 'tmux';
   let backendSessionId: string | null = null;
   let resume = false;
@@ -97,6 +95,10 @@ export function parseCliArgs(argv: readonly string[]): CliOptions {
   const backendArgs: string[] = [];
   const promptParts: string[] = [];
 
+  const separatorIndex = argv.indexOf('--');
+  const hasBackendFlag = argv.some((a, i) => a === '--backend' && i < argv.length - 1 && (separatorIndex === -1 || i < separatorIndex));
+  let subcommandConsumed = false;
+
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]!;
     if (arg === '--') {
@@ -104,13 +106,19 @@ export function parseCliArgs(argv: readonly string[]): CliOptions {
       break;
     }
     if (!arg.startsWith('-')) {
-      promptParts.push(arg);
+      if (!subcommandConsumed && !hasBackendFlag && knownBackends) {
+        if (!knownBackends.has(arg)) {
+          const available = [...knownBackends].join(', ');
+          throw new OpenPError(`unknown backend: ${arg} (available: ${available})`, EXIT_CODES.unsupportedOption);
+        }
+        backend = arg;
+        subcommandConsumed = true;
+      } else {
+        promptParts.push(arg);
+      }
       continue;
     }
     if (BACKEND_PASS_THROUGH_BOOLEAN_FLAGS.has(arg)) {
-      if (arg === '-p' || arg === '--print') {
-        continue;
-      }
       if (arg === '--include-partial-messages') {
         includePartialMessages = true;
         continue;
@@ -135,8 +143,9 @@ export function parseCliArgs(argv: readonly string[]): CliOptions {
     i += 1;
     switch (arg) {
       case '--backend':
-        if (value !== 'claude-code') {
-          throw new OpenPError(`unsupported backend: ${value}`, EXIT_CODES.unsupportedOption);
+        if (knownBackends && !knownBackends.has(value)) {
+          const available = [...knownBackends].join(', ');
+          throw new OpenPError(`unknown backend: ${value} (available: ${available})`, EXIT_CODES.unsupportedOption);
         }
         backend = value;
         break;
@@ -205,6 +214,14 @@ export function parseCliArgs(argv: readonly string[]): CliOptions {
 
   if (includePartialMessages && outputFormat !== 'stream-json') {
     throw new OpenPError('--include-partial-messages requires --output-format stream-json', EXIT_CODES.usage);
+  }
+
+  if (!backend) {
+    if (knownBackends) {
+      const available = [...knownBackends].join(', ');
+      throw new OpenPError(`backend is required: specify as first argument or use --backend (available: ${available})`, EXIT_CODES.usage);
+    }
+    backend = 'claude-code';
   }
 
   return {

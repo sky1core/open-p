@@ -5,7 +5,6 @@ import { EXIT_CODES, OpenPError } from '../src/core/errors.js';
 
 test('parses supported options and prompt args', () => {
   const options = parseCliArgs([
-    '-p',
     '--session-id',
     '11111111-1111-4111-8111-111111111111',
     '--timeout',
@@ -28,6 +27,70 @@ test('parses supported options and prompt args', () => {
   assert.deepEqual(options.backendArgs, []);
   assert.equal(options.promptArg, 'hello world');
   assert.match(options.turnId, /^[0-9a-f-]{36}$/);
+});
+
+test('accepts backend as first positional subcommand', () => {
+  const known = new Set(['claude', 'claude-code', 'codex']);
+  const options = parseCliArgs(['claude', 'hello', 'world'], known);
+  assert.equal(options.backend, 'claude');
+  assert.equal(options.promptArg, 'hello world');
+});
+
+test('accepts backend via --backend flag', () => {
+  const known = new Set(['claude', 'claude-code']);
+  const options = parseCliArgs(['--backend', 'claude-code', 'hello'], known);
+  assert.equal(options.backend, 'claude-code');
+  assert.equal(options.promptArg, 'hello');
+});
+
+test('rejects unknown --backend flag value when knownBackends provided', () => {
+  const known = new Set(['claude', 'claude-code']);
+  assert.throws(
+    () => parseCliArgs(['--backend', 'nonexistent', 'hello'], known),
+    /unknown backend: nonexistent/,
+  );
+});
+
+test('rejects unsupported provider', () => {
+  assert.throws(
+    () => parseCliArgs(['--provider', 'screen', 'hello']),
+    /unsupported provider: screen/,
+  );
+});
+
+test('--backend flag prevents subcommand consumption', () => {
+  const known = new Set(['claude', 'codex']);
+  const options = parseCliArgs(['--backend', 'codex', 'claude', 'hello'], known);
+  assert.equal(options.backend, 'codex');
+  assert.equal(options.promptArg, 'claude hello');
+});
+
+test('rejects unknown first positional when knownBackends provided', () => {
+  const known = new Set(['claude']);
+  assert.throws(
+    () => parseCliArgs(['unknown-thing', 'hello'], known),
+    /unknown backend: unknown-thing/,
+  );
+});
+
+test('requires backend when knownBackends provided and no subcommand or flag', () => {
+  const known = new Set(['claude']);
+  assert.throws(
+    () => parseCliArgs(['--model', 'haiku'], known),
+    /backend is required/,
+  );
+});
+
+test('--backend after -- separator does not suppress subcommand', () => {
+  const known = new Set(['claude']);
+  const options = parseCliArgs(['claude', 'hello', '--', '--backend', 'codex'], known);
+  assert.equal(options.backend, 'claude');
+  assert.equal(options.promptArg, 'hello --backend codex');
+});
+
+test('defaults to claude-code when knownBackends not provided', () => {
+  const options = parseCliArgs(['hello']);
+  assert.equal(options.backend, 'claude-code');
 });
 
 test('rejects unsupported options explicitly', () => {
@@ -200,10 +263,16 @@ test('preserves supported Claude Code pass-through flags in order', () => {
   assert.equal(options.promptArg, 'hello');
 });
 
+test('rejects removed -p flag', () => {
+  assert.throws(
+    () => parseCliArgs(['-p', 'hello']),
+    (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.unsupportedOption,
+  );
+});
+
 test('parses command-shim Claude adapter command shape', () => {
   const schema = '{"type":"object","properties":{"status":{"enum":["pass","fail"]}},"required":["status"]}';
   const options = parseCliArgs([
-    '-p',
     '--output-format',
     'stream-json',
     '--verbose',

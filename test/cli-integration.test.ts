@@ -1,12 +1,20 @@
+import { constants } from 'node:fs';
 import assert from 'node:assert/strict';
 import { type ChildProcess, spawn } from 'node:child_process';
-import { mkdtemp, readFile, realpath, stat } from 'node:fs/promises';
+import { access, mkdtemp, readFile, realpath, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { resolveOpenPStateRoot } from '../src/core/state-root.js';
 
 const SESSION_ID = '11111111-1111-4111-8111-111111111111';
+
+test('built cli.js has execute permission', async () => {
+  const cliPath = join(process.cwd(), 'dist', 'src', 'cli.js');
+  await access(cliPath, constants.X_OK);
+  const mode = (await stat(cliPath)).mode;
+  assert.ok(mode & 0o111, `dist/src/cli.js must be executable, got mode ${mode.toString(8)}`);
+});
 
 test('version exits without requiring a prompt or launching backend state', async () => {
   const repoRoot = process.cwd();
@@ -80,6 +88,7 @@ test('version after prompt separator remains prompt text', async () => {
 
   const result = await runCommand(tsxBin, [
     join(repoRoot, 'src/cli.ts'),
+    '--backend', 'claude-code',
     '--resume',
     SESSION_ID,
     '--',
@@ -104,6 +113,7 @@ test('resume without state fails before backend launch and releases the session 
 
   const result = await runCommand(tsxBin, [
     join(repoRoot, 'src/cli.ts'),
+    '--backend', 'claude-code',
     '--resume',
     SESSION_ID,
     'hello',
@@ -149,6 +159,7 @@ test('busy session lock fails before backend launch', async () => {
   await waitForFile(lockPath);
   const result = await runCommand(tsxBin, [
     join(repoRoot, 'src/cli.ts'),
+    '--backend', 'claude-code',
     '--resume',
     SESSION_ID,
     'hello',
@@ -174,6 +185,7 @@ test('debug log records start and error events without stdout noise', async () =
 
   const result = await runCommand(tsxBin, [
     join(repoRoot, 'src/cli.ts'),
+    '--backend', 'claude-code',
     '--resume',
     SESSION_ID,
     '--debug-log',
@@ -207,6 +219,7 @@ test('stream-json input errors do not emit system init on stdout', async () => {
 
   const result = await runCommand(tsxBin, [
     join(repoRoot, 'src/cli.ts'),
+    '--backend', 'claude-code',
     '--input-format',
     'stream-json',
     '--output-format',

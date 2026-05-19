@@ -2006,6 +2006,146 @@ test('worker stream-json result prefers cumulative reasoning suppression over ea
   assert.equal(parsed.at(-1)?.type, 'result');
 });
 
+test('injects turn-level usage into last assistant snapshot when snapshot lacks usage', () => {
+  const output = formatTurnResult({
+    ...RESULT,
+    text: 'final answer',
+    structuredOutput: undefined,
+    diagnostics: {
+      ...RESULT.diagnostics,
+      usage: {
+        inputTokens: 5000,
+        cacheReadInputTokens: 45000,
+        outputTokens: 200,
+      },
+    },
+    assistantEvents: [
+      {
+        message: {
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'partial' }],
+          stop_reason: null,
+          stop_sequence: null,
+          stop_details: null,
+          diagnostics: null,
+          context_management: null,
+        },
+      },
+      {
+        message: {
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'final answer' }],
+          stop_reason: 'end_turn',
+          stop_sequence: null,
+          stop_details: null,
+          diagnostics: null,
+          context_management: null,
+        },
+      },
+    ],
+  }, {
+    outputFormat: 'stream-json',
+    backendSessionId: '11111111-1111-4111-8111-111111111111',
+  });
+
+  const parsed = parseJsonLinesWithoutVolatileIds(output);
+  const assistantEvents = parsed.filter((event) => event.type === 'assistant');
+  assert.ok(assistantEvents.length >= 1);
+  const lastAssistant = assistantEvents.at(-1)!;
+  const message = lastAssistant.message as Record<string, unknown>;
+  const usage = message.usage as Record<string, unknown> | undefined;
+  assert.ok(usage, 'last assistant event must have usage');
+  assert.equal(usage.input_tokens, 5000);
+  assert.equal(usage.cache_read_input_tokens, 45000);
+  assert.equal(usage.output_tokens, 200);
+});
+
+test('does not overwrite existing usage on assistant snapshot', () => {
+  const output = formatTurnResult({
+    ...RESULT,
+    text: 'final answer',
+    structuredOutput: undefined,
+    diagnostics: {
+      ...RESULT.diagnostics,
+      usage: {
+        inputTokens: 5000,
+        cacheReadInputTokens: 45000,
+        outputTokens: 200,
+      },
+    },
+    assistantEvents: [
+      {
+        message: {
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'final answer' }],
+          stop_reason: 'end_turn',
+          stop_sequence: null,
+          stop_details: null,
+          diagnostics: null,
+          context_management: null,
+          usage: {
+            input_tokens: 3000,
+            cache_read_input_tokens: 30000,
+            output_tokens: 100,
+          },
+        },
+      },
+    ],
+  }, {
+    outputFormat: 'stream-json',
+    backendSessionId: '11111111-1111-4111-8111-111111111111',
+  });
+
+  const parsed = parseJsonLinesWithoutVolatileIds(output);
+  const assistantEvents = parsed.filter((event) => event.type === 'assistant');
+  const lastAssistant = assistantEvents.at(-1)!;
+  const message = lastAssistant.message as Record<string, unknown>;
+  const usage = message.usage as Record<string, unknown>;
+  assert.equal(usage.input_tokens, 3000);
+  assert.equal(usage.cache_read_input_tokens, 30000);
+  assert.equal(usage.output_tokens, 100);
+});
+
+test('worker path injects usage into last assistant snapshot when snapshot lacks usage', () => {
+  const output = formatWorkerTurnResult({
+    ...WORKER_RESULT,
+    content: 'worker final',
+    reasoningContent: null,
+    structuredOutput: undefined,
+    assistantEvents: [
+      {
+        message: {
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'worker final' }],
+          stop_reason: 'end_turn',
+          stop_sequence: null,
+          stop_details: null,
+          diagnostics: null,
+          context_management: null,
+        },
+      },
+    ],
+  }, {
+    turnId: 'public-turn-1',
+    model: 'claude-test',
+  });
+
+  const parsed = parseJsonLinesWithoutVolatileIds(output);
+  const assistantEvents = parsed.filter((event) => event.type === 'assistant');
+  assert.ok(assistantEvents.length >= 1);
+  const lastAssistant = assistantEvents.at(-1)!;
+  const message = lastAssistant.message as Record<string, unknown>;
+  const usage = message.usage as Record<string, unknown> | undefined;
+  assert.ok(usage, 'worker assistant event must have usage');
+  assert.equal(usage.input_tokens, 20);
+  assert.equal(usage.cache_read_input_tokens, 5);
+  assert.equal(usage.output_tokens, 4);
+});
+
 function parseJsonLinesWithoutVolatileIds(output: string): Record<string, unknown>[] {
   return output.trim().split('\n').map((line) => stripVolatileIds(JSON.parse(line)) as Record<string, unknown>);
 }

@@ -9,6 +9,7 @@ import { buildLaunchSignature } from '../../core/launch-signature.js';
 import { PersistentProcessManager, type ManagedBackendProcess, type ProcessStartRequest } from '../../core/persistent-process.js';
 import { parseStreamJsonLines } from '../../core/stream-json-parser.js';
 import { prepareWorkerTurnInput } from '../../core/worker-input.js';
+import type { BackendWorkerBridge } from '../../core/backend.js';
 import type { LaunchSignature, WorkerTurnRequest, WorkerTurnResult } from '../../core/worker-types.js';
 import { resolveClaudeCodeBin } from './bin.js';
 import { resolveInteractivePermissionMode } from './permission-mode.js';
@@ -45,7 +46,7 @@ export type ClaudeCodeStdioWorkerStarter = (
   request: ClaudeCodeStdioWorkerProcessStartRequest,
 ) => Promise<ClaudeCodeStdioWorkerProcess>;
 
-export class ClaudeCodeStdioWorkerBridge {
+export class ClaudeCodeStdioWorkerBridge implements BackendWorkerBridge {
   private readonly manager: PersistentProcessManager<ClaudeCodeStdioWorkerProcess>;
 
   constructor(

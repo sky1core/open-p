@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { AssistantContentBlock, AssistantEventSnapshot, TurnResult } from './types.js';
+import type { AssistantContentBlock, AssistantEventSnapshot, BackendUsage, TurnResult } from './types.js';
 import type { WorkerTurnResult } from './worker-types.js';
 
 export type OutputFormat = 'text' | 'json' | 'stream-json';
@@ -94,6 +94,7 @@ export function formatTurnResult(result: TurnResult, options: OutputOptions): st
   const assistantEvents = buildAssistantEventsFromSnapshots(
     assistantSnapshots,
     options.backendSessionId,
+    result.diagnostics.usage,
   );
   const assistantSnapshotsContainResultText = snapshotsContainAssistantText(assistantSnapshots, result.text);
   if (assistantEvents.length > 0) {
@@ -330,6 +331,7 @@ export function formatWorkerTurnResult(result: WorkerTurnResult, event: {
   const assistantEvents = buildAssistantEventsFromSnapshots(
     assistantSnapshots,
     result.sessionId,
+    usage,
   );
   const assistantSnapshotsContainResultText = snapshotsContainAssistantText(assistantSnapshots, result.content);
   const shouldEmitFallbackAssistant = Boolean(fallbackReasoningContent)
@@ -422,18 +424,37 @@ function shouldEmitResultTextFallback(
 function buildAssistantEventsFromSnapshots(
   snapshots: readonly AssistantEventSnapshot[] | undefined,
   sessionId: string,
+  turnUsage?: BackendUsage,
 ): Record<string, unknown>[] {
   if (!snapshots || snapshots.length === 0) {
     return [];
   }
-  return snapshots.map((snapshot) => ({
-    type: 'assistant',
-    session_id: sessionId,
-    parent_tool_use_id: null,
-    uuid: randomUUID(),
-    ...(snapshot.requestId ? { request_id: snapshot.requestId } : {}),
-    message: normalizePublicAssistantMessage(snapshot.message),
-  }));
+  return snapshots.map((snapshot, index) => {
+    const message = normalizePublicAssistantMessage(snapshot.message);
+    if (turnUsage && index === snapshots.length - 1 && !hasUsage(snapshot.message)) {
+      message.usage = buildSnakeUsage(turnUsage);
+    }
+    return {
+      type: 'assistant',
+      session_id: sessionId,
+      parent_tool_use_id: null,
+      uuid: randomUUID(),
+      ...(snapshot.requestId ? { request_id: snapshot.requestId } : {}),
+      message,
+    };
+  });
+}
+
+function hasUsage(message: Record<string, unknown>): boolean {
+  return message.usage !== null && message.usage !== undefined && typeof message.usage === 'object';
+}
+
+function buildSnakeUsage(usage: BackendUsage): Record<string, unknown> {
+  return {
+    input_tokens: usage.inputTokens,
+    cache_read_input_tokens: usage.cacheReadInputTokens,
+    output_tokens: usage.outputTokens,
+  };
 }
 
 function normalizePublicAssistantMessage(message: Record<string, unknown>): Record<string, unknown> {

@@ -3,8 +3,8 @@ import { join } from 'node:path';
 import { EXIT_CODES, OpenPError } from './errors.js';
 import { resolveOpenPStateRoot } from './state-root.js';
 
-export type BackendId = 'claude-code';
-export type ProviderId = 'tmux';
+export type BackendId = string;
+export type ProviderId = string;
 
 export interface SessionState {
   readonly schemaVersion: 1;
@@ -143,8 +143,8 @@ function parseSessionState(value: unknown, path: string): SessionState {
 
   if (
     state.schemaVersion !== 1 ||
-    state.backend !== 'claude-code' ||
-    state.provider !== 'tmux' ||
+    typeof state.backend !== 'string' || !state.backend ||
+    typeof state.provider !== 'string' || !state.provider ||
     typeof state.backendSessionId !== 'string' ||
     typeof state.cwd !== 'string' ||
     !isNullableString(state.lastProviderSessionId) ||

@@ -125,6 +125,53 @@ test('fails closed on malformed state files', async () => {
   );
 });
 
+test('saves and loads session state with non-claude-code backend', async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), 'openp-state-'));
+  const stateRoot = await mkdtemp(join(tmpdir(), 'openp-state-root-'));
+  const store = new SessionStateStore(projectRoot, stateRoot);
+
+  const state = await store.save({
+    backend: 'codex',
+    provider: 'screen',
+    backendSessionId: SESSION_ID,
+    cwd: projectRoot,
+    lastProviderSessionId: null,
+    sessionLogPath: null,
+    lastTurnId: null,
+  });
+
+  assert.equal(state.backend, 'codex');
+  assert.equal(state.provider, 'screen');
+  const loaded = await store.load(SESSION_ID);
+  assert.equal(loaded?.backend, 'codex');
+  assert.equal(loaded?.provider, 'screen');
+});
+
+test('rejects session state with empty backend or provider', async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), 'openp-state-'));
+  const stateRoot = await mkdtemp(join(tmpdir(), 'openp-state-root-'));
+  const store = new SessionStateStore(projectRoot, stateRoot);
+  const path = join(stateRoot, 'sessions', `${SESSION_ID}.json`);
+  await mkdir(join(stateRoot, 'sessions'), { recursive: true });
+
+  await writeFile(path, JSON.stringify({
+    schemaVersion: 1,
+    backend: '',
+    provider: 'tmux',
+    backendSessionId: SESSION_ID,
+    cwd: projectRoot,
+    lastProviderSessionId: null,
+    sessionLogPath: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    lastTurnId: null,
+  }));
+  await assert.rejects(
+    () => store.load(SESSION_ID),
+    (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.sessionState,
+  );
+});
+
 test('rejects unsafe session ids at the state path boundary', async () => {
   const projectRoot = await mkdtemp(join(tmpdir(), 'openp-state-'));
   const stateRoot = await mkdtemp(join(tmpdir(), 'openp-state-root-'));

@@ -5,6 +5,7 @@ import { PersistentProcessManager } from '../../core/persistent-process.js';
 import type { ProcessStartRequest, ManagedBackendProcess } from '../../core/persistent-process.js';
 import { prepareWorkerTurnInput } from '../../core/worker-input.js';
 import { toWorkerTurnResult } from '../../core/worker-result.js';
+import type { BackendWorkerBridge } from '../../core/backend.js';
 import type { WorkerTurnRequest, WorkerTurnResult } from '../../core/worker-types.js';
 import type { TurnResult } from '../../core/types.js';
 import type { PtyProvider } from '../../runners/types.js';
@@ -28,7 +29,7 @@ export interface ClaudeCodeWorkerBridgeStartRequest extends ProcessStartRequest 
 
 export type ClaudeCodeWorkerBridgeStarter = (request: ClaudeCodeWorkerBridgeStartRequest) => Promise<ClaudeCodeManagedProcess>;
 
-export class ClaudeCodeWorkerBridge {
+export class ClaudeCodeWorkerBridge implements BackendWorkerBridge {
   private readonly manager: PersistentProcessManager<ClaudeCodeManagedProcess>;
   private readonly startProcess: ClaudeCodeWorkerBridgeStarter;
 

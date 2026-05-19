@@ -31,19 +31,24 @@ import { SessionStateStore, validateSessionStateCompatibility } from './core/ses
 import { runStreamJsonWorkerLines } from './core/stream-json-worker-runner.js';
 import type { AssistantEventSnapshot } from './core/types.js';
 import { TmuxProvider } from './runners/tmux.js';
-import { ClaudeCodeBackend } from './backends/claude-code/adapter.js';
-import { findClaudeCodeSessionLog } from './backends/claude-code/session-log.js';
-import { ClaudeCodeStdioWorkerBridge } from './backends/claude-code/stdio-worker-bridge.js';
+import { registerBackend, getBackendProvider, getKnownBackendNames, resolveCanonicalBackendId } from './core/backend-registry.js';
+import { claudeCodeBackendProvider } from './backends/claude-code/index.js';
+
+registerBackend(claudeCodeBackendProvider);
 
 const HELP = `openp
 
 PTY-based prompt runner for interactive agent CLIs.
 
 Usage:
-  openp [options] [prompt]
+  openp <backend> [options] [prompt]
+  openp --backend <id> [options] [prompt]
+
+Backends:
+  claude               Claude Code interactive CLI (alias for claude-code)
 
 Options:
-  --backend <id>       Backend id. Default: claude-code
+  --backend <id>       Backend id (alternative to positional)
   --provider <id>      PTY provider. Default: tmux
   --session-id <uuid>  Use or create a backend session with this id
   --resume <uuid>      Resume a backend session with this id
@@ -53,7 +58,6 @@ Options:
   --model <model>      Backend model
   --permission-mode <mode>
   --effort <level>     Backend reasoning effort pass-through
-  -p, --print          Claude print-mode compatibility no-op
   --brief              Backend SendUserMessage compatibility pass-through
   --verbose            Backend verbose mode pass-through
   --append-system-prompt <text>
@@ -80,7 +84,11 @@ async function main(argv: readonly string[]): Promise<number> {
 
   let debugLogPath: string | null = null;
   try {
-    const options = parseCliArgs(argv);
+    const rawOptions = parseCliArgs(argv, getKnownBackendNames());
+    const canonicalBackend = resolveCanonicalBackendId(rawOptions.backend);
+    const options = canonicalBackend !== rawOptions.backend
+      ? { ...rawOptions, backend: canonicalBackend } as typeof rawOptions
+      : rawOptions;
     debugLogPath = options.debugLog;
     if (options.inputFormat === 'stream-json' && options.outputFormat === 'stream-json') {
       return await runStreamJsonWorker(options);
@@ -95,8 +103,9 @@ async function main(argv: readonly string[]): Promise<number> {
       outputFormat: options.outputFormat,
       turnId: options.turnId,
     });
+    const backendProvider = getBackendProvider(options.backend);
     const provider = new TmuxProvider();
-    const backend = new ClaudeCodeBackend(provider);
+    const backend = backendProvider.createBackend(provider);
     const wroteStreamInit = options.outputFormat === 'stream-json';
     const outputMetadata = buildOutputMetadata(options, process.cwd());
     if (wroteStreamInit) {
@@ -338,14 +347,15 @@ async function runStreamJsonWorker(options: CliOptions): Promise<number> {
   process.once('SIGINT', handleSignal);
   process.once('SIGTERM', handleSignal);
   try {
+    const backendProvider = getBackendProvider(options.backend);
     return await runStreamJsonWorkerLines({
       options,
       lines: readStdinLines(abortController.signal),
-      bridge: new ClaudeCodeStdioWorkerBridge(),
+      bridge: backendProvider.createWorkerBridge(),
       projectRoot: process.cwd(),
       outputMetadata: buildOutputMetadata(options, process.cwd()),
       signal: abortController.signal,
-      resolveSessionLogPath: findClaudeCodeSessionLog,
+      resolveSessionLogPath: (sessionId, cwd) => backendProvider.resolveSessionLogPath(sessionId, cwd),
       write: (chunk) => process.stdout.write(chunk),
     });
   } finally {

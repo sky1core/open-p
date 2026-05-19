@@ -71,7 +71,7 @@ async function runStreamJsonWorkerLinesWithLock(input: {
   const stateStore = input.stateStore ?? new SessionStateStore(input.projectRoot);
   const lockStore = input.lockStore ?? new SessionLockStore(input.projectRoot);
   const expectedState = {
-    backend: 'claude-code' as const,
+    backend: input.options.backend,
     provider: input.options.provider,
     backendSessionId: input.options.backendSessionId,
     cwd: input.projectRoot,
@@ -359,7 +359,7 @@ async function saveStreamWorkerSessionState(
   lastTurnId: string | null,
 ): Promise<void> {
   await stateStore.save({
-    backend: 'claude-code',
+    backend: input.options.backend,
     provider: input.options.provider,
     backendSessionId: input.options.backendSessionId,
     cwd: input.projectRoot,
