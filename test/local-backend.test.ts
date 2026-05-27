@@ -5,11 +5,11 @@ import {
   buildLocalClaudeCodeDescriptor,
   buildLocalClaudeCodeEnv,
   validateLocalBackendId,
-} from '../src/backends/claude-code/local-backend.js';
+} from '../src/backends/claude/local-backend.js';
 
 test('builds isolated child env for local Claude Code backend', () => {
   const env = buildLocalClaudeCodeEnv({
-    id: 'local-claude-code',
+    id: 'local-claude',
     anthropicBaseUrl: 'http://127.0.0.1:9999',
   });
 
@@ -18,9 +18,9 @@ test('builds isolated child env for local Claude Code backend', () => {
   });
 });
 
-test('supports legacy baseUrl alias', () => {
+test('supports legacy baseUrl field', () => {
   const env = buildLocalClaudeCodeEnv({
-    id: 'local-claude-code',
+    id: 'local-claude',
     baseUrl: 'http://127.0.0.1:8888',
   });
 
@@ -31,7 +31,7 @@ test('supports legacy baseUrl alias', () => {
 
 test('builds local descriptor metadata from configured models', () => {
   const descriptor = buildLocalClaudeCodeDescriptor({
-    id: 'local-claude-code',
+    id: 'local-claude',
     label: 'Local Claude Code',
     defaultModel: 'local-sonnet',
     models: [
@@ -44,7 +44,7 @@ test('builds local descriptor metadata from configured models', () => {
     ],
   });
 
-  assert.equal(descriptor.id, 'local-claude-code');
+  assert.equal(descriptor.id, 'local-claude');
   assert.equal(descriptor.label, 'Local Claude Code');
   assert.equal(descriptor.defaultModel, 'local-sonnet');
   assert.deepEqual(descriptor.models, ['local-sonnet']);
@@ -53,12 +53,13 @@ test('builds local descriptor metadata from configured models', () => {
   assert.deepEqual(descriptor.reasoningEffortsByModel['local-sonnet'], ['low', 'medium', 'high']);
   assert.equal(descriptor.capabilities.persistentProcess, true);
   assert.equal(descriptor.capabilities.streaming, true);
+  assert.equal(descriptor.capabilities.backgroundAssistant, false);
   assert.equal(descriptor.capabilities.streamingGranularity, 'subturn');
 });
 
 test('builds a caller-ready local backend runtime for WorkerBridge defaults', () => {
   const runtime = buildLocalClaudeCodeBackendRuntime({
-    id: 'local-claude-code',
+    id: 'local-claude',
     anthropicBaseUrl: 'http://127.0.0.1:9999',
     defaultModel: 'local-sonnet',
     models: [
@@ -69,8 +70,8 @@ test('builds a caller-ready local backend runtime for WorkerBridge defaults', ()
     ],
   });
 
-  assert.equal(runtime.id, 'local-claude-code');
-  assert.equal(runtime.descriptor.id, 'local-claude-code');
+  assert.equal(runtime.id, 'local-claude');
+  assert.equal(runtime.descriptor.id, 'local-claude');
   assert.deepEqual(runtime.workerDefaults, {
     local: true,
     env: {
@@ -88,7 +89,7 @@ test('fails closed when defaultModel is not one of the configured models', () =>
   assert.throws(
     () =>
       buildLocalClaudeCodeDescriptor({
-        id: 'local-claude-code',
+        id: 'local-claude',
         defaultModel: 'missing-model',
         models: [{ id: 'local-sonnet' }],
       }),
@@ -98,7 +99,7 @@ test('fails closed when defaultModel is not one of the configured models', () =>
   assert.throws(
     () =>
       buildLocalClaudeCodeBackendRuntime({
-        id: 'local-claude-code',
+        id: 'local-claude',
         defaultModel: 'missing-model',
         models: [{ id: 'local-sonnet' }],
       }),

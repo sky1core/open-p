@@ -7,7 +7,7 @@ export interface BuildLaunchSignatureInput {
   readonly model?: string | null;
   readonly reasoningEffort?: string | null;
   readonly executionMode?: string | null;
-  readonly appendSystemPrompt?: string | null;
+  readonly tools?: string | null;
   readonly jsonSchema?: string | null;
   readonly env?: Readonly<Record<string, string>>;
   readonly local?: boolean;
@@ -21,7 +21,7 @@ export function buildLaunchSignature(input: BuildLaunchSignatureInput): LaunchSi
     model: input.model ?? null,
     reasoningEffort: input.reasoningEffort ?? null,
     executionMode: input.executionMode ?? null,
-    appendSystemPrompt: input.appendSystemPrompt ?? null,
+    tools: input.tools ?? null,
     jsonSchema: input.jsonSchema ?? null,
     env: sortEnv(input.env ?? {}),
     local: input.local ?? false,
@@ -40,7 +40,7 @@ export function stableLaunchSignatureKey(signature: LaunchSignature): string {
     model: signature.model,
     reasoningEffort: signature.reasoningEffort,
     executionMode: signature.executionMode,
-    appendSystemPrompt: signature.appendSystemPrompt,
+    tools: signature.tools,
     jsonSchema: signature.jsonSchema,
     env: sortEnv(signature.env),
     local: signature.local,

@@ -1,14 +1,8 @@
-# Markdown is private by default. Whitelist only public user-facing docs.
 *.md
 !/README.md
 
 .agents/
 
-# Development docs are private. Additional public user docs may live under docs/user/.
-docs/**
-!docs/
-!docs/user/
-!docs/user/**
 *.local.md
 
 node_modules/

@@ -482,12 +482,12 @@ test('discard quarantines a session when graceful shutdown leaves the process al
 
 function signatureFor(model: string): LaunchSignature {
   return buildLaunchSignature({
-    backendId: 'claude-code',
+    backendId: 'claude',
     bin: 'claude',
     binArgs: [],
     model,
     reasoningEffort: 'medium',
-    executionMode: 'bypassPermissions',
+    executionMode: 'danger-full-access',
     env: {},
     local: false,
   });

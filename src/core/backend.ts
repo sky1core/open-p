@@ -14,7 +14,6 @@ export interface BackendWorkerBridge {
 
 export interface BackendProvider {
   readonly id: string;
-  readonly aliases: readonly string[];
   readonly descriptor: BackendDescriptor;
   createBackend(provider: PtyProvider): Backend;
   createWorkerBridge(): BackendWorkerBridge;

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
-import { extractClaudeCodeIntermediateContent, extractClaudeCodeIntermediateText, parseClaudeCodeJsonlTurn } from '../src/backends/claude-code/turn-parser.js';
+import { extractClaudeCodeIntermediateContent, extractClaudeCodeIntermediateText, parseClaudeCodeJsonlTurn } from '../src/backends/claude/turn-parser.js';
 import { EXIT_CODES, OpenPError } from '../src/core/errors.js';
 
 const TURN_ID = 'turn-1';
@@ -106,7 +106,7 @@ test('returns null until completion metadata is present', () => {
   ], TURN_ID), null);
 });
 
-test('parses final assistant text appended after completion metadata', () => {
+test('parses result assistant text appended after completion metadata', () => {
   const result = parseClaudeCodeJsonlTurn([
     userLine('hello'),
     assistantLine([{ type: 'thinking', thinking: 'working' }], undefined, 'end_turn'),
@@ -118,7 +118,7 @@ test('parses final assistant text appended after completion metadata', () => {
   assert.equal(result?.diagnostics.durationMs, 100);
 });
 
-test('does not treat intermediate assistant text as reasoning when it differs from final answer', () => {
+test('does not treat intermediate assistant text as reasoning when it differs from result answer', () => {
   const result = parseClaudeCodeJsonlTurn([
     userLine('hello'),
     assistantLine([{ type: 'text', text: 'working' }]),
@@ -126,7 +126,7 @@ test('does not treat intermediate assistant text as reasoning when it differs fr
     durationLine(100),
   ], TURN_ID);
 
-  assert.equal(result?.text, 'ok');
+  assert.equal(result?.text, 'working\n\nok');
   assert.equal(result?.reasoningContent, null);
 });
 
@@ -161,6 +161,101 @@ test('publishes the current JSONL assistant text as intermediate', () => {
 
   assert.equal(extractClaudeCodeIntermediateText(lines), 'could be final');
   assert.equal(parseClaudeCodeJsonlTurn([...lines, durationLine(100)], TURN_ID)?.text, 'could be final');
+});
+
+test('accumulates Claude Code session-log assistant text segments into result text', () => {
+  const lines = [
+    userLine('hello'),
+    assistantLine([{ type: 'text', text: 'A' }]),
+    assistantLine([{ type: 'text', text: 'B' }]),
+    assistantLine([{ type: 'text', text: 'C' }], undefined, 'end_turn'),
+  ];
+
+  assert.equal(extractClaudeCodeIntermediateContent(lines, { includeTerminalAssistant: true }).text, 'A\n\nB\n\nC');
+  assert.equal(parseClaudeCodeJsonlTurn([...lines, durationLine(100)], TURN_ID)?.text, 'A\n\nB\n\nC');
+});
+
+test('replaces cumulative Claude Code session-log assistant text snapshots', () => {
+  const lines = [
+    userLine('hello'),
+    assistantLine([{ type: 'text', text: 'A' }], undefined, undefined, undefined, undefined, 'msg-one'),
+    assistantLine([{ type: 'text', text: 'A\n\nB' }], undefined, undefined, undefined, undefined, 'msg-one'),
+    assistantLine([{ type: 'text', text: 'A\n\nB\n\nC' }], undefined, 'end_turn', undefined, undefined, 'msg-one'),
+  ];
+
+  assert.equal(extractClaudeCodeIntermediateContent(lines, { includeTerminalAssistant: true }).text, 'A\n\nB\n\nC');
+  assert.equal(parseClaudeCodeJsonlTurn([...lines, durationLine(100)], TURN_ID)?.text, 'A\n\nB\n\nC');
+});
+
+test('keeps idless prefix-compatible Claude Code assistant segments separate', () => {
+  const lines = [
+    userLine('hello'),
+    assistantLine([{ type: 'text', text: 'A' }]),
+    assistantLine([{ type: 'text', text: 'A again' }]),
+    assistantLine([{ type: 'text', text: 'C' }], undefined, 'end_turn'),
+  ];
+
+  assert.equal(parseClaudeCodeJsonlTurn([...lines, durationLine(100)], TURN_ID)?.text, 'A\n\nA again\n\nC');
+});
+
+test('keeps idless newline-prefix-compatible Claude Code assistant segments separate', () => {
+  const lines = [
+    userLine('hello'),
+    assistantLine([{ type: 'text', text: 'A' }]),
+    assistantLine([{ type: 'text', text: 'A\n\nB' }]),
+  ];
+
+  assert.equal(parseClaudeCodeJsonlTurn([...lines, durationLine(100)], TURN_ID)?.text, 'A\n\nA\n\nB');
+});
+
+test('replaces prior same-message Claude Code tool-use answer snapshot without dropping it', () => {
+  const lines = [
+    userLine('hello'),
+    assistantLine([{ type: 'text', text: '도구를' }], undefined, undefined, undefined, undefined, 'msg-tool'),
+    assistantLine([
+      { type: 'text', text: '도구를 확인합니다.' },
+      { type: 'tool_use', name: 'Read', id: 'toolu_1', input: { file_path: 'a.txt' } },
+    ], undefined, 'tool_use', undefined, undefined, 'msg-tool'),
+    assistantLine([{ type: 'text', text: '최종 답변입니다.' }], undefined, 'end_turn', undefined, undefined, 'msg-final'),
+    durationLine(100),
+  ];
+
+  assert.equal(parseClaudeCodeJsonlTurn(lines, TURN_ID)?.text, '도구를 확인합니다.\n\n최종 답변입니다.');
+  assert.equal(
+    extractClaudeCodeIntermediateContent(lines, { includeTerminalAssistant: true }).text,
+    '도구를 확인합니다.\n\n최종 답변입니다.',
+  );
+});
+
+test('treats terminal Claude Code assistant text as a boundary before later text', () => {
+  const lines = [
+    userLine('hello'),
+    assistantLine([{ type: 'text', text: 'A' }], undefined, 'end_turn'),
+    assistantLine([{ type: 'text', text: 'A again' }]),
+  ];
+
+  assert.equal(parseClaudeCodeJsonlTurn([...lines, durationLine(100)], TURN_ID)?.text, 'A\n\nA again');
+});
+
+test('keeps duplicate Claude Code assistant text after a terminal boundary', () => {
+  const lines = [
+    userLine('hello'),
+    assistantLine([{ type: 'text', text: 'A' }], undefined, 'end_turn', undefined, undefined, 'msg-one'),
+    assistantLine([{ type: 'text', text: 'A' }], undefined, undefined, undefined, undefined, 'msg-two'),
+  ];
+
+  assert.equal(parseClaudeCodeJsonlTurn([...lines, durationLine(100)], TURN_ID)?.text, 'A\n\nA');
+});
+
+test('keeps terminal boundary from duplicate Claude Code assistant metadata snapshots', () => {
+  const lines = [
+    userLine('hello'),
+    assistantLine([{ type: 'text', text: 'A' }], undefined, undefined, undefined, undefined, 'msg-one'),
+    assistantLine([{ type: 'text', text: 'A' }], undefined, 'end_turn', undefined, undefined, 'msg-one'),
+    assistantLine([{ type: 'text', text: 'A\n\nB' }], undefined, undefined, undefined, undefined, 'msg-one'),
+  ];
+
+  assert.equal(parseClaudeCodeJsonlTurn([...lines, durationLine(100)], TURN_ID)?.text, 'A\n\nA\n\nB');
 });
 
 test('accumulates intermediate reasoning across assistant subturns', () => {
@@ -204,43 +299,43 @@ test('does not mix task-notification assistant text into the active turn result'
 
   const result = parseClaudeCodeJsonlTurn(lines, TURN_ID);
 
-  assert.equal(result?.text, 'ok');
+  assert.equal(result?.text, 'working\n\nok');
   assert.equal(result?.reasoningContent, null);
   assert.equal(extractClaudeCodeIntermediateText(lines), null);
 });
 
-test('keeps active final when task-notification background has parent uuid linkage', () => {
+test('keeps active result when task-notification background has parent uuid linkage', () => {
   const result = parseClaudeCodeJsonlTurn([
     userLine('hello', 'user-1'),
     assistantLine([{ type: 'text', text: 'working' }], undefined, undefined, 'assistant-progress', 'user-1'),
     taskNotificationLine('background task complete', 'background-user', 'assistant-progress'),
-    assistantLine([{ type: 'text', text: 'active final' }], undefined, 'end_turn', 'assistant-final', 'assistant-progress'),
+    assistantLine([{ type: 'text', text: 'active result' }], undefined, 'end_turn', 'assistant-final', 'assistant-progress'),
     assistantLine([{ type: 'text', text: 'background done' }], undefined, 'end_turn', 'background-assistant', 'background-user'),
     durationLine(100),
   ], TURN_ID);
 
-  assert.equal(result?.text, 'active final');
+  assert.equal(result?.text, 'working\n\nactive result');
   assert.equal(result?.reasoningContent, null);
 });
 
-test('keeps parentless active final after a linked background task has ended', () => {
+test('keeps parentless active result after a linked background task has ended', () => {
   const result = parseClaudeCodeJsonlTurn([
     userLine('hello', 'user-1'),
     assistantLine([{ type: 'text', text: 'working' }], undefined, undefined, 'assistant-progress', 'user-1'),
     taskNotificationLine('background task complete', 'background-user', 'assistant-progress'),
     assistantLine([{ type: 'text', text: 'background done' }], undefined, 'end_turn', 'background-assistant', 'background-user'),
-    assistantLine([{ type: 'text', text: 'active final' }], undefined, 'end_turn'),
+    assistantLine([{ type: 'text', text: 'active result' }], undefined, 'end_turn'),
     durationLine(100),
   ], TURN_ID);
 
-  assert.equal(result?.text, 'active final');
+  assert.equal(result?.text, 'working\n\nactive result');
   assert.equal(result?.reasoningContent, null);
   assert.equal(extractClaudeCodeIntermediateText([
     userLine('hello', 'user-1'),
     assistantLine([{ type: 'text', text: 'working' }], undefined, undefined, 'assistant-progress', 'user-1'),
     taskNotificationLine('background task complete', 'background-user', 'assistant-progress'),
     assistantLine([{ type: 'text', text: 'background done' }], undefined, 'end_turn', 'background-assistant', 'background-user'),
-    assistantLine([{ type: 'text', text: 'active final' }], undefined, 'end_turn'),
+    assistantLine([{ type: 'text', text: 'active result' }], undefined, 'end_turn'),
   ]), null);
 });
 
@@ -259,11 +354,11 @@ test('synthetic no-response assistant can close a linked background task without
         stop_sequence: '',
       },
     }),
-    assistantLine([{ type: 'text', text: 'active final' }], undefined, 'end_turn'),
+    assistantLine([{ type: 'text', text: 'active result' }], undefined, 'end_turn'),
     durationLine(100),
   ], TURN_ID);
 
-  assert.equal(result?.text, 'active final');
+  assert.equal(result?.text, 'working\n\nactive result');
   assert.equal(result?.reasoningContent, null);
 });
 
@@ -277,7 +372,7 @@ test('fails closed when task-notification ordering is ambiguous without uuid lin
         origin: { kind: 'task-notification' },
         message: { content: 'task complete' },
       }),
-      assistantLine([{ type: 'text', text: 'maybe active final' }], undefined, 'end_turn'),
+      assistantLine([{ type: 'text', text: 'maybe active result' }], undefined, 'end_turn'),
       durationLine(100),
     ], TURN_ID),
     (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.protocolViolation,
@@ -289,7 +384,7 @@ test('fails closed instead of returning background text when parentless active/b
     () => parseClaudeCodeJsonlTurn([
       userLine('hello'),
       taskNotificationLine('background task complete', 'background-user'),
-      assistantLine([{ type: 'text', text: 'active final' }], undefined, 'end_turn'),
+      assistantLine([{ type: 'text', text: 'active result' }], undefined, 'end_turn'),
       assistantLine([{ type: 'text', text: 'background done' }], undefined, 'end_turn'),
       durationLine(100),
     ], TURN_ID),
@@ -358,7 +453,7 @@ test('preserves Claude Code request id for public assistant event output', () =>
   assert.equal(result?.requestId, 'req_abc123');
 });
 
-test('uses StructuredOutput-only tool input as final text when no assistant text exists', () => {
+test('uses StructuredOutput-only tool input as result text when no assistant text exists', () => {
   const result = parseClaudeCodeJsonlTurn([
     userLine('hello'),
     assistantLine([
@@ -376,7 +471,7 @@ test('uses StructuredOutput-only tool input as final text when no assistant text
   assert.deepEqual(result?.structuredOutput, { ok: true });
 });
 
-test('uses StructuredOutput-only active final during linked background interleave', () => {
+test('uses StructuredOutput-only active result during linked background interleave', () => {
   const result = parseClaudeCodeJsonlTurn([
     userLine('hello', 'user-1'),
     taskNotificationLine('background task complete', 'background-user', 'user-1'),
@@ -395,7 +490,7 @@ test('uses StructuredOutput-only active final during linked background interleav
   assert.deepEqual(result?.structuredOutput, { ok: true });
 });
 
-test('parses final text as structured output when schema mode has no StructuredOutput tool event', () => {
+test('parses result text as structured output when schema mode has no StructuredOutput tool event', () => {
   const result = parseClaudeCodeJsonlTurn([
     userLine('hello'),
     assistantLine([{ type: 'text', text: '{"ok":true}' }], undefined, 'end_turn'),
@@ -405,7 +500,7 @@ test('parses final text as structured output when schema mode has no StructuredO
   assert.deepEqual(result?.structuredOutput, { ok: true });
 });
 
-test('parses a single fenced json final text as structured output in schema mode', () => {
+test('parses a single fenced json result text as structured output in schema mode', () => {
   const result = parseClaudeCodeJsonlTurn([
     userLine('hello'),
     assistantLine([{ type: 'text', text: '```json\n{"ok":true}\n```' }], undefined, 'end_turn'),
@@ -426,7 +521,7 @@ test('rejects fenced json with surrounding prose as structured output fallback',
   );
 });
 
-test('fails closed when schema mode final text is not valid JSON and no StructuredOutput tool event exists', () => {
+test('fails closed when schema mode result text is not valid JSON and no StructuredOutput tool event exists', () => {
   assert.throws(
     () => parseClaudeCodeJsonlTurn([
       userLine('hello'),
@@ -505,7 +600,7 @@ test('preserves Claude Code reasoning block whitespace', () => {
 });
 
 test('parses a redacted live Claude Code JSONL fixture', async () => {
-  const text = await readFile(new URL('./fixtures/claude-code/redacted-live-turn.jsonl', import.meta.url), 'utf8');
+  const text = await readFile(new URL('./fixtures/claude/redacted-live-turn.jsonl', import.meta.url), 'utf8');
   const lines = text.trimEnd().split('\n');
 
   const result = parseClaudeCodeJsonlTurn(lines, 'fixture-turn');
@@ -521,7 +616,7 @@ test('parses a redacted live Claude Code JSONL fixture', async () => {
 });
 
 test('parses a redacted Claude Code reasoning fixture variant', async () => {
-  const text = await readFile(new URL('./fixtures/claude-code/redacted-reasoning-variant.jsonl', import.meta.url), 'utf8');
+  const text = await readFile(new URL('./fixtures/claude/redacted-reasoning-variant.jsonl', import.meta.url), 'utf8');
   const lines = text.trimEnd().split('\n');
 
   const result = parseClaudeCodeJsonlTurn(lines, 'fixture-reasoning-turn');
@@ -537,7 +632,7 @@ test('parses a redacted Claude Code reasoning fixture variant', async () => {
 });
 
 test('fails closed on an unlinked redacted Claude Code task-notification fixture variant', async () => {
-  const text = await readFile(new URL('./fixtures/claude-code/redacted-task-notification-variant.jsonl', import.meta.url), 'utf8');
+  const text = await readFile(new URL('./fixtures/claude/redacted-task-notification-variant.jsonl', import.meta.url), 'utf8');
   const lines = text.trimEnd().split('\n');
 
   assert.throws(
@@ -545,6 +640,56 @@ test('fails closed on an unlinked redacted Claude Code task-notification fixture
     (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.protocolViolation,
   );
   assert.equal(extractClaudeCodeIntermediateText(lines), null);
+});
+
+test('fails when one scoped Claude segment contains multiple caller user turns', () => {
+  assert.throws(
+    () => parseClaudeCodeJsonlTurn([
+      userLine('first line'),
+      userLine('second line'),
+      assistantLine([{ type: 'text', text: 'partial answer' }], undefined, 'end_turn'),
+      durationLine(10),
+    ], TURN_ID),
+    (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.protocolViolation,
+  );
+});
+
+test('does not treat tool_result, meta, or local command user events as caller turns', () => {
+  const result = parseClaudeCodeJsonlTurn([
+    userLine('run tool'),
+    assistantLine([{ type: 'tool_use', id: 'toolu_1', name: 'Read', input: { file_path: 'a.txt' } }], undefined, 'tool_use'),
+    JSON.stringify({
+      type: 'user',
+      message: {
+        role: 'user',
+        content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'tool output' }],
+      },
+    }),
+    JSON.stringify({
+      type: 'user',
+      isMeta: true,
+      message: {
+        role: 'user',
+        content: [{ type: 'text', text: 'local command caveat' }],
+      },
+    }),
+    JSON.stringify({
+      type: 'user',
+      message: {
+        role: 'user',
+        content: '/exit',
+      },
+    }),
+    assistantLine([{ type: 'text', text: 'result answer' }], undefined, 'end_turn'),
+    durationLine(10),
+  ], TURN_ID);
+
+  assert.equal(result?.text, 'result answer');
+  assert.equal(result?.assistantEvents?.length, 3);
+  const toolResultContent = result?.assistantEvents?.[1]?.message.content as any[];
+  assert.equal(toolResultContent[0].type, 'tool_result');
+  assert.equal(toolResultContent[0].tool_use_id, 'toolu_1');
+  assert.equal(toolResultContent[0].content, 'tool output');
 });
 
 function userLine(content: string, uuid?: string, parentUuid?: string): string {
@@ -578,12 +723,14 @@ function assistantLine(
   stopReason?: string,
   uuid?: string,
   parentUuid?: string,
+  messageId?: string,
 ): string {
   return JSON.stringify({
     type: 'assistant',
     ...(uuid ? { uuid } : {}),
     ...(parentUuid ? { parentUuid } : {}),
     message: {
+      ...(messageId ? { id: messageId } : {}),
       ...(usage ? { usage } : {}),
       ...(stopReason ? { stop_reason: stopReason } : {}),
       content,

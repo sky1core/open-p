@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
+import { formatWorkerTurnResult } from '../src/core/output.js';
 import { parseStreamJsonLines } from '../src/core/stream-json-parser.js';
-import { EXIT_CODES, OpenPError } from '../src/core/errors.js';
 
 function line(event: unknown): string {
   return JSON.stringify(event);
 }
 
-test('uses result event as final content and does not treat assistant text as reasoning', () => {
+test('uses result event as result content and does not treat assistant text as reasoning', () => {
   const intermediate: string[] = [];
   const result = parseStreamJsonLines(
     [
@@ -24,7 +25,7 @@ test('uses result event as final content and does not treat assistant text as re
       line({
         type: 'result',
         session_id: 'session-1',
-        result: 'final answer',
+        result: 'result answer',
         num_turns: 1,
         duration_ms: 1234,
         total_cost_usd: 0.01,
@@ -36,7 +37,7 @@ test('uses result event as final content and does not treat assistant text as re
     },
   );
 
-  assert.equal(result?.content, 'final answer');
+  assert.equal(result?.content, 'result answer');
   assert.equal(result?.reasoningContent, null);
   assert.deepEqual(intermediate, ['working']);
   assert.deepEqual(result?.diagnostics, {
@@ -58,6 +59,65 @@ test('uses result event as final content and does not treat assistant text as re
       output_tokens: 5,
     },
   });
+});
+
+test('parses openp streaming snapshots without replaying result assistant as intermediate text', () => {
+  const intermediate: string[] = [];
+  const result = parseStreamJsonLines(
+    [
+      line({
+        openp: {
+          version: 1,
+          form: 'streaming',
+          scope: 'active',
+          output: { answer: 'A' },
+          structuredOutput: null,
+          metadata: {},
+        },
+      }),
+      line({
+        openp: {
+          version: 1,
+          form: 'streaming',
+          scope: 'active',
+          output: { answer: 'AB' },
+          structuredOutput: null,
+          metadata: {},
+        },
+      }),
+      line({
+        openp: {
+          version: 1,
+          form: 'result',
+          scope: 'active',
+          output: {
+            answer: ['AB'],
+            reasoning: [],
+            toolCall: [],
+            toolResult: [],
+          },
+          structuredOutput: null,
+          metadata: {
+            usage: {
+              inputTokens: null,
+              outputTokens: null,
+              cacheReadInputTokens: null,
+            },
+            stopReason: 'end_turn',
+            numTurns: 1,
+            durationMs: 1,
+            totalCostUsd: null,
+          },
+        },
+      }),
+    ],
+    {
+      onIntermediateText: (text) => intermediate.push(text),
+    },
+  );
+
+  assert.equal(result?.content, 'AB');
+  assert.deepEqual(intermediate, ['A', 'AB']);
 });
 
 test('keeps separate assistant text blocks when the later block has the earlier block as a prefix', () => {
@@ -289,6 +349,131 @@ test('treats a textless terminal assistant event as a text boundary', () => {
   assert.deepEqual(intermediate, ['foo', 'foo\n\nfoobar']);
 });
 
+test('publishes and preserves tool-use assistant text as answer text', () => {
+  const intermediate: string[] = [];
+  const result = parseStreamJsonLines(
+    [
+      line({
+        type: 'assistant',
+        message: {
+          id: 'msg_tool',
+          stop_reason: 'tool_use',
+          content: [
+            { type: 'text', text: '도구를 확인합니다.' },
+            { type: 'tool_use', name: 'Read', input: {} },
+          ],
+        },
+      }),
+      line({
+        type: 'assistant',
+        message: {
+          id: 'msg_final',
+          stop_reason: 'end_turn',
+          content: [{ type: 'text', text: '최종 답변입니다.' }],
+        },
+      }),
+      line({ type: 'result', result: '최종 답변입니다.' }),
+    ],
+    {
+      onIntermediateText: (text) => intermediate.push(text),
+    },
+  );
+
+  assert.equal(result?.content, '최종 답변입니다.');
+  assert.deepEqual(result?.diagnostics.toolsUsed, ['Read']);
+  assert.deepEqual(intermediate, [
+    '도구를 확인합니다.',
+    '도구를 확인합니다.\n\n최종 답변입니다.',
+  ]);
+  const assistantEvents = result?.assistantEvents ?? [];
+  assert.equal(assistantEvents.length, 2);
+  assert.deepEqual(assistantTexts(assistantEvents), ['도구를 확인합니다.', '최종 답변입니다.']);
+});
+
+test('formats Claude stdout assistant text and terminal result without duplicate final answer', () => {
+  const { openp } = openPFromClaudeFixture(
+    'redacted-stdout-tool-use-result-repeat.jsonl',
+    'turn-reference-shape',
+  );
+
+  assert.deepEqual(openp.output.answer, [
+    '파일을 읽겠습니다.',
+    '파일에는 `alpha=1`, `beta=2` 두 개의 키-값 쌍이 정의되어 있습니다.',
+  ]);
+  assert.deepEqual(openp.output.toolCall, [{
+    type: 'tool_use',
+    id: 'toolu_redacted_read',
+    name: 'Read',
+    input: { file_path: '/redacted/workspace/data/input.txt' },
+    caller: { type: 'direct' },
+  }]);
+  assert.deepEqual(openp.output.toolResult, [{
+    type: 'tool_result',
+    toolUseId: 'toolu_redacted_read',
+    content: '1\talpha=1\n2\tbeta=2\n3\t',
+  }]);
+});
+
+test('formats redacted Claude long-answer stdout fixture as one complete result answer', () => {
+  const { result, openp } = openPFromClaudeFixture(
+    'redacted-stdout-long-answer-stream.jsonl',
+    'turn-long-answer-reference',
+  );
+
+  assert.equal(openp.output.answer.length, 1);
+  assert.equal(openp.output.answer[0], result.content);
+  assert.equal(openp.output.answer[0].includes('## 7.'), true);
+  assert.equal(openp.output.reasoning.length, 1);
+  assert.equal(openp.output.toolCall.length, 0);
+  assert.equal(openp.output.toolResult.length, 0);
+});
+
+test('formats redacted Claude structured-output stdout fixture without dropping tool metadata', () => {
+  const { openp } = openPFromClaudeFixture(
+    'redacted-stdout-structured-output.jsonl',
+    'turn-structured-reference',
+  );
+
+  assert.equal(openp.output.answer.length, 1);
+  assert.equal(openp.output.answer[0].includes('스키마에 맞는 JSON을 출력했습니다.'), true);
+  assert.equal(openp.output.reasoning.length, 1);
+  assert.deepEqual(openp.output.toolCall.map((toolCall: Record<string, unknown>) => toolCall.name), [
+    'StructuredOutput',
+  ]);
+  assert.deepEqual(openp.output.toolResult, [{
+    type: 'tool_result',
+    toolUseId: 'toolu_redacted_01',
+    content: 'Structured output provided successfully',
+  }]);
+  assert.deepEqual(Object.keys(openp.structuredOutput).sort(), [
+    'answer',
+    'checks',
+    'sessionLog',
+    'stdout',
+  ]);
+});
+
+test('formats redacted Claude complex tool-use stdout fixture with all answers and tool results', () => {
+  const { result, openp } = openPFromClaudeFixture(
+    'redacted-stdout-tool-use-file-complex.jsonl',
+    'turn-tool-use-reference',
+  );
+
+  assert.equal(openp.output.answer.length, 2);
+  assert.equal(openp.output.answer[0], '`data/input.txt`를 읽고 `data/result.txt`를 생성한다.');
+  assert.equal(openp.output.answer[1], result.content);
+  assert.equal(openp.output.answer.filter((answer: string) => answer === result.content).length, 1);
+  assert.equal(openp.output.reasoning.length, 1);
+  assert.deepEqual(openp.output.toolCall.map((toolCall: Record<string, unknown>) => toolCall.name), [
+    'Read',
+    'Write',
+  ]);
+  assert.deepEqual(openp.output.toolResult.map((toolResult: Record<string, unknown>) => toolResult.toolUseId), [
+    'toolu_redacted_01',
+    'toolu_redacted_02',
+  ]);
+});
+
 test('preserves structured output from result events', () => {
   const result = parseStreamJsonLines([
     line({
@@ -336,18 +521,18 @@ test('preserves StructuredOutput tool input before result events', () => {
   assert.deepEqual(result?.diagnostics.toolsUsed, ['StructuredOutput']);
 });
 
-test('does not copy final answer echo into reasoning content', () => {
+test('does not copy result answer echo into reasoning content', () => {
   const result = parseStreamJsonLines([
     line({
       type: 'assistant',
       message: {
-        content: [{ type: 'text', text: 'final answer' }],
+        content: [{ type: 'text', text: 'result answer' }],
       },
     }),
-    line({ type: 'result', result: 'final answer' }),
+    line({ type: 'result', result: 'result answer' }),
   ]);
 
-  assert.equal(result?.content, 'final answer');
+  assert.equal(result?.content, 'result answer');
   assert.equal(result?.reasoningContent, null);
 });
 
@@ -361,7 +546,7 @@ test('preserves stream-json background whitespace without treating answer text a
           content: [{ type: 'text', text: '  active progress\n' }],
         },
       }),
-      line({ type: 'result', result: 'active final' }),
+      line({ type: 'result', result: 'active result' }),
       line({ type: 'user', origin: { kind: 'task-notification' }, message: { content: 'task complete' } }),
       line({
         type: 'assistant',
@@ -381,22 +566,118 @@ test('preserves stream-json background whitespace without treating answer text a
   assert.deepEqual(result?.backgroundTexts, ['  background done\n']);
 });
 
-test('throws protocol violation for empty result content', () => {
-  assert.throws(
-    () => parseStreamJsonLines([
-      line({ type: 'result', result: '' }),
-    ]),
-    (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.protocolViolation,
-  );
+test('treats an empty result event as non-result lifecycle output', () => {
+  assert.equal(parseStreamJsonLines([
+    line({ type: 'result', result: '' }),
+  ]), null);
 });
 
-test('throws protocol violation for whitespace-only result content', () => {
-  assert.throws(
-    () => parseStreamJsonLines([
-      line({ type: 'result', result: '   \n' }),
-    ]),
-    (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.protocolViolation,
-  );
+test('treats a whitespace-only result event as non-result lifecycle output', () => {
+  assert.equal(parseStreamJsonLines([
+    line({ type: 'result', result: '   \n' }),
+  ]), null);
+});
+
+test('does not treat explicit error result text as result content', () => {
+  assert.equal(parseStreamJsonLines([
+    line({
+      type: 'result',
+      subtype: 'error',
+      is_error: true,
+      api_error_status: 500,
+      result: 'backend failed in result text',
+      error: { message: 'backend failed' },
+    }),
+  ]), null);
+});
+
+test('does not treat each explicit error result signal as result content', () => {
+  const cases: ReadonlyArray<{
+    readonly name: string;
+    readonly fields: Record<string, unknown>;
+  }> = [
+    { name: 'is_error', fields: { is_error: true } },
+    { name: 'subtype', fields: { subtype: 'error' } },
+    { name: 'api_error_status', fields: { api_error_status: 500 } },
+    { name: 'error', fields: { error: { message: 'backend failed' } } },
+  ];
+
+  for (const item of cases) {
+    assert.equal(
+      parseStreamJsonLines([
+        line({
+          type: 'result',
+          result: 'backend failed in result text',
+          ...item.fields,
+        }),
+      ]),
+      null,
+      item.name,
+    );
+  }
+});
+
+test('ignores an empty lifecycle result before a later result', () => {
+  const result = parseStreamJsonLines([
+    line({ type: 'system', subtype: 'init', session_id: 'session-1' }),
+    line({ type: 'system', subtype: 'compact_boundary' }),
+    line({ type: 'result', session_id: 'session-1', result: '' }),
+    line({
+      type: 'assistant',
+      session_id: 'session-1',
+      message: {
+        content: [{ type: 'text', text: 'result answer' }],
+        stop_reason: 'end_turn',
+      },
+    }),
+    line({ type: 'result', session_id: 'session-1', result: 'result answer' }),
+  ]);
+
+  assert.equal(result?.content, 'result answer');
+  assert.equal(result?.sessionId, 'session-1');
+});
+
+test('does not let empty lifecycle result diagnostics override a later result', () => {
+  const result = parseStreamJsonLines([
+    line({ type: 'system', subtype: 'init', session_id: 'session-1' }),
+    line({
+      type: 'result',
+      session_id: 'session-1',
+      result: '',
+      num_turns: 99,
+      duration_ms: 999,
+      total_cost_usd: 9,
+      usage: { input_tokens: 100, output_tokens: 200, cache_read_input_tokens: 300 },
+      stop_reason: 'lifecycle',
+    }),
+    line({
+      type: 'assistant',
+      session_id: 'session-1',
+      message: {
+        content: [{ type: 'text', text: 'result answer' }],
+        stop_reason: 'end_turn',
+      },
+    }),
+    line({
+      type: 'result',
+      session_id: 'session-1',
+      result: 'result answer',
+      num_turns: 1,
+      duration_ms: 10,
+      total_cost_usd: 0.01,
+      usage: { input_tokens: 1, output_tokens: 2, cache_read_input_tokens: 3 },
+      stop_reason: 'end_turn',
+    }),
+  ]);
+
+  assert.equal(result?.content, 'result answer');
+  assert.equal(result?.diagnostics.numTurns, 1);
+  assert.equal(result?.diagnostics.durationMs, 10);
+  assert.equal(result?.diagnostics.totalCostUsd, 0.01);
+  assert.equal(result?.diagnostics.inputTokens, 1);
+  assert.equal(result?.diagnostics.outputTokens, 2);
+  assert.equal(result?.diagnostics.cacheReadInputTokens, 3);
+  assert.equal(result?.diagnostics.stopReason, 'end_turn');
 });
 
 test('collects thinking, reasoning, and unique tool use names from assistant messages', () => {
@@ -607,7 +888,7 @@ test('routes task-notification assistant text as background output after active 
           content: [{ type: 'text', text: 'active progress' }],
         },
       }),
-      line({ type: 'result', result: 'active final' }),
+      line({ type: 'result', result: 'active result' }),
       line({ type: 'user', origin: { kind: 'task-notification' }, message: { content: 'task complete' } }),
       line({
         type: 'assistant',
@@ -616,7 +897,7 @@ test('routes task-notification assistant text as background output after active 
           content: [{ type: 'text', text: 'background done' }],
         },
       }),
-      line({ type: 'result', result: 'must not replace active final' }),
+      line({ type: 'result', result: 'must not replace active result' }),
     ],
     {
       onIntermediateText: (text) => intermediate.push(text),
@@ -624,7 +905,7 @@ test('routes task-notification assistant text as background output after active 
     },
   );
 
-  assert.equal(result?.content, 'active final');
+  assert.equal(result?.content, 'active result');
   assert.deepEqual(intermediate, ['active progress']);
   assert.deepEqual(background, ['background done']);
   assert.deepEqual(result?.backgroundTexts, ['background done']);
@@ -684,10 +965,10 @@ test('defers task-notification result without background text until a later acti
     }),
     line({ type: 'user', origin: { kind: 'task-notification' }, message: { content: 'task complete' } }),
     line({ type: 'result', result: 'background result without assistant text', num_turns: 99 }),
-    line({ type: 'result', result: 'active final', num_turns: 1 }),
+    line({ type: 'result', result: 'active result', num_turns: 1 }),
   ]);
 
-  assert.equal(result?.content, 'active final');
+  assert.equal(result?.content, 'active result');
   assert.equal(result?.reasoningContent, null);
   assert.deepEqual(result?.backgroundTexts, []);
   assert.equal(result?.diagnostics.numTurns, 1);
@@ -706,7 +987,7 @@ test('keeps background assistant separate when active result arrives before back
         },
       }),
       line({ type: 'user', origin: { kind: 'task-notification' }, message: { content: 'task complete' } }),
-      line({ type: 'result', result: 'active final', num_turns: 1 }),
+      line({ type: 'result', result: 'active result', num_turns: 1 }),
       line({
         type: 'assistant',
         message: {
@@ -722,7 +1003,7 @@ test('keeps background assistant separate when active result arrives before back
     },
   );
 
-  assert.equal(result?.content, 'active final');
+  assert.equal(result?.content, 'active result');
   assert.equal(result?.reasoningContent, null);
   assert.deepEqual(intermediate, ['active progress']);
   assert.deepEqual(background, ['background after final']);
@@ -742,7 +1023,7 @@ test('keeps tentative active result when background assistant only emits whitesp
         },
       }),
       line({ type: 'user', origin: { kind: 'task-notification' }, message: { content: 'task complete' } }),
-      line({ type: 'result', result: 'active final', num_turns: 1 }),
+      line({ type: 'result', result: 'active result', num_turns: 1 }),
       line({
         type: 'assistant',
         message: {
@@ -757,7 +1038,7 @@ test('keeps tentative active result when background assistant only emits whitesp
     },
   );
 
-  assert.equal(result?.content, 'active final');
+  assert.equal(result?.content, 'active result');
   assert.deepEqual(background, []);
   assert.deepEqual(result?.backgroundTexts, []);
   assert.equal(result?.diagnostics.numTurns, 1);
@@ -820,14 +1101,14 @@ test('skips a matching background result before the later active result', () => 
     }),
     line({
       type: 'result',
-      result: 'active final',
+      result: 'active result',
       num_turns: 1,
       duration_ms: 123,
       total_cost_usd: 0.01,
     }),
   ]);
 
-  assert.equal(result?.content, 'active final');
+  assert.equal(result?.content, 'active result');
   assert.deepEqual(result?.backgroundTexts, ['background done']);
   assert.equal(result?.diagnostics.numTurns, 1);
   assert.equal(result?.diagnostics.durationMs, 123);
@@ -865,14 +1146,14 @@ test('defers a non-matching background result so the later active result wins', 
     }),
     line({
       type: 'result',
-      result: 'active final',
+      result: 'active result',
       num_turns: 1,
       duration_ms: 123,
       total_cost_usd: 0.01,
     }),
   ]);
 
-  assert.equal(result?.content, 'active final');
+  assert.equal(result?.content, 'active result');
   assert.deepEqual(result?.backgroundTexts, ['background text block']);
   assert.equal(result?.diagnostics.numTurns, 1);
   assert.equal(result?.diagnostics.durationMs, 123);
@@ -909,10 +1190,10 @@ test('defers multiple background result pairs before the active result', () => {
       },
     }),
     line({ type: 'result', result: 'background two result', num_turns: 20 }),
-    line({ type: 'result', result: 'active final', num_turns: 1 }),
+    line({ type: 'result', result: 'active result', num_turns: 1 }),
   ]);
 
-  assert.equal(result?.content, 'active final');
+  assert.equal(result?.content, 'active result');
   assert.deepEqual(result?.backgroundTexts, ['background one', 'background two']);
   assert.equal(result?.diagnostics.numTurns, 1);
 });
@@ -936,14 +1217,14 @@ test('defers result that flushes task-notification text until a later active res
         },
       }),
       line({ type: 'result', result: 'background result' }),
-      line({ type: 'result', result: 'active final' }),
+      line({ type: 'result', result: 'active result' }),
     ],
     {
       onBackgroundAssistantText: (text) => background.push(text),
     },
   );
 
-  assert.equal(result?.content, 'active final');
+  assert.equal(result?.content, 'active result');
   assert.equal(result?.reasoningContent, null);
   assert.deepEqual(background, ['background pending']);
   assert.deepEqual(result?.backgroundTexts, ['background pending']);
@@ -964,7 +1245,7 @@ test('does not let task-notification background metadata overwrite active diagno
         ],
       },
     }),
-    line({ type: 'result', result: 'active final' }),
+    line({ type: 'result', result: 'active result' }),
     line({ type: 'user', origin: { kind: 'task-notification' }, message: { content: 'task complete' } }),
     line({
       type: 'assistant',
@@ -982,7 +1263,7 @@ test('does not let task-notification background metadata overwrite active diagno
     line({ type: 'result', result: 'background result' }),
   ]);
 
-  assert.equal(result?.content, 'active final');
+  assert.equal(result?.content, 'active result');
   assert.equal(result?.reasoningContent, 'active thinking');
   assert.deepEqual(result?.backgroundTexts, ['background done']);
   assert.deepEqual(result?.diagnostics.toolsUsed, ['Read']);
@@ -993,7 +1274,7 @@ test('does not let task-notification background metadata overwrite active diagno
   assert.equal(result?.diagnostics.stopReason, 'active_stop');
 });
 
-test('ignores malformed lines, local command noise, unknown events, and missing final result', () => {
+test('ignores malformed lines, local command noise, unknown events, and missing turn result', () => {
   assert.equal(
     parseStreamJsonLines([
       'tmux local noise',
@@ -1003,4 +1284,106 @@ test('ignores malformed lines, local command noise, unknown events, and missing 
     ]),
     null,
   );
+});
+
+function assistantTexts(events: readonly { readonly message: Record<string, unknown> }[]): string[] {
+  return events.flatMap((event) => {
+    const content = event.message.content;
+    if (!Array.isArray(content)) {
+      return [];
+    }
+    return content.flatMap((block) => {
+      if (!block || typeof block !== 'object' || Array.isArray(block)) {
+        return [];
+      }
+      const item = block as Record<string, unknown>;
+      return item.type === 'text' && typeof item.text === 'string' ? [item.text] : [];
+    });
+  });
+}
+
+function openPFromClaudeFixture(fileName: string, turnId: string) {
+  const lines = readFileSync(`test/fixtures/claude/${fileName}`, 'utf8').trim().split('\n');
+  const result = parseStreamJsonLines(lines);
+  assert.ok(result);
+  const openp = JSON.parse(formatWorkerTurnResult({
+    ...result,
+    sessionId: result.sessionId ?? '11111111-1111-4111-8111-111111111111',
+  }, {
+    turnId,
+    backend: 'claude',
+  })).openp;
+  return { result, openp };
+}
+
+test('extracts contextWindow from result event modelUsage', () => {
+  const result = parseStreamJsonLines([
+    line({ type: 'system', subtype: 'init', session_id: 'session-1' }),
+    line({
+      type: 'assistant',
+      message: {
+        model: 'claude-sonnet-4-6',
+        stop_reason: 'end_turn',
+        usage: { input_tokens: 10, cache_read_input_tokens: 0, output_tokens: 5 },
+        content: [{ type: 'text', text: 'hello' }],
+      },
+    }),
+    line({
+      type: 'result',
+      subtype: 'success',
+      session_id: 'session-1',
+      result: 'hello',
+      num_turns: 1,
+      duration_ms: 100,
+      modelUsage: {
+        'claude-sonnet-4-6': { contextWindow: 200_000, maxOutputTokens: 32_000 },
+      },
+    }),
+  ]);
+  assert.ok(result);
+  assert.equal(result.diagnostics.contextWindow, 200_000);
+});
+
+test('extracts contextWindow from modelUsage with model suffix variant', () => {
+  const result = parseStreamJsonLines([
+    line({ type: 'system', subtype: 'init', session_id: 'session-1' }),
+    line({
+      type: 'assistant',
+      message: {
+        model: 'claude-opus-4-7',
+        stop_reason: 'end_turn',
+        usage: { input_tokens: 10, cache_read_input_tokens: 0, output_tokens: 5 },
+        content: [{ type: 'text', text: 'hello' }],
+      },
+    }),
+    line({
+      type: 'result',
+      subtype: 'success',
+      session_id: 'session-1',
+      result: 'hello',
+      num_turns: 1,
+      duration_ms: 100,
+      modelUsage: {
+        'claude-opus-4-7[1m]': { contextWindow: 1_000_000, maxOutputTokens: 64_000 },
+      },
+    }),
+  ]);
+  assert.ok(result);
+  assert.equal(result.diagnostics.contextWindow, 1_000_000);
+});
+
+test('contextWindow is null when backend does not provide modelUsage', () => {
+  const result = parseStreamJsonLines([
+    line({ type: 'system', subtype: 'init', session_id: 'session-1' }),
+    line({
+      type: 'result',
+      subtype: 'success',
+      session_id: 'session-1',
+      result: 'hello',
+      num_turns: 1,
+      duration_ms: 100,
+    }),
+  ]);
+  assert.ok(result);
+  assert.equal(result.diagnostics.contextWindow, null);
 });

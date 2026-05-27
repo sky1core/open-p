@@ -1,10 +1,16 @@
 import { chmod, mkdir, writeFile } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 import { EXIT_CODES, OpenPError } from './errors.js';
+import { resolveOpenPStateRoot } from './state-root.js';
+import { getOpenPVersionInfo } from './version.js';
 
 export interface DebugLogEntry {
   readonly event: string;
   readonly [key: string]: unknown;
+}
+
+export function resolveDefaultDebugLogPath(projectRoot: string, env: NodeJS.ProcessEnv = process.env): string {
+  return join(resolveOpenPStateRoot(projectRoot, env), 'logs', 'debug.jsonl');
 }
 
 export async function appendDebugLog(path: string | null, entry: DebugLogEntry): Promise<void> {
@@ -12,8 +18,11 @@ export async function appendDebugLog(path: string | null, entry: DebugLogEntry):
     return;
   }
 
+  const versionInfo = getOpenPVersionInfo();
   const line = `${JSON.stringify({
     timestamp: new Date().toISOString(),
+    openpVersion: versionInfo.version,
+    ...(versionInfo.gitCommit ? { openpGitCommit: versionInfo.gitCommit } : {}),
     ...entry,
   })}\n`;
 

@@ -1,68 +1,142 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { parseCliArgs, parseStreamJsonPrompt, parseStreamJsonUserEventLine, resolvePromptText } from '../src/core/cli-args.js';
+import {
+  parseCliArgs,
+  parseDebugLogOption,
+  parseVerboseOption,
+  parseStreamJsonPrompt,
+  parseStreamJsonUserEventLine,
+  resolvePromptText,
+} from '../src/core/cli-args.js';
 import { EXIT_CODES, OpenPError } from '../src/core/errors.js';
 
 test('parses supported options and prompt args', () => {
   const options = parseCliArgs([
-    '--session-id',
-    '11111111-1111-4111-8111-111111111111',
     '--timeout',
     '3',
     '--model',
     'haiku',
+    '--effort',
+    'high',
+    '--tools',
+    'Read,Bash',
     'hello',
     'world',
   ]);
 
-  assert.equal(options.backend, 'claude-code');
-  assert.equal(options.provider, 'tmux');
-  assert.equal(options.backendSessionId, '11111111-1111-4111-8111-111111111111');
+  assert.equal(options.backend, 'claude');
+  assert.match(options.backendSessionId, /^[0-9a-f-]{36}$/);
   assert.equal(options.resume, false);
   assert.equal(options.timeoutMs, 3000);
   assert.equal(options.model, 'haiku');
-  assert.equal(options.appendSystemPrompt, null);
+  assert.equal(options.reasoningEffort, 'high');
+  assert.equal(options.tools, 'Read,Bash');
   assert.equal(options.jsonSchema, null);
-  assert.equal(options.includePartialMessages, false);
+  assert.deepEqual(options.debugLog, { kind: 'off' });
+  assert.equal(options.streaming, false);
+  assert.equal(options.verbose, false);
   assert.deepEqual(options.backendArgs, []);
   assert.equal(options.promptArg, 'hello world');
   assert.match(options.turnId, /^[0-9a-f-]{36}$/);
 });
 
+test('parses debug log as default log request without consuming prompt text', () => {
+  const options = parseCliArgs(['--debug-log', 'hello']);
+
+  assert.deepEqual(options.debugLog, { kind: 'default' });
+  assert.equal(options.promptArg, 'hello');
+});
+
+test('parses debug log without a path after other options', () => {
+  const options = parseCliArgs(['--timeout', '0', '--debug-log']);
+
+  assert.equal(options.timeoutMs, 0);
+  assert.deepEqual(options.debugLog, { kind: 'default' });
+  assert.equal(options.promptArg, null);
+});
+
+test('rejects removed debug log path forms', () => {
+  assert.throws(
+    () => parseCliArgs(['--debug-log=']),
+    (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.unsupportedOption,
+  );
+  assert.throws(
+    () => parseCliArgs(['--debug-log=/tmp/openp-debug.jsonl']),
+    (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.unsupportedOption,
+  );
+});
+
+test('treats dash-prefixed token after debug log as another option', () => {
+  assert.throws(
+    () => parseCliArgs(['--debug-log', '-dash-starts-path', 'hello']),
+    /unsupported option: -dash-starts-path/,
+  );
+});
+
+test('pre-scans debug log option for parse-time failures', () => {
+  assert.deepEqual(parseDebugLogOption(['--debug-log', '--badopt']), { kind: 'default' });
+  assert.deepEqual(parseDebugLogOption(['--debug-log=/tmp/openp-debug.jsonl', '--badopt']), { kind: 'off' });
+  assert.deepEqual(parseDebugLogOption(['--debug-log=']), { kind: 'off' });
+  assert.deepEqual(parseDebugLogOption(['--model', 'haiku', '--debug-log', 'hello']), { kind: 'default' });
+});
+
+test('parses verbose as an open-p diagnostic option', () => {
+  const options = parseCliArgs(['--verbose', 'hello']);
+
+  assert.equal(options.verbose, true);
+  assert.deepEqual(options.backendArgs, []);
+  assert.equal(options.promptArg, 'hello');
+});
+
+test('pre-scans verbose option for parse-time failures', () => {
+  assert.equal(parseVerboseOption(['--verbose', '--badopt']), true);
+  assert.equal(parseVerboseOption(['--model', 'haiku', '--verbose']), true);
+  assert.equal(parseVerboseOption(['--', '--verbose']), false);
+  assert.equal(parseVerboseOption(['hello']), false);
+});
+
+test('rejects caller-selected first-turn session ids', () => {
+  assert.throws(
+    () => parseCliArgs(['--session-id', '11111111-1111-4111-8111-111111111111', 'hello']),
+    (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.unsupportedOption,
+  );
+});
+
+test('defaults turn timeout to disabled', () => {
+  const options = parseCliArgs(['hello']);
+
+  assert.equal(options.timeoutMs, 0);
+});
+
 test('accepts backend as first positional subcommand', () => {
-  const known = new Set(['claude', 'claude-code', 'codex']);
+  const known = new Set(['claude', 'codex']);
   const options = parseCliArgs(['claude', 'hello', 'world'], known);
   assert.equal(options.backend, 'claude');
   assert.equal(options.promptArg, 'hello world');
 });
 
-test('accepts backend via --backend flag', () => {
-  const known = new Set(['claude', 'claude-code']);
-  const options = parseCliArgs(['--backend', 'claude-code', 'hello'], known);
-  assert.equal(options.backend, 'claude-code');
+test('accepts public options before backend subcommand', () => {
+  const known = new Set(['claude', 'codex']);
+  const options = parseCliArgs(['--debug-log', '--output-format', 'json', 'claude', 'hello'], known);
+
+  assert.equal(options.backend, 'claude');
+  assert.deepEqual(options.debugLog, { kind: 'default' });
+  assert.equal(options.outputFormat, 'json');
   assert.equal(options.promptArg, 'hello');
 });
 
-test('rejects unknown --backend flag value when knownBackends provided', () => {
-  const known = new Set(['claude', 'claude-code']);
+test('rejects backend option because backend is selected by positional subcommand', () => {
   assert.throws(
-    () => parseCliArgs(['--backend', 'nonexistent', 'hello'], known),
-    /unknown backend: nonexistent/,
+    () => parseCliArgs(['--backend', 'claude', 'hello'], new Set(['claude'])),
+    /unsupported option: --backend/,
   );
 });
 
-test('rejects unsupported provider', () => {
+test('rejects provider option because provider is not a public CLI option', () => {
   assert.throws(
     () => parseCliArgs(['--provider', 'screen', 'hello']),
-    /unsupported provider: screen/,
+    /unsupported option: --provider/,
   );
-});
-
-test('--backend flag prevents subcommand consumption', () => {
-  const known = new Set(['claude', 'codex']);
-  const options = parseCliArgs(['--backend', 'codex', 'claude', 'hello'], known);
-  assert.equal(options.backend, 'codex');
-  assert.equal(options.promptArg, 'claude hello');
 });
 
 test('rejects unknown first positional when knownBackends provided', () => {
@@ -73,7 +147,7 @@ test('rejects unknown first positional when knownBackends provided', () => {
   );
 });
 
-test('requires backend when knownBackends provided and no subcommand or flag', () => {
+test('requires backend when knownBackends provided and no subcommand', () => {
   const known = new Set(['claude']);
   assert.throws(
     () => parseCliArgs(['--model', 'haiku'], known),
@@ -81,16 +155,16 @@ test('requires backend when knownBackends provided and no subcommand or flag', (
   );
 });
 
-test('--backend after -- separator does not suppress subcommand', () => {
+test('backend-like option after -- separator remains prompt text', () => {
   const known = new Set(['claude']);
   const options = parseCliArgs(['claude', 'hello', '--', '--backend', 'codex'], known);
   assert.equal(options.backend, 'claude');
   assert.equal(options.promptArg, 'hello --backend codex');
 });
 
-test('defaults to claude-code when knownBackends not provided', () => {
+test('defaults to claude when knownBackends not provided', () => {
   const options = parseCliArgs(['hello']);
-  assert.equal(options.backend, 'claude-code');
+  assert.equal(options.backend, 'claude');
 });
 
 test('rejects unsupported options explicitly', () => {
@@ -100,31 +174,62 @@ test('rejects unsupported options explicitly', () => {
   );
 });
 
+test('rejects missing reasoning effort value', () => {
+  assert.throws(
+    () => parseCliArgs(['--effort']),
+    (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.usage,
+  );
+});
+
+test('parses public tool allowlist including empty disable-all value', () => {
+  assert.equal(parseCliArgs(['--tools', 'Read,Grep', 'hello']).tools, 'Read,Grep');
+  assert.equal(parseCliArgs(['--tools', '', 'hello']).tools, '');
+  assert.throws(
+    () => parseCliArgs(['--tools']),
+    (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.usage,
+  );
+});
+
 test('parses structured output formats explicitly', () => {
   const schema = '{"type":"object"}';
   const options = parseCliArgs(['--output-format', 'json', '--json-schema', schema, 'hello']);
-  const streamOptions = parseCliArgs(['--output-format', 'stream-json', '--include-partial-messages', 'hello']);
+  const streamOptions = parseCliArgs(['--output-format', 'stream-json', '--streaming', 'hello']);
 
   assert.equal(options.outputFormat, 'json');
   assert.equal(options.jsonSchema, schema);
   assert.equal(options.promptArg, 'hello');
   assert.equal(streamOptions.outputFormat, 'stream-json');
-  assert.equal(streamOptions.includePartialMessages, true);
+  assert.equal(streamOptions.streaming, true);
   assert.equal(streamOptions.promptArg, 'hello');
   assert.deepEqual(streamOptions.backendArgs, []);
 });
 
-test('parses append system prompt separately from backend pass-through flags', () => {
-  const options = parseCliArgs([
-    '--append-system-prompt',
-    'caller rules',
-    '--system-prompt',
-    'system replacement',
-    'hello',
-  ]);
+test('parses deprecated include partial messages alias as streaming', () => {
+  const streamOptions = parseCliArgs(['--output-format', 'stream-json', '--include-partial-messages', 'hello']);
 
-  assert.equal(options.appendSystemPrompt, 'caller rules');
-  assert.deepEqual(options.backendArgs, ['--system-prompt', 'system replacement']);
+  assert.equal(streamOptions.outputFormat, 'stream-json');
+  assert.equal(streamOptions.streaming, true);
+  assert.equal(streamOptions.promptArg, 'hello');
+});
+
+test('parses streaming together with structured output because streaming and result are separate', () => {
+  const schema = '{"type":"object"}';
+  const options = parseCliArgs(['--output-format', 'stream-json', '--streaming', '--json-schema', schema, 'hello']);
+
+  assert.equal(options.outputFormat, 'stream-json');
+  assert.equal(options.streaming, true);
+  assert.equal(options.jsonSchema, schema);
+});
+
+test('rejects raw Claude system prompt options as public openp options', () => {
+  assert.throws(
+    () => parseCliArgs(['--system-prompt', 'system replacement', 'hello']),
+    /unsupported option: --system-prompt/,
+  );
+  assert.throws(
+    () => parseCliArgs(['--append-system-prompt', 'extra rules', 'hello']),
+    /unsupported option: --append-system-prompt/,
+  );
 });
 
 test('rejects malformed json schema before launching backend', () => {
@@ -133,8 +238,12 @@ test('rejects malformed json schema before launching backend', () => {
     /--json-schema requires a JSON object/,
   );
   assert.throws(
+    () => parseCliArgs(['--streaming', 'hello']),
+    /--streaming requires --output-format stream-json/,
+  );
+  assert.throws(
     () => parseCliArgs(['--include-partial-messages', 'hello']),
-    /--include-partial-messages requires --output-format stream-json/,
+    /--streaming requires --output-format stream-json/,
   );
 });
 
@@ -225,44 +334,6 @@ test('preserves timeout zero as disabled timeout', () => {
   assert.equal(options.timeoutMs, 0);
 });
 
-test('preserves supported Claude Code pass-through flags in order', () => {
-  const options = parseCliArgs([
-    '--verbose',
-    '--brief',
-    '--allowedTools',
-    'Bash',
-    '--allowed-tools',
-    'Read',
-    '--add-dir',
-    '/tmp/one',
-    '--effort',
-    'medium',
-    '--mcp-config',
-    '/tmp/mcp.json',
-    '--add-dir',
-    '/tmp/two',
-    'hello',
-  ]);
-
-  assert.deepEqual(options.backendArgs, [
-    '--verbose',
-    '--brief',
-    '--allowedTools',
-    'Bash',
-    '--allowed-tools',
-    'Read',
-    '--add-dir',
-    '/tmp/one',
-    '--effort',
-    'medium',
-    '--mcp-config',
-    '/tmp/mcp.json',
-    '--add-dir',
-    '/tmp/two',
-  ]);
-  assert.equal(options.promptArg, 'hello');
-});
-
 test('rejects removed -p flag', () => {
   assert.throws(
     () => parseCliArgs(['-p', 'hello']),
@@ -270,41 +341,60 @@ test('rejects removed -p flag', () => {
   );
 });
 
-test('parses command-shim Claude adapter command shape', () => {
+test('parses command-shim Claude adapter command shape without Claude-only passthrough', () => {
   const schema = '{"type":"object","properties":{"status":{"enum":["pass","fail"]}},"required":["status"]}';
   const options = parseCliArgs([
     '--output-format',
     'stream-json',
-    '--verbose',
-    '--permission-mode',
-    'plan',
-    '--tools',
-    'Read,Grep,Glob',
+    '--dangerously-skip-permissions',
     '--json-schema',
     schema,
   ]);
 
   assert.equal(options.promptArg, null);
   assert.equal(options.outputFormat, 'stream-json');
-  assert.equal(options.permissionMode, 'plan');
+  assert.equal(options.permissionMode, 'danger-full-access');
   assert.equal(options.jsonSchema, schema);
-  assert.deepEqual(options.backendArgs, ['--verbose', '--tools', 'Read,Grep,Glob']);
+  assert.deepEqual(options.backendArgs, []);
 });
 
-test('preserves explicit empty pass-through flag values', () => {
-  const options = parseCliArgs(['--tools', '', 'hello']);
+test('rejects removed Claude-only pass-through flags', () => {
+  const valueFlags = [
+    '--allowedTools',
+    '--allowed-tools',
+    '--disallowedTools',
+    '--disallowed-tools',
+    '--mcp-config',
+    '--settings',
+    '--setting-sources',
+    '--add-dir',
+    '--permission-mode',
+  ];
+  for (const flag of valueFlags) {
+    assert.throws(
+      () => parseCliArgs([flag, 'value', 'hello']),
+      new RegExp(`unsupported option: ${flag}`),
+    );
+  }
 
-  assert.deepEqual(options.backendArgs, ['--tools', '']);
-  assert.equal(options.promptArg, 'hello');
+  for (const flag of ['--allow-dangerously-skip-permissions', '--brief']) {
+    assert.throws(
+      () => parseCliArgs([flag, 'hello']),
+      new RegExp(`unsupported option: ${flag}`),
+    );
+  }
 });
 
-test('rejects non-uuid session ids before they are used as state paths', () => {
+test('rejects path-unsafe resume ids before they are used as state paths', () => {
   assert.throws(
-    () => parseCliArgs(['--session-id', '../outside', 'hello']),
+    () => parseCliArgs(['--resume', '../outside', 'hello']),
     (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.usage,
   );
-  assert.throws(
-    () => parseCliArgs(['--resume', 'not-a-uuid', 'hello']),
-    (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.usage,
-  );
+});
+
+test('accepts opaque resume ids generated by backends', () => {
+  const options = parseCliArgs(['--resume', 'agent-session_01:opaque', 'hello']);
+
+  assert.equal(options.resume, true);
+  assert.equal(options.backendSessionId, 'agent-session_01:opaque');
 });

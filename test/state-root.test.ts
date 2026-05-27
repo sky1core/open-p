@@ -13,11 +13,11 @@ test('default state root is outside the target project tree', async () => {
   assert.match(stateRoot, /open-p\/workspaces\/[0-9a-f]{32}$/);
 });
 
-test('OPENP_STATE_DIR overrides the base state root while keeping workspace namespacing', async () => {
+test('XDG_STATE_HOME supplies the standard state base while keeping workspace namespacing', async () => {
   const projectRoot = await mkdtemp(join(tmpdir(), 'openp-workspace-'));
   const baseStateRoot = await mkdtemp(join(tmpdir(), 'openp-state-base-'));
-  const stateRoot = resolveOpenPStateRoot(projectRoot, { OPENP_STATE_DIR: baseStateRoot });
+  const stateRoot = resolveOpenPStateRoot(projectRoot, { XDG_STATE_HOME: baseStateRoot });
 
   assert.equal(stateRoot.startsWith(baseStateRoot), true);
-  assert.match(stateRoot, /workspaces\/[0-9a-f]{32}$/);
+  assert.match(stateRoot, /open-p\/workspaces\/[0-9a-f]{32}$/);
 });

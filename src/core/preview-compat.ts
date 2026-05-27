@@ -1,14 +1,14 @@
-export function isPreviewCompatibleWithFinalText(preview: string | null, finalText: string): boolean {
-  if (!preview || !finalText) {
+export function isPreviewCompatibleWithResultText(preview: string | null, resultText: string): boolean {
+  if (!preview || !resultText) {
     return false;
   }
   const normalizedPreview = normalizeComparableText(preview);
   if (!normalizedPreview) {
     return false;
   }
-  const normalizedFinal = normalizeComparableText(finalText);
-  const normalizedRenderedFinal = normalizeComparableText(renderMarkdownForTerminalComparison(finalText));
-  return normalizedFinal.startsWith(normalizedPreview) || normalizedRenderedFinal.startsWith(normalizedPreview);
+  const normalizedResult = normalizeComparableText(resultText);
+  const normalizedRenderedResult = normalizeComparableText(renderMarkdownForTerminalComparison(resultText));
+  return normalizedResult.startsWith(normalizedPreview) || normalizedRenderedResult.startsWith(normalizedPreview);
 }
 
 function normalizeComparableText(value: string): string {

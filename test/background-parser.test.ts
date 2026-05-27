@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { ClaudeCodeBackgroundRouter, isClaudeCodeTaskNotificationLine } from '../src/backends/claude-code/background-parser.js';
+import { ClaudeCodeBackgroundRouter, isClaudeCodeTaskNotificationLine } from '../src/backends/claude/background-parser.js';
 
 function line(event: unknown): string {
   return JSON.stringify(event);
@@ -65,7 +65,7 @@ test('does not route active assistant text with a non-background parent', () => 
     parentUuid: 'active-parent',
     message: {
       stop_reason: 'end_turn',
-      content: [{ type: 'text', text: 'active final' }],
+      content: [{ type: 'text', text: 'active result' }],
     },
   })), []);
   assert.deepEqual(router.consumeLine(line({
@@ -91,7 +91,7 @@ test('does not route parentless assistant text after task-notification', () => {
     type: 'assistant',
     message: {
       stop_reason: 'end_turn',
-      content: [{ type: 'text', text: 'active final or background text' }],
+      content: [{ type: 'text', text: 'active result or background text' }],
     },
   })), []);
 });

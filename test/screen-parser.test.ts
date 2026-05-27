@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { extractClaudeCodeScreenAssistantText } from '../src/backends/claude-code/screen-parser.js';
+import { extractClaudeCodeScreenAssistantText } from '../src/backends/claude/screen-parser.js';
 
 test('extracts the latest Claude Code assistant text from a tmux screen capture', () => {
   const screen = [

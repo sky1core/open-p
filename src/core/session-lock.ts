@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, unlink, writeFile, chmod } from 'node:fs/promises';
 import { join } from 'node:path';
 import { EXIT_CODES, OpenPError } from './errors.js';
+import { isSafeSessionId } from './session-id.js';
 import { resolveOpenPStateRoot } from './state-root.js';
 
 export interface SessionLock {
@@ -162,7 +163,7 @@ function isProcessAlive(pid: number): boolean {
 }
 
 function assertValidSessionId(sessionId: string): void {
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(sessionId)) {
+  if (!isSafeSessionId(sessionId)) {
     throw new OpenPError(`invalid session id for lock path: ${sessionId}`, EXIT_CODES.sessionState);
   }
 }

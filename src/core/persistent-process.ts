@@ -117,6 +117,22 @@ export class PersistentProcessManager<TProcess extends ManagedBackendProcess> {
     await this.shutdownTrackedProcess(sessionId, tracked);
   }
 
+  rekey(oldSessionId: string, newSessionId: string, process: TProcess): void {
+    if (oldSessionId === newSessionId) {
+      return;
+    }
+    const tracked = this.processes.get(oldSessionId);
+    if (tracked !== process) {
+      return;
+    }
+    const existing = this.processes.get(newSessionId);
+    if (existing && existing !== process) {
+      throw new OpenPError(`session ${newSessionId} is busy`, EXIT_CODES.sessionBusy);
+    }
+    this.processes.delete(oldSessionId);
+    this.processes.set(newSessionId, process);
+  }
+
   trackedSessionCount(): number {
     return this.processes.size;
   }

@@ -1,20 +1,16 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
-  createPartialMessageStreamState,
-  extractAssistantSnapshotReasoningText,
+  buildIntermediateAssistantSnapshotEvents,
+  createStreamingMessageState,
   formatBackgroundAssistantTextEvent,
   formatIntermediateReasoningEvent,
   formatIntermediateTextEvent,
-  formatPartialDeltaEvents,
-  formatPartialMessageStopEvents,
-  formatPartialTextDeltaEvents,
-  formatPartialMessageLifecycleEvents,
-  formatSystemInitEvent,
-  formatSystemStatusEvent,
+  formatStreamingAnswerSnapshotEvents,
+  formatStreamingMessageSnapshotEvents,
   formatTurnResult,
   formatWorkerTurnResult,
-  resolveStructuredOutputToolUseId,
+  resetStreamingMessageState,
 } from '../src/core/output.js';
 import type { AssistantEventSnapshot, TurnResult } from '../src/core/types.js';
 import type { WorkerTurnResult } from '../src/core/worker-types.js';
@@ -58,1046 +54,675 @@ const WORKER_RESULT: WorkerTurnResult = {
   },
 };
 
-test('formats text output as final text only', () => {
+test('formats text output as result answer text only', () => {
   assert.equal(formatTurnResult(RESULT, {
     outputFormat: 'text',
     backendSessionId: '11111111-1111-4111-8111-111111111111',
   }), 'hello\n');
 });
 
-test('formats json output as one newline-terminated object', () => {
-  const output = formatTurnResult(RESULT, {
-    outputFormat: 'json',
+test('formats verbose text output with marker after result answer text', () => {
+  assert.equal(formatTurnResult(RESULT, {
+    outputFormat: 'text',
     backendSessionId: '11111111-1111-4111-8111-111111111111',
-  });
-
-  assert.match(output, /\n$/);
-  const parsed = stripVolatileIds(JSON.parse(output));
-  assert.deepEqual(parsed, {
-    type: 'result',
-    subtype: 'success',
-    session_id: '11111111-1111-4111-8111-111111111111',
-    is_error: false,
-    api_error_status: null,
-    duration_api_ms: null,
-    ttft_ms: null,
-    result: '',
-    num_turns: 1,
-    duration_ms: 123,
-    total_cost_usd: null,
-    stop_reason: 'end_turn',
-    usage: {
-      input_tokens: 10,
-      output_tokens: 3,
-      cache_read_input_tokens: null,
-    },
-    permission_denials: [],
-    structured_output: { ok: true },
-    terminal_reason: 'completed',
-    fast_mode_state: 'off',
-  });
-  assertNoOpenPOnlyStreamFields(parsed);
+    verbose: true,
+  }), [
+    'hello',
+    '[openp verbose] enabled',
+    '',
+  ].join('\n'));
 });
 
-test('formats direct CLI result with parsed stop reason', () => {
-  const result: TurnResult = {
+test('formats text output with opt-in warnings after result answer text', () => {
+  assert.equal(formatTurnResult(RESULT, {
+    outputFormat: 'text',
+    backendSessionId: '11111111-1111-4111-8111-111111111111',
+    warnings: [{
+      severity: 'warning',
+      code: 'streaming_result_diagnostic',
+      message: 'Streaming result diagnostics were detected (1); result was preserved. Use --debug-log to record details.',
+    }],
+  }), [
+    'hello',
+    '[openp warning] streaming_result_diagnostic: Streaming result diagnostics were detected (1); result was preserved. Use --debug-log to record details.',
+    '',
+  ].join('\n'));
+});
+
+test('formats json output as one top-level openp result record', () => {
+  const openp = parseJsonOpenP(formatTurnResult({
+    ...RESULT,
+    structuredOutput: undefined,
+    reasoningContent: 'visible reasoning',
+  }, {
+    outputFormat: 'json',
+    backendSessionId: '11111111-1111-4111-8111-111111111111',
+    backend: 'codex',
+    model: 'codex-test',
+    contextWindow: 258400,
+  }));
+
+  assert.equal(openp.version, 1);
+  assert.equal(openp.form, 'result');
+  assert.equal(openp.scope, 'active');
+  assert.equal(openp.turnId, 'turn-1');
+  assert.equal(openp.sessionId, '11111111-1111-4111-8111-111111111111');
+  assert.deepEqual(resultOutput(openp).answer, ['hello']);
+  assert.deepEqual(resultOutput(openp).reasoning, ['visible reasoning']);
+  assert.deepEqual(resultOutput(openp).toolCall, []);
+  assert.deepEqual(resultOutput(openp).toolResult, []);
+  assert.deepEqual(metadata(openp).usage, {
+    inputTokens: 10,
+    outputTokens: 3,
+    cacheReadInputTokens: null,
+  });
+  assert.equal(metadata(openp).lastSubturnContextTokens, null);
+  assert.deepEqual(metadata(openp).modelUsage, {
+    'codex-test': {
+      contextWindow: 258400,
+      inputTokens: 10,
+      outputTokens: 3,
+    },
+  });
+});
+
+test('formats result metadata with derived last subturn context token usage', () => {
+  const openp = parseJsonOpenP(formatTurnResult({
     ...RESULT,
     structuredOutput: undefined,
     diagnostics: {
       ...RESULT.diagnostics,
-      stopReason: 'max_tokens',
+      usage: {
+        inputTokens: 100,
+        cacheReadInputTokens: 200,
+        outputTokens: 30,
+      },
+      lastSubturnUsage: {
+        inputTokens: 7,
+        cacheReadInputTokens: 3,
+        outputTokens: 2,
+      },
     },
-  };
-
-  const jsonOutput = formatTurnResult(result, {
+  }, {
     outputFormat: 'json',
     backendSessionId: '11111111-1111-4111-8111-111111111111',
-  });
-  const streamOutput = formatTurnResult(result, {
-    outputFormat: 'stream-json',
-    backendSessionId: '11111111-1111-4111-8111-111111111111',
-  });
+    backend: 'codex',
+    model: 'codex-test',
+    contextWindow: 258400,
+  }));
 
-  assert.equal(JSON.parse(jsonOutput).stop_reason, 'max_tokens');
-  const terminalResult = parseJsonLinesWithoutVolatileIds(streamOutput)
-    .filter((event) => event.type === 'result')
-    .at(-1);
-  assert.equal(terminalResult?.stop_reason, 'max_tokens');
+  assert.deepEqual(metadata(openp).usage, {
+    inputTokens: 100,
+    outputTokens: 30,
+    cacheReadInputTokens: 200,
+  });
+  assert.deepEqual(metadata(openp).lastSubturnUsage, {
+    inputTokens: 7,
+    outputTokens: 2,
+    cacheReadInputTokens: 3,
+  });
+  assert.equal(metadata(openp).lastSubturnContextTokens, 10);
 });
 
-test('formats stream-json output as claude-style assistant and result events', () => {
-  const output = formatTurnResult(RESULT, {
-    outputFormat: 'stream-json',
-    backendSessionId: '11111111-1111-4111-8111-111111111111',
-  });
-
-  assert.match(output, /\n$/);
-  const parsed = parseJsonLinesWithoutVolatileIds(output);
-  assert.deepEqual(parsed, [
-    {
-      type: 'system',
-      subtype: 'init',
-      session_id: '11111111-1111-4111-8111-111111111111',
-      output_style: 'default',
-      fast_mode_state: 'off',
-    },
-    {
-      type: 'assistant',
-      session_id: '11111111-1111-4111-8111-111111111111',
-      parent_tool_use_id: null,
-      request_id: 'req_1',
-      message: {
-        type: 'message',
-        role: 'assistant',
-        content: [
-          {
-            type: 'tool_use',
-            name: 'StructuredOutput',
-            input: { ok: true },
-            caller: { type: 'direct' },
-          },
-        ],
-        stop_reason: null,
-        stop_sequence: null,
-        stop_details: null,
-        usage: {
-          input_tokens: 10,
-          output_tokens: 3,
-          cache_read_input_tokens: null,
-        },
-        diagnostics: null,
-        context_management: null,
-      },
-    },
-    {
-      type: 'user',
-      session_id: '11111111-1111-4111-8111-111111111111',
-      parent_tool_use_id: null,
-      tool_use_result: 'Structured output provided successfully',
-      message: {
-        role: 'user',
-        content: [
-          {
-            type: 'tool_result',
-            content: 'Structured output provided successfully',
-          },
-        ],
-      },
-    },
-    {
-      type: 'result',
-      subtype: 'success',
-      session_id: '11111111-1111-4111-8111-111111111111',
-      is_error: false,
-      api_error_status: null,
-      duration_api_ms: null,
-      ttft_ms: null,
-      result: '',
-      num_turns: 1,
-      duration_ms: 123,
-      total_cost_usd: null,
-      stop_reason: 'end_turn',
+test('does not derive last subturn context token usage from aggregate-only usage', () => {
+  const openp = parseJsonOpenP(formatTurnResult({
+    ...RESULT,
+    structuredOutput: undefined,
+    diagnostics: {
+      ...RESULT.diagnostics,
       usage: {
-        input_tokens: 10,
-        output_tokens: 3,
-        cache_read_input_tokens: null,
+        inputTokens: 100,
+        cacheReadInputTokens: 200,
+        outputTokens: 30,
       },
-      permission_denials: [],
-      structured_output: { ok: true },
-      terminal_reason: 'completed',
-      fast_mode_state: 'off',
     },
-  ]);
-  for (const event of parsed) assertNoOpenPOnlyStreamFields(event);
-});
-
-test('formats stream-json result event with structured output', () => {
-  const reviewResult: TurnResult = {
-    ...RESULT,
-    text: 'Reviewed the change and produced structured output.',
-    structuredOutput: {
-      status: 'pass',
-      summary: 'ok',
-      findings: [],
-    },
-  };
-  const output = formatTurnResult(reviewResult, {
-    outputFormat: 'stream-json',
-    backendSessionId: '11111111-1111-4111-8111-111111111111',
-  });
-
-  const parsed = parseJsonLinesWithoutVolatileIds(output);
-  const terminalResult = parsed.filter((event) => event.type === 'result').at(-1);
-  assert.equal(parsed[0]?.type, 'system');
-  assert.equal(parsed[0]?.subtype, 'init');
-  assert.equal(parsed[0]?.session_id, '11111111-1111-4111-8111-111111111111');
-  assert.equal(terminalResult?.result, '');
-  assert.deepEqual(terminalResult?.structured_output, {
-    status: 'pass',
-    summary: 'ok',
-    findings: [],
-  });
-});
-
-test('formats structured fallback snapshots as StructuredOutput tool_use instead of JSON text', () => {
-  const output = formatTurnResult({
-    ...RESULT,
-    text: '{"ok":true}',
-    structuredOutput: { ok: true },
-    assistantEvents: [
-      {
-        message: {
-          type: 'message',
-          role: 'assistant',
-          content: [{ type: 'thinking', thinking: 'using structured output' }],
-          stop_reason: null,
-          stop_sequence: null,
-          stop_details: null,
-          diagnostics: null,
-          context_management: null,
-        },
-      },
-      {
-        message: {
-          type: 'message',
-          role: 'assistant',
-          content: [{ type: 'text', text: '{"ok":true}' }],
-          stop_reason: 'end_turn',
-          stop_sequence: null,
-          stop_details: null,
-          diagnostics: null,
-          context_management: null,
-        },
-      },
-    ],
   }, {
+    outputFormat: 'json',
+    backendSessionId: '11111111-1111-4111-8111-111111111111',
+    backend: 'codex',
+    model: 'codex-test',
+    contextWindow: 258400,
+  }));
+
+  assert.deepEqual(metadata(openp).usage, {
+    inputTokens: 100,
+    outputTokens: 30,
+    cacheReadInputTokens: 200,
+  });
+  assert.equal(Object.prototype.hasOwnProperty.call(metadata(openp), 'lastSubturnUsage'), false);
+  assert.equal(metadata(openp).lastSubturnContextTokens, null);
+});
+
+test('formats json warnings under openp metadata only', () => {
+  const openp = parseJsonOpenP(formatTurnResult(RESULT, {
+    outputFormat: 'json',
+    backendSessionId: '11111111-1111-4111-8111-111111111111',
+    warnings: [{
+      severity: 'warning',
+      code: 'streaming_result_diagnostic',
+      message: 'Streaming result diagnostics were detected (1); result was preserved. Use --debug-log to record details.',
+    }],
+  }));
+
+  assert.deepEqual(metadata(openp).warnings, [{
+    severity: 'warning',
+    code: 'streaming_result_diagnostic',
+    message: 'Streaming result diagnostics were detected (1); result was preserved. Use --debug-log to record details.',
+  }]);
+});
+
+test('formats structured output as result toolCall and toolResult without answer prose', () => {
+  const openp = parseJsonOpenP(formatTurnResult(RESULT, {
+    outputFormat: 'json',
+    backendSessionId: '11111111-1111-4111-8111-111111111111',
+    backend: 'codex',
+  }));
+  const output = resultOutput(openp);
+  const toolCall = output.toolCall[0]!;
+
+  assert.deepEqual(output.answer, []);
+  assert.deepEqual(output.reasoning, []);
+  assert.equal(toolCall.type, 'tool_use');
+  assert.equal(typeof toolCall.id, 'string');
+  assert.equal(toolCall.name, 'StructuredOutput');
+  assert.deepEqual(toolCall.input, { ok: true });
+  assert.deepEqual(toolCall.caller, { type: 'direct' });
+  assert.deepEqual(output.toolResult, [{
+    type: 'tool_result',
+    toolUseId: toolCall.id,
+    content: 'Structured output provided successfully',
+  }]);
+  assert.deepEqual(openp.structuredOutput, { ok: true });
+});
+
+test('formats stream-json output as one terminal result record', () => {
+  const events = parseOpenPRecords(formatTurnResult(RESULT, {
     outputFormat: 'stream-json',
     backendSessionId: '11111111-1111-4111-8111-111111111111',
-  });
+  }));
 
-  const parsed = parseJsonLinesWithoutVolatileIds(output);
-  const assistantContents = parsed
-    .filter((event) => event.type === 'assistant')
-    .map((event) => ((event.message as Record<string, unknown>).content as Array<Record<string, unknown>>).map((block) => block.type));
-  const assistantTextBlocks = parsed
-    .filter((event) => event.type === 'assistant')
-    .flatMap((event) => ((event.message as Record<string, unknown>).content as Array<Record<string, unknown>>))
-    .filter((block) => block.type === 'text')
-    .map((block) => block.text);
-
-  assert.deepEqual(assistantContents, [['thinking'], ['tool_use']]);
-  assert.deepEqual(assistantTextBlocks, []);
-  assert.equal(parsed.some((event) => event.type === 'user'), true);
+  assert.equal(events.length, 1);
+  assert.equal(events[0]?.form, 'result');
+  assert.deepEqual((events[0]?.output as Record<string, unknown>).answer, []);
+  assert.ok(resultOutput(events[0]!).toolCall.length > 0);
 });
 
-test('uses existing StructuredOutput tool_use id for matching tool_result', () => {
-  const output = formatTurnResult({
-    ...RESULT,
-    assistantEvents: [
-      {
-        message: {
-          type: 'message',
-          role: 'assistant',
-          content: [
-            {
-              type: 'tool_use',
-              id: 'toolu_backend',
-              name: 'StructuredOutput',
-              input: { ok: true },
-            },
-          ],
-          stop_reason: 'tool_use',
-          stop_sequence: null,
-          stop_details: null,
-          diagnostics: null,
-          context_management: null,
-        },
-      },
-    ],
-  }, {
-    outputFormat: 'stream-json',
-    backendSessionId: '11111111-1111-4111-8111-111111111111',
-    structuredOutputToolUseId: 'toolu_partial',
-  });
-
-  const events = output.trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>);
-  const userEvent = events.find((event) => event.type === 'user');
-  const content = ((userEvent?.message as Record<string, unknown>).content as Array<Record<string, unknown>>);
-
-  assert.equal(content[0]?.tool_use_id, 'toolu_backend');
-});
-
-test('uses same StructuredOutput tool_use id across partial and final events', () => {
-  const result: TurnResult = {
-    ...RESULT,
-    assistantEvents: [
-      {
-        message: {
-          type: 'message',
-          role: 'assistant',
-          content: [
-            {
-              type: 'tool_use',
-              id: 'toolu_backend',
-              name: 'StructuredOutput',
-              input: { ok: true },
-            },
-          ],
-          stop_reason: 'tool_use',
-          stop_sequence: null,
-          stop_details: null,
-          diagnostics: null,
-          context_management: null,
-        },
-      },
-    ],
-  };
-  const structuredOutputToolUseId = resolveStructuredOutputToolUseId({
-    structuredOutput: result.structuredOutput,
-    assistantEvents: result.assistantEvents,
-    preferredToolUseId: 'toolu_generated',
-  });
-
-  const partialState = createPartialMessageStreamState();
-  const output = [
-    formatPartialMessageLifecycleEvents(partialState, {
-      sessionId: '11111111-1111-4111-8111-111111111111',
-      structuredOutput: result.structuredOutput,
-      structuredOutputToolUseId,
-      stopReason: 'tool_use',
-    }),
-    formatTurnResult(result, {
-      outputFormat: 'stream-json',
-      backendSessionId: '11111111-1111-4111-8111-111111111111',
-      includeSystemInit: false,
-      structuredOutputToolUseId,
-    }),
-  ].join('');
-
-  const events = output.trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>);
-  const partialToolUseId = events
-    .filter((event) => event.type === 'stream_event')
-    .map((event) => event.event as Record<string, unknown>)
-    .find((event) => event.type === 'content_block_start')
-    ?.content_block as Record<string, unknown> | undefined;
-  const assistantToolUseIds = events
-    .filter((event) => event.type === 'assistant')
-    .flatMap((event) => ((event.message as Record<string, unknown>).content as Array<Record<string, unknown>>))
-    .filter((block) => block.type === 'tool_use')
-    .map((block) => block.id);
-  const userToolResultIds = events
-    .filter((event) => event.type === 'user')
-    .flatMap((event) => ((event.message as Record<string, unknown>).content as Array<Record<string, unknown>>))
-    .filter((block) => block.type === 'tool_result')
-    .map((block) => block.tool_use_id);
-
-  assert.equal(partialToolUseId?.id, 'toolu_backend');
-  assert.deepEqual(assistantToolUseIds, ['toolu_backend']);
-  assert.deepEqual(userToolResultIds, ['toolu_backend']);
-});
-
-test('formats stream-json result without duplicate system init when caller already emitted it', () => {
-  const output = formatTurnResult(RESULT, {
-    outputFormat: 'stream-json',
-    backendSessionId: '11111111-1111-4111-8111-111111111111',
-    includeSystemInit: false,
-  });
-
-  const parsed = parseJsonLinesWithoutVolatileIds(output);
-  assert.equal(parsed[0]?.type, 'assistant');
-  assert.equal(parsed.some((event) => event.type === 'system' && event.subtype === 'init'), false);
-});
-
-test('formats stream-json intermediate assistant events with accumulated text', () => {
-  const output = formatIntermediateTextEvent({
+test('formats intermediate answer as one streaming snapshot, not a delta field', () => {
+  const openp = parseSingleOpenPRecord(formatIntermediateTextEvent({
     turnId: 'turn-1',
     text: 'working so far',
-  });
+  }));
 
-  assert.match(output, /\n$/);
-  assert.deepEqual(stripVolatileIds(JSON.parse(output)), {
-    type: 'assistant',
-    parent_tool_use_id: null,
-    message: {
-      type: 'message',
-      role: 'assistant',
-      content: [{ type: 'text', text: 'working so far' }],
-      stop_reason: null,
-      stop_sequence: null,
-      stop_details: null,
-      diagnostics: null,
-      context_management: null,
-    },
-  });
+  assert.equal(openp.form, 'streaming');
+  assert.equal(openp.scope, 'active');
+  assert.deepEqual(openp.output, { answer: 'working so far' });
 });
 
-test('formats stream-json intermediate reasoning events as assistant thinking blocks', () => {
-  const output = formatIntermediateReasoningEvent({
+test('formats intermediate reasoning as one streaming reasoning snapshot', () => {
+  const openp = parseSingleOpenPRecord(formatIntermediateReasoningEvent({
     turnId: 'turn-1',
     sessionId: '11111111-1111-4111-8111-111111111111',
     text: 'explicit thinking',
     model: 'claude-test',
-  });
+  }));
 
-  const parsed = parseJsonLinesWithoutVolatileIds(output);
-  assert.deepEqual(parsed, [{
-    type: 'assistant',
-    session_id: '11111111-1111-4111-8111-111111111111',
-    parent_tool_use_id: null,
-    message: {
-      type: 'message',
-      role: 'assistant',
-      model: 'claude-test',
-      content: [{ type: 'thinking', thinking: 'explicit thinking' }],
-      stop_reason: null,
-      stop_sequence: null,
-      stop_details: null,
-      diagnostics: null,
-      context_management: null,
-    },
-  }]);
+  assert.equal(openp.form, 'streaming');
+  assert.equal(openp.sessionId, '11111111-1111-4111-8111-111111111111');
+  assert.deepEqual(openp.output, { reasoning: 'explicit thinking' });
+  assert.equal(metadata(openp).model, 'claude-test');
 });
 
-test('formats stream-json intermediate reasoning events with public reasoning block shape', () => {
-  const output = formatIntermediateReasoningEvent({
-    turnId: 'turn-1',
-    sessionId: '11111111-1111-4111-8111-111111111111',
-    text: 'think block\n\nreason summary',
-    contentBlocks: [
-      { type: 'thinking', text: 'think block' },
-      { type: 'reasoning', summary: [{ text: 'reason summary' }] },
-    ],
-  });
-
-  const parsed = parseJsonLinesWithoutVolatileIds(output);
-  assert.deepEqual(
-    (parsed[0]?.message as Record<string, unknown>).content,
-    [
-      { type: 'thinking', thinking: 'think block' },
-      { type: 'reasoning', summary: [{ text: 'reason summary' }] },
-    ],
-  );
-});
-
-test('normalizes Claude Code thinking text snapshots to public thinking field', () => {
-  const output = formatTurnResult({
-    ...RESULT,
-    text: 'final answer',
-    reasoningContent: 'think block',
-    structuredOutput: undefined,
-    assistantEvents: [
-      {
-        message: {
-          type: 'message',
-          role: 'assistant',
-          content: [{ type: 'thinking', text: 'think block' }],
-          stop_reason: null,
-          stop_sequence: null,
-          stop_details: null,
-          diagnostics: null,
-          context_management: null,
-        },
-      },
-      {
-        message: {
-          type: 'message',
-          role: 'assistant',
-          content: [{ type: 'text', text: 'final answer' }],
-          stop_reason: 'end_turn',
-          stop_sequence: null,
-          stop_details: null,
-          diagnostics: null,
-          context_management: null,
-        },
-      },
-    ],
-  }, {
-    outputFormat: 'stream-json',
-    backendSessionId: '11111111-1111-4111-8111-111111111111',
-  });
-
-  const parsed = parseJsonLinesWithoutVolatileIds(output);
-  const firstAssistant = parsed.find((event) => event.type === 'assistant');
-  assert.deepEqual(
-    (firstAssistant?.message as Record<string, unknown>).content,
-    [{ type: 'thinking', thinking: 'think block' }],
-  );
-});
-
-test('formats stream-json intermediate assistant events with session id when supplied', () => {
-  const output = formatIntermediateTextEvent({
-    turnId: 'turn-1',
-    sessionId: '11111111-1111-4111-8111-111111111111',
-    text: 'working so far',
-  });
-
-  assert.deepEqual(stripVolatileIds(JSON.parse(output)), {
-    type: 'assistant',
-    session_id: '11111111-1111-4111-8111-111111111111',
-    parent_tool_use_id: null,
-    message: {
-      type: 'message',
-      role: 'assistant',
-      content: [{ type: 'text', text: 'working so far' }],
-      stop_reason: null,
-      stop_sequence: null,
-      stop_details: null,
-      diagnostics: null,
-      context_management: null,
-    },
-  });
-});
-
-test('formats worker system init event', () => {
-  assert.deepEqual(stripVolatileIds(JSON.parse(formatSystemInitEvent('11111111-1111-4111-8111-111111111111'))), {
-    type: 'system',
-    subtype: 'init',
-    session_id: '11111111-1111-4111-8111-111111111111',
-    output_style: 'default',
-    fast_mode_state: 'off',
-  });
-});
-
-test('formats partial message status and stream_event text deltas', () => {
-  assert.deepEqual(stripVolatileIds(JSON.parse(formatSystemStatusEvent({
-    sessionId: '11111111-1111-4111-8111-111111111111',
-    status: 'requesting',
-  }))), {
-    type: 'system',
-    subtype: 'status',
-    status: 'requesting',
-    session_id: '11111111-1111-4111-8111-111111111111',
-  });
-
-  const state = createPartialMessageStreamState();
+test('formats cumulative answer snapshots as cumulative values', () => {
+  const state = createStreamingMessageState();
   const output = [
-    formatPartialTextDeltaEvents(state, {
+    formatStreamingAnswerSnapshotEvents(state, {
       sessionId: '11111111-1111-4111-8111-111111111111',
       model: 'claude-test',
       text: 'hello',
     }),
-    formatPartialTextDeltaEvents(state, {
+    formatStreamingAnswerSnapshotEvents(state, {
       sessionId: '11111111-1111-4111-8111-111111111111',
       model: 'claude-test',
       text: 'hello world',
     }),
-    formatPartialMessageStopEvents(state, {
-      sessionId: '11111111-1111-4111-8111-111111111111',
-      stopReason: 'end_turn',
-      usage: {
-        inputTokens: 1,
-        outputTokens: 2,
-        cacheReadInputTokens: null,
-      },
-    }),
   ].join('');
-  const parsed = parseJsonLinesWithoutVolatileIds(output);
+  resetStreamingMessageState(state);
 
-  assert.deepEqual(parsed, [
-    {
-      type: 'stream_event',
-      session_id: '11111111-1111-4111-8111-111111111111',
-      parent_tool_use_id: null,
-      ttft_ms: null,
-      event: {
-        type: 'message_start',
-        message: {
-          model: 'claude-test',
-          type: 'message',
-          role: 'assistant',
-          content: [],
-          stop_reason: null,
-          stop_sequence: null,
-          stop_details: null,
-        },
-      },
-    },
-    {
-      type: 'stream_event',
-      session_id: '11111111-1111-4111-8111-111111111111',
-      parent_tool_use_id: null,
-      event: {
-        type: 'content_block_start',
-        index: 0,
-        content_block: { type: 'text', text: '' },
-      },
-    },
-    {
-      type: 'stream_event',
-      session_id: '11111111-1111-4111-8111-111111111111',
-      parent_tool_use_id: null,
-      event: {
-        type: 'content_block_delta',
-        index: 0,
-        delta: { type: 'text_delta', text: 'hello' },
-      },
-    },
-    {
-      type: 'stream_event',
-      session_id: '11111111-1111-4111-8111-111111111111',
-      parent_tool_use_id: null,
-      event: {
-        type: 'content_block_delta',
-        index: 0,
-        delta: { type: 'text_delta', text: ' world' },
-      },
-    },
-    {
-      type: 'stream_event',
-      session_id: '11111111-1111-4111-8111-111111111111',
-      parent_tool_use_id: null,
-      event: {
-        type: 'content_block_stop',
-        index: 0,
-      },
-    },
-    {
-      type: 'stream_event',
-      session_id: '11111111-1111-4111-8111-111111111111',
-      parent_tool_use_id: null,
-      event: {
-        type: 'message_delta',
-        delta: {
-          stop_reason: 'end_turn',
-          stop_sequence: null,
-          stop_details: null,
-        },
-        usage: {
-          input_tokens: 1,
-          output_tokens: 2,
-          cache_read_input_tokens: null,
-        },
-      },
-    },
-    {
-      type: 'stream_event',
-      session_id: '11111111-1111-4111-8111-111111111111',
-      parent_tool_use_id: null,
-      event: { type: 'message_stop' },
-    },
+  assert.deepEqual(parseOpenPRecords(output).map(streamingOutput), [
+    { answer: 'hello' },
+    { answer: 'hello world' },
   ]);
-  for (const event of parsed) assertNoOpenPOnlyStreamFields(event);
 });
 
-test('does not emit corrupt partial deltas for non-prefix text replacements', () => {
-  const state = createPartialMessageStreamState();
-  const output = formatPartialTextDeltaEvents(state, {
+test('does not duplicate streaming answer when the snapshot repeats', () => {
+  const state = createStreamingMessageState();
+  const output = [
+    formatStreamingAnswerSnapshotEvents(state, {
+      sessionId: '11111111-1111-4111-8111-111111111111',
+      model: 'claude-test',
+      text: 'result text',
+    }),
+    formatStreamingAnswerSnapshotEvents(state, {
+      sessionId: '11111111-1111-4111-8111-111111111111',
+      model: 'claude-test',
+      text: 'result text',
+    }),
+  ].join('');
+  resetStreamingMessageState(state);
+
+  assert.deepEqual(parseOpenPRecords(output).map(streamingOutput), [
+    { answer: 'result text' },
+  ]);
+});
+
+test('rejects non-prefix answer and reasoning streaming replacements', () => {
+  const answerState = createStreamingMessageState();
+  formatStreamingAnswerSnapshotEvents(answerState, {
     sessionId: '11111111-1111-4111-8111-111111111111',
     model: 'claude-test',
     text: 'working',
   });
+  assert.throws(() => formatStreamingAnswerSnapshotEvents(answerState, {
+    sessionId: '11111111-1111-4111-8111-111111111111',
+    model: 'claude-test',
+    text: 'final',
+  }), /streaming answer replacement is not prefix-compatible/);
 
-  assert.throws(() => formatPartialTextDeltaEvents(state, {
-      sessionId: '11111111-1111-4111-8111-111111111111',
-      model: 'claude-test',
-      text: 'final',
-    }), /partial text replacement is not prefix-compatible/);
-
-  const parsed = parseJsonLinesWithoutVolatileIds(output);
-  const deltas = parsed
-    .filter((event) => event.type === 'stream_event' && (event.event as Record<string, unknown>)?.type === 'content_block_delta')
-    .map((event) => (((event.event as Record<string, unknown>).delta as Record<string, unknown>).text));
-
-  assert.deepEqual(deltas, ['working']);
-});
-
-test('does not duplicate final partial text when live delta already reached final text', () => {
-  const state = createPartialMessageStreamState();
-  const output = [
-    formatPartialTextDeltaEvents(state, {
-      sessionId: '11111111-1111-4111-8111-111111111111',
-      model: 'claude-test',
-      text: 'final text',
-    }),
-    formatPartialTextDeltaEvents(state, {
-      sessionId: '11111111-1111-4111-8111-111111111111',
-      model: 'claude-test',
-      text: 'final text',
-    }),
-    formatPartialMessageStopEvents(state, {
-      sessionId: '11111111-1111-4111-8111-111111111111',
-      stopReason: 'end_turn',
-    }),
-  ].join('');
-
-  const parsed = parseJsonLinesWithoutVolatileIds(output);
-  const deltas = parsed
-    .filter((event) => event.type === 'stream_event' && (event.event as Record<string, unknown>)?.type === 'content_block_delta')
-    .map((event) => (((event.event as Record<string, unknown>).delta as Record<string, unknown>).text));
-
-  assert.deepEqual(deltas, ['final text']);
-  assert.equal(parsed.at(-1)?.type, 'stream_event');
-  assert.deepEqual((parsed.at(-1)?.event as Record<string, unknown>), { type: 'message_stop' });
-});
-
-test('formats partial reasoning before text with ordered content blocks', () => {
-  const state = createPartialMessageStreamState();
-  const output = [
-    formatPartialDeltaEvents(state, {
-      sessionId: '11111111-1111-4111-8111-111111111111',
-      model: 'claude-test',
-      text: '',
-      reasoningText: 'thinking',
-    }),
-    formatPartialDeltaEvents(state, {
-      sessionId: '11111111-1111-4111-8111-111111111111',
-      model: 'claude-test',
-      text: 'answer',
-      reasoningText: 'thinking',
-    }),
-    formatPartialMessageStopEvents(state, {
-      sessionId: '11111111-1111-4111-8111-111111111111',
-      stopReason: 'end_turn',
-    }),
-  ].join('');
-
-  const parsed = parseJsonLinesWithoutVolatileIds(output);
-  const streamEvents = parsed.map((event) => event.event as Record<string, unknown>);
-  assert.deepEqual(streamEvents.slice(1, 6), [
-    {
-      type: 'content_block_start',
-      index: 0,
-      content_block: { type: 'thinking', thinking: '' },
-    },
-    {
-      type: 'content_block_delta',
-      index: 0,
-      delta: { type: 'thinking_delta', thinking: 'thinking' },
-    },
-    {
-      type: 'content_block_stop',
-      index: 0,
-    },
-    {
-      type: 'content_block_start',
-      index: 1,
-      content_block: { type: 'text', text: '' },
-    },
-    {
-      type: 'content_block_delta',
-      index: 1,
-      delta: { type: 'text_delta', text: 'answer' },
-    },
-  ]);
-});
-
-test('rejects non-prefix partial reasoning replacements', () => {
-  const state = createPartialMessageStreamState();
-  formatPartialDeltaEvents(state, {
+  const reasoningState = createStreamingMessageState();
+  formatStreamingMessageSnapshotEvents(reasoningState, {
     sessionId: '11111111-1111-4111-8111-111111111111',
     model: 'claude-test',
     text: '',
     reasoningText: 'first draft',
   });
-
-  assert.throws(() => formatPartialDeltaEvents(state, {
+  assert.throws(() => formatStreamingMessageSnapshotEvents(reasoningState, {
     sessionId: '11111111-1111-4111-8111-111111111111',
     model: 'claude-test',
     text: '',
     reasoningText: 'replacement',
-  }), /partial reasoning replacement is not prefix-compatible/);
+  }), /streaming reasoning replacement is not prefix-compatible/);
 });
 
-test('ignores late partial reasoning while still emitting later text deltas', () => {
-  const state = createPartialMessageStreamState();
-  formatPartialDeltaEvents(state, {
-    sessionId: '11111111-1111-4111-8111-111111111111',
-    model: 'claude-test',
-    text: 'partial',
-  });
-
-  const output = formatPartialDeltaEvents(state, {
-    sessionId: '11111111-1111-4111-8111-111111111111',
-    model: 'claude-test',
-    text: 'partial final',
-    reasoningText: 'late thinking',
-  });
-  const parsed = parseJsonLinesWithoutVolatileIds(output);
-  const deltas = parsed
-    .filter((event) => event.type === 'stream_event' && (event.event as Record<string, unknown>)?.type === 'content_block_delta')
-    .map((event) => (event.event as { delta: Record<string, unknown> }).delta);
-
-  assert.deepEqual(deltas, [{ type: 'text_delta', text: ' final' }]);
-});
-
-test('formats partial structured output as tool_use stream events', () => {
-  const state = createPartialMessageStreamState();
-  const output = formatPartialMessageLifecycleEvents(state, {
-    sessionId: '11111111-1111-4111-8111-111111111111',
-    model: 'claude-test',
-    structuredOutput: { ok: true },
-    structuredOutputToolUseId: 'toolu_test',
-    stopReason: 'tool_use',
-    usage: {
-      inputTokens: 1,
-      outputTokens: 2,
-      cacheReadInputTokens: null,
-    },
-  });
-
-  assert.deepEqual(parseJsonLinesWithoutVolatileIds(output), [
-    {
-      type: 'stream_event',
-      session_id: '11111111-1111-4111-8111-111111111111',
-      parent_tool_use_id: null,
-      ttft_ms: null,
-      event: {
-        type: 'message_start',
-        message: {
-          model: 'claude-test',
-          type: 'message',
-          role: 'assistant',
-          content: [],
-          stop_reason: null,
-          stop_sequence: null,
-          stop_details: null,
-        },
-      },
-    },
-    {
-      type: 'stream_event',
-      session_id: '11111111-1111-4111-8111-111111111111',
-      parent_tool_use_id: null,
-      event: {
-        type: 'content_block_start',
-        index: 0,
-        content_block: {
-          type: 'tool_use',
-          name: 'StructuredOutput',
-          input: {},
-          caller: { type: 'direct' },
-        },
-      },
-    },
-    {
-      type: 'stream_event',
-      session_id: '11111111-1111-4111-8111-111111111111',
-      parent_tool_use_id: null,
-      event: {
-        type: 'content_block_delta',
-        index: 0,
-        delta: {
-          type: 'input_json_delta',
-          partial_json: '{"ok":true}',
-        },
-      },
-    },
-    {
-      type: 'stream_event',
-      session_id: '11111111-1111-4111-8111-111111111111',
-      parent_tool_use_id: null,
-      event: {
-        type: 'content_block_stop',
-        index: 0,
-      },
-    },
-    {
-      type: 'stream_event',
-      session_id: '11111111-1111-4111-8111-111111111111',
-      parent_tool_use_id: null,
-      event: {
-        type: 'message_delta',
-        delta: {
-          stop_reason: 'tool_use',
-          stop_sequence: null,
-          stop_details: null,
-        },
-        usage: {
-          input_tokens: 1,
-          output_tokens: 2,
-          cache_read_input_tokens: null,
-        },
-      },
-    },
-    {
-      type: 'stream_event',
-      session_id: '11111111-1111-4111-8111-111111111111',
-      parent_tool_use_id: null,
-      event: { type: 'message_stop' },
-    },
-  ]);
-});
-
-test('formats stream-json background assistant events as task notifications', () => {
-  const output = formatBackgroundAssistantTextEvent({
+test('formats mixed streaming reasoning and answer as separate oneOf records', () => {
+  const state = createStreamingMessageState();
+  const events = parseOpenPRecords(formatStreamingMessageSnapshotEvents(state, {
     turnId: 'turn-1',
-    text: 'background done',
-  });
+    sessionId: '11111111-1111-4111-8111-111111111111',
+    model: 'claude-test',
+    text: 'answer',
+    reasoningText: 'thinking',
+  }));
+  resetStreamingMessageState(state);
 
-  assert.match(output, /\n$/);
-  assert.deepEqual(parseJsonLinesWithoutVolatileIds(output), [
-    {
-      type: 'user',
-      origin: { kind: 'task-notification' },
-      message: {
-        role: 'user',
-        content: 'background task notification',
-      },
-    },
-    {
-      type: 'assistant',
-      parent_tool_use_id: null,
-      message: {
-        type: 'message',
-        role: 'assistant',
-        content: [{ type: 'text', text: 'background done' }],
-        stop_reason: 'end_turn',
-        stop_sequence: null,
-        stop_details: null,
-        diagnostics: null,
-        context_management: null,
-      },
-    },
+  assert.deepEqual(events.map(streamingOutput), [
+    { reasoning: 'thinking' },
+    { answer: 'answer' },
   ]);
+  assert.equal(events.every((event) => Object.keys(streamingOutput(event)).length === 1), true);
 });
 
-test('formats stream-json background assistant events with session id when supplied', () => {
-  const output = formatBackgroundAssistantTextEvent({
+test('formats background assistant text as background streaming answer', () => {
+  const openp = parseSingleOpenPRecord(formatBackgroundAssistantTextEvent({
     turnId: 'turn-1',
     sessionId: '11111111-1111-4111-8111-111111111111',
     text: 'background done',
-  });
+  }));
 
-  const parsed = parseJsonLinesWithoutVolatileIds(output);
-  assert.equal(parsed[0]?.session_id, '11111111-1111-4111-8111-111111111111');
-  assert.equal(parsed[1]?.session_id, '11111111-1111-4111-8111-111111111111');
-  assert.equal(parsed[0]?.sessionId, undefined);
-  assert.equal(parsed[1]?.sessionId, undefined);
+  assert.equal(openp.form, 'streaming');
+  assert.equal(openp.scope, 'background');
+  assert.equal(openp.sessionId, '11111111-1111-4111-8111-111111111111');
+  assert.deepEqual(openp.output, { answer: 'background done' });
 });
 
-test('formats stream-json worker results with full worker diagnostics', () => {
-  const output = formatWorkerTurnResult(WORKER_RESULT, {
+test('formats worker result with full diagnostics in openp metadata', () => {
+  const openp = parseSingleOpenPRecord(formatWorkerTurnResult(WORKER_RESULT, {
     turnId: 'public-turn-1',
     model: 'claude-test',
-  });
+  }));
+  const output = resultOutput(openp);
 
-  assert.match(output, /\n$/);
-  assert.deepEqual(parseJsonLinesWithoutVolatileIds(output), [
-    {
-      type: 'assistant',
-      session_id: '22222222-2222-4222-8222-222222222222',
-      parent_tool_use_id: null,
-      request_id: 'req_worker_1',
+  assert.equal(openp.form, 'result');
+  assert.equal(openp.sessionId, '22222222-2222-4222-8222-222222222222');
+  assert.deepEqual(output.reasoning, ['worker reasoning']);
+  assert.equal(output.toolCall[0]?.name, 'StructuredOutput');
+  assert.deepEqual(metadata(openp).usage, {
+    inputTokens: 20,
+    outputTokens: 4,
+    cacheReadInputTokens: 5,
+  });
+  assert.deepEqual(metadata(openp).modelUsage, {
+    'claude-test': {
+      inputTokens: 20,
+      outputTokens: 4,
+      cacheReadInputTokens: 5,
+      contextWindow: 200000,
+    },
+  });
+  assert.equal(metadata(openp).lastSubturnContextTokens, 25);
+  assert.equal(metadata(openp).numTurns, 2);
+  assert.equal(metadata(openp).durationMs, 456);
+  assert.equal(metadata(openp).stopReason, 'end_turn');
+});
+
+test('structured-output fallback snapshots do not expose raw JSON as answer prose', () => {
+  const openp = parseSingleOpenPRecord(formatWorkerTurnResult({
+    ...WORKER_RESULT,
+    content: '{"ok":true}',
+    reasoningContent: 'schema reasoning',
+    structuredOutput: { ok: true },
+    assistantEvents: [{
       message: {
         type: 'message',
         role: 'assistant',
-        model: 'claude-test',
-        content: [
-          { type: 'thinking', thinking: 'worker reasoning' },
-          {
-            type: 'tool_use',
-            name: 'StructuredOutput',
-            input: { ok: true },
-            caller: { type: 'direct' },
-          },
-        ],
-        stop_reason: null,
-        stop_sequence: null,
-        stop_details: null,
-        usage: {
-          input_tokens: 20,
-          output_tokens: 4,
-          cache_read_input_tokens: 5,
-        },
-        diagnostics: null,
-        context_management: null,
+        content: [{ type: 'text', text: '{"ok":true}' }],
+        stop_reason: 'end_turn',
       },
-    },
-    {
-      type: 'user',
-      session_id: '22222222-2222-4222-8222-222222222222',
-      parent_tool_use_id: null,
-      tool_use_result: 'Structured output provided successfully',
-      message: {
-        role: 'user',
-        content: [
-          {
-            type: 'tool_result',
-            content: 'Structured output provided successfully',
-          },
-        ],
-      },
-    },
-    {
-      type: 'result',
-      subtype: 'success',
-      session_id: '22222222-2222-4222-8222-222222222222',
-      is_error: false,
-      api_error_status: null,
-      duration_api_ms: null,
-      ttft_ms: null,
-      result: '',
-      num_turns: 2,
-      duration_ms: 456,
-      total_cost_usd: null,
-      stop_reason: 'end_turn',
-      usage: {
-        input_tokens: 20,
-        output_tokens: 4,
-        cache_read_input_tokens: 5,
-      },
-      modelUsage: {
-        'claude-test': {
-          inputTokens: 20,
-          outputTokens: 4,
-          cacheReadInputTokens: 5,
-          contextWindow: 200000,
-        },
-      },
-      permission_denials: [],
-      structured_output: { ok: true },
-      terminal_reason: 'completed',
-      fast_mode_state: 'off',
-    },
-  ]);
-  for (const event of parseJsonLinesWithoutVolatileIds(output)) {
-    assertNoOpenPOnlyStreamFields(event);
-  }
+    }],
+  }, {
+    turnId: 'public-turn-1',
+  }));
+  const output = resultOutput(openp);
+
+  assert.deepEqual(output.answer, []);
+  assert.deepEqual(output.reasoning, ['schema reasoning']);
+  assert.equal(output.toolCall[0]?.name, 'StructuredOutput');
+  assert.deepEqual(openp.structuredOutput, { ok: true });
 });
 
-test('suppresses duplicate streamed text snapshot even when the snapshot carries assistant metadata', () => {
-  const output = formatWorkerTurnResult({
+test('tool-bearing snapshots preserve answer and tool metadata in result arrays', () => {
+  const result: TurnResult = {
+    ...RESULT,
+    text: 'done',
+    structuredOutput: undefined,
+    assistantEvents: [
+      {
+        message: {
+          type: 'message',
+          role: 'assistant',
+          id: 'msg-tool',
+          stop_reason: 'tool_use',
+          content: [
+            { type: 'text', text: 'checking file' },
+            {
+              type: 'tool_use',
+              id: 'toolu_1',
+              name: 'Read',
+              input: { file_path: 'README.md' },
+            },
+          ],
+        },
+      },
+      {
+        message: {
+          type: 'message',
+          role: 'assistant',
+          id: 'msg-final',
+          stop_reason: 'end_turn',
+          content: [
+            { type: 'text', text: 'done' },
+          ],
+        },
+      },
+    ],
+  };
+  assert.equal(formatTurnResult(result, {
+    outputFormat: 'text',
+    backendSessionId: '11111111-1111-4111-8111-111111111111',
+    backend: 'claude',
+  }), 'checking file\n\ndone\n');
+
+  const openp = parseSingleOpenPRecord(formatTurnResult(result, {
+    outputFormat: 'stream-json',
+    backendSessionId: '11111111-1111-4111-8111-111111111111',
+    backend: 'claude',
+  }));
+  const output = resultOutput(openp);
+
+  assert.deepEqual(output.answer, ['checking file', 'done']);
+  assert.deepEqual(output.toolCall, [{
+    type: 'tool_use',
+    id: 'toolu_1',
+    name: 'Read',
+    input: { file_path: 'README.md' },
+  }]);
+});
+
+test('result aggregate preserves repeated equal assistant answers from different messages', () => {
+  const firstSnapshot: AssistantEventSnapshot = {
+    message: {
+      id: 'msg-repeat-1',
+      type: 'message',
+      role: 'assistant',
+      content: [{ type: 'text', text: 'same answer' }],
+      stop_reason: null,
+    },
+  };
+  const secondSnapshot: AssistantEventSnapshot = {
+    message: {
+      id: 'msg-repeat-2',
+      type: 'message',
+      role: 'assistant',
+      content: [{ type: 'text', text: 'same answer' }],
+      stop_reason: null,
+    },
+  };
+  const openp = parseSingleOpenPRecord(formatWorkerTurnResult({
+    ...WORKER_RESULT,
+    content: 'same answer\n\nsame answer',
+    reasoningContent: null,
+    structuredOutput: undefined,
+    assistantEvents: [firstSnapshot, secondSnapshot],
+  }, {
+    turnId: 'public-turn-1',
+  }));
+
+  assert.deepEqual(resultOutput(openp).answer, ['same answer', 'same answer']);
+});
+
+test('streamed non-semantic result snapshot does not duplicate terminal result answer fallback', () => {
+  const snapshot: AssistantEventSnapshot = {
+    message: {
+      id: 'msg-final',
+      type: 'message',
+      role: 'assistant',
+      content: [{ type: 'text', text: 'same answer' }],
+      stop_reason: 'end_turn',
+    },
+  };
+  const openp = parseSingleOpenPRecord(formatTurnResult({
+    ...RESULT,
+    text: 'same answer',
+    structuredOutput: undefined,
+    reasoningContent: null,
+    assistantEvents: [snapshot],
+  }, {
+    outputFormat: 'stream-json',
+    backendSessionId: '11111111-1111-4111-8111-111111111111',
+    suppressAssistantSnapshots: [snapshot],
+  }));
+
+  assert.deepEqual(resultOutput(openp).answer, ['same answer']);
+});
+
+test('suppressed tool snapshots preserve all tool calls in the result aggregate', () => {
+  const streamedSnapshot: AssistantEventSnapshot = {
+    message: {
+      type: 'message',
+      role: 'assistant',
+      content: [
+        { type: 'tool_use', id: 'toolu_read', name: 'Read', input: { file_path: 'a.txt' } },
+        { type: 'server_tool_use', id: 'srv_1', name: 'web_search', input: { query: 'openp' } },
+        { type: 'tool_result', tool_use_id: 'toolu_read', content: 'file contents', is_error: false },
+      ],
+      stop_reason: null,
+    },
+  };
+  const openp = parseSingleOpenPRecord(formatWorkerTurnResult({
     ...WORKER_RESULT,
     content: 'worker final',
     reasoningContent: null,
     structuredOutput: undefined,
-    requestId: undefined,
-    assistantEvents: [
-      {
-        requestId: 'req_snapshot',
-        message: {
-          type: 'message',
-          role: 'assistant',
-          model: 'claude-test',
-          content: [{ type: 'text', text: 'worker final' }],
-          stop_reason: 'end_turn',
-          stop_sequence: null,
-          stop_details: null,
-          usage: {
-            input_tokens: 20,
-            output_tokens: 4,
-            cache_read_input_tokens: 5,
-          },
-          diagnostics: null,
-          context_management: null,
-        },
-      },
-    ],
+    assistantEvents: [streamedSnapshot],
   }, {
     turnId: 'public-turn-1',
-    model: 'claude-test',
-    suppressAssistantTexts: ['worker final'],
-    suppressFallbackAssistantText: true,
-  });
+    suppressAssistantSnapshots: [streamedSnapshot],
+  }));
 
-  const parsed = parseJsonLinesWithoutVolatileIds(output);
-  const assistantEvents = parsed.filter((event) => event.type === 'assistant');
-  assert.equal(assistantEvents.length, 0);
-  assert.equal(parsed.at(-1)?.type, 'result');
+  assert.deepEqual(resultOutput(openp).answer, ['worker final']);
+  assert.deepEqual(resultOutput(openp).toolCall, [
+    {
+      type: 'tool_use',
+      id: 'toolu_read',
+      name: 'Read',
+      input: { file_path: 'a.txt' },
+    },
+    {
+      type: 'server_tool_use',
+      id: 'srv_1',
+      name: 'web_search',
+      input: { query: 'openp' },
+    },
+  ]);
+  assert.deepEqual(resultOutput(openp).toolResult, [{
+    type: 'tool_result',
+    toolUseId: 'toolu_read',
+    content: 'file contents',
+    isError: false,
+  }]);
 });
 
-test('preserves raw Claude usage fields on result events when available', () => {
-  const output = formatWorkerTurnResult({
+test('previously emitted streaming tool snapshots preserve all tool calls in the result aggregate', () => {
+  const streamedSnapshot: AssistantEventSnapshot = {
+    message: {
+      type: 'message',
+      role: 'assistant',
+      content: [
+        { type: 'tool_use', id: 'toolu_read', name: 'Read', input: { file_path: 'a.txt' } },
+        { type: 'server_tool_use', id: 'srv_1', name: 'web_search', input: { query: 'openp' } },
+        { type: 'tool_result', tool_use_id: 'toolu_read', content: 'file contents', is_error: false },
+      ],
+      stop_reason: null,
+    },
+  };
+  const previouslyEmittedAssistantEvents = buildIntermediateAssistantSnapshotEvents({
+    snapshot: streamedSnapshot,
+    sessionId: 'worker-session-1',
+    turnId: 'public-turn-1',
+  });
+  const openp = parseSingleOpenPRecord(formatWorkerTurnResult({
+    ...WORKER_RESULT,
+    content: 'worker final',
+    reasoningContent: null,
+    structuredOutput: undefined,
+    assistantEvents: [streamedSnapshot],
+  }, {
+    turnId: 'public-turn-1',
+    suppressAssistantSnapshots: [streamedSnapshot],
+    previouslyEmittedAssistantEvents,
+  }));
+
+  assert.deepEqual(resultOutput(openp).toolCall.map((toolCall) => toolCall.id), [
+    'toolu_read',
+    'srv_1',
+  ]);
+  assert.deepEqual(resultOutput(openp).toolResult, [{
+    type: 'tool_result',
+    toolUseId: 'toolu_read',
+    content: 'file contents',
+    isError: false,
+  }]);
+});
+
+test('metadata-only assistant snapshots preserve neutral messageBlocks without synthesizing answer', () => {
+  const openp = parseSingleOpenPRecord(formatTurnResult({
+    ...RESULT,
+    text: '',
+    reasoningContent: null,
+    structuredOutput: undefined,
+    assistantEvents: [{
+      message: {
+        type: 'message',
+        role: 'assistant',
+        content: [{ type: 'backend_status', state: 'running' }],
+      },
+    }],
+  }, {
+    outputFormat: 'stream-json',
+    backendSessionId: '11111111-1111-4111-8111-111111111111',
+    backend: 'codex',
+  }));
+
+  assert.deepEqual(resultOutput(openp), {
+    answer: [],
+    reasoning: [],
+    toolCall: [],
+    toolResult: [],
+  });
+  assert.deepEqual(metadata(openp).messageBlocks, [{ type: 'backend_status', state: 'running' }]);
+});
+
+test('metadata messageBlocks reject public output aliases and backend content payload aliases', () => {
+  const openp = parseSingleOpenPRecord(formatTurnResult({
+    ...RESULT,
+    text: 'hello',
+    structuredOutput: undefined,
+    assistantEvents: [{
+      message: {
+        type: 'message',
+        role: 'assistant',
+        content: [
+          { type: 'backend_status', answerText: 'hello' },
+          { type: 'assistant.message', detail: { state: 'legacy alias' } },
+          { type: 'backend_status', answer: 'hello' },
+          { type: 'backend_status', detail: { type: 'assistant.event', state: 'legacy alias' } },
+          { type: 'backend_status', detail: { type: 'answer', state: 'canonical output alias' } },
+          { type: 'backend_status', detail: { answerText: 'hello' } },
+          { type: 'backend_status', detail: { type: 'tool_use', id: 'toolu_nested', name: 'Read' } },
+          { type: 'backend_status', nested: [{ type: 'output_text', value: 'hello' }] },
+          { type: 'backend_status', toolCall: { name: 'Read' } },
+        ],
+      },
+    }],
+  }, {
+    outputFormat: 'stream-json',
+    backendSessionId: '11111111-1111-4111-8111-111111111111',
+    backend: 'codex',
+  }));
+
+  assert.equal(Object.prototype.hasOwnProperty.call(metadata(openp), 'messageBlocks'), false);
+});
+
+test('metadata messageBlocks keep neutral blocks when forbidden alias blocks are mixed in', () => {
+  const openp = parseSingleOpenPRecord(formatTurnResult({
+    ...RESULT,
+    text: 'hello',
+    structuredOutput: undefined,
+    assistantEvents: [{
+      message: {
+        type: 'message',
+        role: 'assistant',
+        content: [
+          { type: 'backend_status', state: 'running' },
+          { type: 'backend_status', answerText: 'hello' },
+          { type: 'backend_hint', detail: { state: 'ok' } },
+          { type: 'assistant.event', detail: { state: 'legacy alias' } },
+        ],
+      },
+    }],
+  }, {
+    outputFormat: 'stream-json',
+    backendSessionId: '11111111-1111-4111-8111-111111111111',
+    backend: 'codex',
+  }));
+
+  assert.deepEqual(metadata(openp).messageBlocks, [
+    { type: 'backend_status', state: 'running' },
+    { type: 'backend_hint', detail: { state: 'ok' } },
+  ]);
+});
+
+test('result metadata keeps raw backend usage without top-level legacy fields', () => {
+  const openp = parseSingleOpenPRecord(formatWorkerTurnResult({
     ...WORKER_RESULT,
     content: 'worker final',
     reasoningContent: null,
@@ -1109,1074 +734,230 @@ test('preserves raw Claude usage fields on result events when available', () => 
         cache_creation_input_tokens: 100,
         cache_read_input_tokens: 5,
         output_tokens: 4,
-        server_tool_use: {
-          web_search_requests: 0,
-          web_fetch_requests: 0,
-        },
         service_tier: 'standard',
-        inference_geo: '',
       },
     },
   }, {
     turnId: 'public-turn-1',
     model: 'claude-test',
-  });
+  }));
 
-  const parsed = parseJsonLinesWithoutVolatileIds(output);
-  const result = parsed.at(-1);
-  assert.deepEqual(result?.usage, {
+  assert.deepEqual(metadata(openp).rawUsage, {
     input_tokens: 20,
     cache_creation_input_tokens: 100,
     cache_read_input_tokens: 5,
     output_tokens: 4,
-    server_tool_use: {
-      web_search_requests: 0,
-      web_fetch_requests: 0,
-    },
     service_tier: 'standard',
-    inference_geo: '',
   });
 });
 
-test('suppresses duplicate streamed text snapshot when the snapshot only carries a backend message id', () => {
-  const output = formatWorkerTurnResult({
-    ...WORKER_RESULT,
-    content: 'worker final',
-    reasoningContent: null,
-    structuredOutput: undefined,
-    requestId: undefined,
-    assistantEvents: [
-      {
-        message: {
-          id: 'msg_backend',
-          type: 'message',
-          role: 'assistant',
-          content: [{ type: 'text', text: 'worker final' }],
-          stop_reason: null,
-          stop_sequence: null,
-          stop_details: null,
-          diagnostics: null,
-          context_management: null,
-        },
-      },
-    ],
-  }, {
-    turnId: 'public-turn-1',
-    suppressAssistantTexts: ['worker final'],
-    suppressFallbackAssistantText: true,
-  });
-
-  const parsed = output.trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>);
-  const assistantEvents = parsed.filter((event) => event.type === 'assistant');
-  assert.equal(assistantEvents.length, 0);
-  assert.equal(parsed.at(-1)?.type, 'result');
-});
-
-test('does not emit empty fallback assistant when duplicate streamed text only carries request id', () => {
-  const output = formatWorkerTurnResult({
-    ...WORKER_RESULT,
-    content: 'worker final',
-    reasoningContent: null,
-    structuredOutput: undefined,
-    requestId: 'req_worker_final',
-    assistantEvents: undefined,
-  }, {
-    turnId: 'public-turn-1',
-    suppressAssistantTexts: ['worker final'],
-    suppressFallbackAssistantText: true,
-  });
-
-  const parsed = parseJsonLinesWithoutVolatileIds(output);
-  const assistantEvents = parsed.filter((event) => event.type === 'assistant');
-  assert.equal(assistantEvents.length, 0);
-  assert.equal(parsed.at(-1)?.type, 'result');
-});
-
-test('emits fallback text after preserved non-text snapshots when streamed preview is stale', () => {
-  const output = formatWorkerTurnResult({
-    ...WORKER_RESULT,
-    content: 'first draft',
-    reasoningContent: null,
-    structuredOutput: undefined,
-    requestId: undefined,
-    assistantEvents: [
-      {
-        message: {
-          type: 'message',
-          role: 'assistant',
-          content: [{ type: 'thinking', thinking: 'thinking snapshot' }],
-          stop_reason: null,
-          stop_sequence: null,
-          stop_details: null,
-          diagnostics: null,
-          context_management: null,
-        },
-      },
-      {
-        message: {
-          type: 'message',
-          role: 'assistant',
-          content: [{ type: 'text', text: 'first draft' }],
-          stop_reason: null,
-          stop_sequence: null,
-          stop_details: null,
-          diagnostics: null,
-          context_management: null,
-        },
-      },
-    ],
-  }, {
-    turnId: 'public-turn-1',
-    suppressAssistantTexts: ['first draft', 'second draft'],
-    suppressFallbackAssistantText: true,
-  });
-
-  const parsed = parseJsonLinesWithoutVolatileIds(output);
-  const assistantContents = parsed
-    .filter((event) => event.type === 'assistant')
-    .map((event) => ((event.message as Record<string, unknown>).content as Array<Record<string, unknown>>).map((block) => block.type));
-  assert.deepEqual(assistantContents, [['thinking'], ['text']]);
-  assert.equal(parsed.at(-1)?.type, 'result');
-});
-
-test('worker stream-json result does not duplicate preserved final text when streamed text is stale', () => {
-  const output = formatWorkerTurnResult({
-    ...WORKER_RESULT,
-    content: 'worker final',
-    reasoningContent: null,
-    structuredOutput: undefined,
-    requestId: undefined,
-    assistantEvents: [
-      {
-        message: {
-          type: 'message',
-          role: 'assistant',
-          content: [{ type: 'text', text: 'worker final' }],
-          stop_reason: null,
-          stop_sequence: null,
-          stop_details: null,
-          diagnostics: null,
-          context_management: null,
-        },
-      },
-    ],
-  }, {
-    turnId: 'public-turn-1',
-    suppressAssistantTexts: ['draft'],
-    suppressFallbackAssistantText: true,
-  });
-
-  const parsed = parseJsonLinesWithoutVolatileIds(output);
-  const assistantTexts = parsed
-    .filter((event) => event.type === 'assistant')
-    .map((event) => (((event.message as Record<string, unknown>).content as Array<Record<string, unknown>>)[0]?.text));
-  assert.deepEqual(assistantTexts, ['worker final']);
-  assert.equal(parsed.at(-1)?.type, 'result');
-});
-
-test('direct stream-json result does not duplicate preserved final text when streamed text is stale', () => {
-  const output = formatTurnResult({
-    ...RESULT,
-    text: 'final answer',
-    reasoningContent: null,
-    structuredOutput: undefined,
-    requestId: 'req_final',
-    assistantEvents: [
-      {
-        message: {
-          type: 'message',
-          role: 'assistant',
-          content: [{ type: 'text', text: 'final answer' }],
-          stop_reason: null,
-          stop_sequence: null,
-          stop_details: null,
-          diagnostics: null,
-          context_management: null,
-        },
-      },
-    ],
-  }, {
-    outputFormat: 'stream-json',
-    backendSessionId: '11111111-1111-4111-8111-111111111111',
-    suppressAssistantTexts: ['draft'],
-    suppressFallbackAssistantText: true,
-  });
-
-  const parsed = parseJsonLinesWithoutVolatileIds(output);
-  const assistantTexts = parsed
-    .filter((event) => event.type === 'assistant')
-    .map((event) => (((event.message as Record<string, unknown>).content as Array<Record<string, unknown>>)[0]?.text));
-  assert.deepEqual(assistantTexts, ['final answer']);
-  assert.equal(parsed.at(-1)?.type, 'result');
-});
-
-test('worker stream-json result suppresses already streamed mixed reasoning and text snapshot', () => {
-  const output = formatWorkerTurnResult({
-    ...WORKER_RESULT,
-    content: 'worker final',
-    reasoningContent: 'thinking live',
-    structuredOutput: undefined,
-    requestId: undefined,
-    assistantEvents: [
-      {
-        message: {
-          type: 'message',
-          role: 'assistant',
-          content: [
-            { type: 'thinking', thinking: 'thinking live' },
-            { type: 'text', text: 'work' },
-          ],
-          stop_reason: null,
-          stop_sequence: null,
-          stop_details: null,
-          diagnostics: null,
-          context_management: null,
-        },
-      },
-      {
-        message: {
-          type: 'message',
-          role: 'assistant',
-          content: [{ type: 'text', text: 'worker final' }],
-          stop_reason: null,
-          stop_sequence: null,
-          stop_details: null,
-          diagnostics: null,
-          context_management: null,
-        },
-      },
-    ],
-  }, {
-    turnId: 'public-turn-1',
-    suppressAssistantTexts: ['work'],
-    suppressAssistantReasoningTexts: ['thinking live'],
-    suppressFallbackAssistantText: true,
-  });
-
-  const parsed = parseJsonLinesWithoutVolatileIds(output);
-  const assistantContents = parsed
-    .filter((event) => event.type === 'assistant')
-    .map((event) => ((event.message as Record<string, unknown>).content as Array<Record<string, unknown>>).map((block) => block.type));
-  assert.deepEqual(assistantContents, [['text']]);
-  assert.equal(parsed.at(-1)?.type, 'result');
-});
-
-test('worker stream-json result suppresses thinking text property blocks', () => {
-  const output = formatWorkerTurnResult({
-    ...WORKER_RESULT,
-    content: 'worker final',
-    reasoningContent: 'thinking live',
-    structuredOutput: undefined,
-    requestId: undefined,
-    assistantEvents: [
-      {
-        message: {
-          type: 'message',
-          role: 'assistant',
-          content: [{ type: 'thinking', text: 'thinking live' }],
-          stop_reason: null,
-          stop_sequence: null,
-          stop_details: null,
-          diagnostics: null,
-          context_management: null,
-        },
-      },
-    ],
-  }, {
-    turnId: 'public-turn-1',
-    suppressAssistantTexts: ['worker final'],
-    suppressAssistantReasoningTexts: ['thinking live'],
-    suppressFallbackAssistantText: true,
-  });
-
-  const parsed = parseJsonLinesWithoutVolatileIds(output);
-  assert.equal(parsed.some((event) => event.type === 'assistant'), false);
-  assert.equal(parsed.at(-1)?.type, 'result');
-});
-
-test('worker stream-json result suppresses cumulative reasoning split around streamed text', () => {
-  const output = formatWorkerTurnResult({
-    ...WORKER_RESULT,
-    content: 'worker final',
-    reasoningContent: 'think A\n\nthink B',
-    structuredOutput: undefined,
-    requestId: undefined,
-    assistantEvents: [
-      {
-        message: {
-          type: 'message',
-          role: 'assistant',
-          content: [{ type: 'thinking', thinking: 'think A' }],
-          stop_reason: null,
-          stop_sequence: null,
-          stop_details: null,
-          diagnostics: null,
-          context_management: null,
-        },
-      },
-      {
-        message: {
-          type: 'message',
-          role: 'assistant',
-          content: [{ type: 'text', text: 'draft' }],
-          stop_reason: null,
-          stop_sequence: null,
-          stop_details: null,
-          diagnostics: null,
-          context_management: null,
-        },
-      },
-      {
-        message: {
-          type: 'message',
-          role: 'assistant',
-          content: [{ type: 'reasoning', summary: [{ text: 'think B' }] }],
-          stop_reason: null,
-          stop_sequence: null,
-          stop_details: null,
-          diagnostics: null,
-          context_management: null,
-        },
-      },
-    ],
-  }, {
-    turnId: 'public-turn-1',
-    suppressAssistantTexts: ['draft', 'worker final'],
-    suppressAssistantReasoningTexts: ['think A', 'think A\n\nthink B'],
-    suppressFallbackAssistantText: true,
-  });
-
-  const parsed = parseJsonLinesWithoutVolatileIds(output);
-  assert.equal(parsed.some((event) => event.type === 'assistant'), false);
-  assert.equal(parsed.at(-1)?.type, 'result');
-});
-
-test('worker stream-json result suppresses fallback reasoning after separate streamed reasoning snapshots', () => {
-  const output = formatWorkerTurnResult({
-    ...WORKER_RESULT,
-    content: 'worker final',
-    reasoningContent: 'think A\n\nthink B',
-    structuredOutput: undefined,
-    requestId: undefined,
-    assistantEvents: [],
-  }, {
-    turnId: 'public-turn-1',
-    suppressAssistantTexts: ['worker final'],
-    suppressAssistantReasoningTexts: ['think A', 'think B'],
-    suppressFallbackAssistantText: true,
-  });
-
-  const parsed = parseJsonLinesWithoutVolatileIds(output);
-  assert.equal(parsed.some((event) => event.type === 'assistant'), false);
-  assert.equal(parsed.at(-1)?.type, 'result');
-});
-
-test('worker stream-json result removes streamed text from mixed tool_use snapshots', () => {
-  const output = formatWorkerTurnResult({
-    ...WORKER_RESULT,
-    content: 'worker final',
-    reasoningContent: null,
-    structuredOutput: undefined,
-    requestId: undefined,
-    assistantEvents: [
-      {
-        message: {
-          type: 'message',
-          role: 'assistant',
-          content: [
-            { type: 'text', text: 'draft' },
-            { type: 'tool_use', id: 'toolu_1', name: 'Read', input: { file_path: 'a.txt' } },
-          ],
-          stop_reason: null,
-          stop_sequence: null,
-          stop_details: null,
-          diagnostics: null,
-          context_management: null,
-        },
-      },
-    ],
-  }, {
-    turnId: 'public-turn-1',
-    suppressAssistantTexts: ['draft', 'worker final'],
-    suppressFallbackAssistantText: true,
-  });
-
-  const parsed = parseJsonLinesWithoutVolatileIds(output);
-  const assistantEvents = parsed.filter((event) => event.type === 'assistant');
-  assert.equal(assistantEvents.length, 1);
-  assert.deepEqual(
-    (assistantEvents[0]?.message as Record<string, unknown>).content,
-    [{ type: 'tool_use', name: 'Read', input: { file_path: 'a.txt' } }],
-  );
-  assert.equal(parsed.at(-1)?.type, 'result');
-});
-
-test('worker stream-json result suppresses fully streamed mixed tool_use snapshots', () => {
-  const streamedSnapshot = {
-    message: {
-      type: 'message',
-      role: 'assistant',
-      content: [
-        { type: 'text', text: 'draft' },
-        { type: 'tool_use', id: 'toolu_1', name: 'Read', input: { file_path: 'a.txt' } },
-      ],
-      stop_reason: null,
-      stop_sequence: null,
-      stop_details: null,
-      diagnostics: null,
-      context_management: null,
-    },
-  };
-  const output = formatWorkerTurnResult({
-    ...WORKER_RESULT,
-    content: 'worker final',
-    reasoningContent: null,
-    structuredOutput: undefined,
-    requestId: undefined,
-    assistantEvents: [streamedSnapshot],
-  }, {
-    turnId: 'public-turn-1',
-    suppressAssistantTexts: ['draft', 'worker final'],
-    suppressAssistantSnapshots: [streamedSnapshot],
-    suppressFallbackAssistantText: true,
-  });
-
-  const parsed = parseJsonLinesWithoutVolatileIds(output);
-  assert.equal(parsed.some((event) => event.type === 'assistant'), false);
-  assert.equal(parsed.at(-1)?.type, 'result');
-});
-
-test('worker stream-json result does not synthesize StructuredOutput assistant after streamed tool_use snapshot', () => {
-  const streamedSnapshot: AssistantEventSnapshot = {
-    message: {
-      type: 'message',
-      role: 'assistant',
-      content: [
-        { type: 'text', text: 'draft' },
-        { type: 'tool_use', id: 'toolu_1', name: 'StructuredOutput', input: { ok: true } },
-      ],
-      stop_reason: null,
-      stop_sequence: null,
-      stop_details: null,
-      diagnostics: null,
-      context_management: null,
-    },
-  };
-  const output = formatWorkerTurnResult({
-    ...WORKER_RESULT,
-    content: '',
-    reasoningContent: null,
-    structuredOutput: { ok: true },
-    requestId: undefined,
-    assistantEvents: [streamedSnapshot],
-  }, {
-    turnId: 'public-turn-1',
-    suppressAssistantTexts: ['draft'],
-    suppressAssistantSnapshots: [streamedSnapshot],
-    suppressFallbackAssistantText: true,
-  });
-
-  const parsed = parseJsonLinesWithoutVolatileIds(output);
-  assert.equal(parsed.some((event) => event.type === 'assistant'), false);
-  assert.equal(parsed.some((event) => event.type === 'user'), true);
-  assert.equal(parsed.at(-1)?.type, 'result');
-});
-
-test('worker stream-json result suppresses fallback reasoning from streamed nested reasoning snapshots', () => {
-  const streamedSnapshot: AssistantEventSnapshot = {
-    message: {
-      type: 'message',
-      role: 'assistant',
-      content: [{ type: 'thinking', content: [{ text: 'think nested' }] }],
-      stop_reason: null,
-      stop_sequence: null,
-      stop_details: null,
-      diagnostics: null,
-      context_management: null,
-    },
-  };
-  const streamedReasoning = extractAssistantSnapshotReasoningText(streamedSnapshot);
-  assert.equal(streamedReasoning, 'think nested');
-
-  const output = formatWorkerTurnResult({
-    ...WORKER_RESULT,
-    content: 'worker final',
-    reasoningContent: 'think nested',
-    structuredOutput: undefined,
-    requestId: undefined,
-    assistantEvents: [streamedSnapshot],
-  }, {
-    turnId: 'public-turn-1',
-    suppressAssistantTexts: ['worker final'],
-    suppressAssistantReasoningTexts: streamedReasoning ? [streamedReasoning] : [],
-    suppressAssistantSnapshots: [streamedSnapshot],
-    suppressFallbackAssistantText: true,
-  });
-
-  const parsed = parseJsonLinesWithoutVolatileIds(output);
-  assert.equal(parsed.some((event) => event.type === 'assistant'), false);
-  assert.equal(parsed.at(-1)?.type, 'result');
-});
-
-test('worker stream-json result drops empty reasoning left after mixed text suppression', () => {
-  const output = formatWorkerTurnResult({
-    ...WORKER_RESULT,
-    content: 'worker final',
-    reasoningContent: null,
-    structuredOutput: undefined,
-    requestId: undefined,
-    assistantEvents: [
-      {
-        message: {
-          type: 'message',
-          role: 'assistant',
-          content: [
-            { type: 'thinking', thinking: '' },
-            { type: 'text', text: 'worker final' },
-          ],
-          stop_reason: null,
-          stop_sequence: null,
-          stop_details: null,
-          diagnostics: null,
-          context_management: null,
-        },
-      },
-    ],
-  }, {
-    turnId: 'public-turn-1',
-    suppressAssistantTexts: ['worker final'],
-    suppressFallbackAssistantText: true,
-  });
-
-  const parsed = parseJsonLinesWithoutVolatileIds(output);
-  assert.equal(parsed.some((event) => event.type === 'assistant'), false);
-  assert.equal(parsed.at(-1)?.type, 'result');
-});
-
-test('suppresses duplicate streamed text snapshot when the snapshot only carries stop details metadata', () => {
-  const output = formatWorkerTurnResult({
-    ...WORKER_RESULT,
-    content: 'worker final',
-    reasoningContent: null,
-    structuredOutput: undefined,
-    requestId: undefined,
-    assistantEvents: [
-      {
-        message: {
-          type: 'message',
-          role: 'assistant',
-          content: [{ type: 'text', text: 'worker final' }],
-          stop_reason: null,
-          stop_sequence: null,
-          stop_details: { type: 'tool_use' },
-          diagnostics: null,
-          context_management: null,
-        },
-      },
-    ],
-  }, {
-    turnId: 'public-turn-1',
-    suppressAssistantTexts: ['worker final'],
-    suppressFallbackAssistantText: true,
-  });
-
-  const parsed = parseJsonLinesWithoutVolatileIds(output);
-  const assistantEvents = parsed.filter((event) => event.type === 'assistant');
-  assert.equal(assistantEvents.length, 0);
-  assert.equal(parsed.at(-1)?.type, 'result');
-});
-
-test('suppresses only one metadata-free text snapshot per streamed text occurrence', () => {
-  const output = formatWorkerTurnResult({
-    ...WORKER_RESULT,
-    content: 'ok',
-    reasoningContent: null,
-    structuredOutput: undefined,
-    requestId: undefined,
-    assistantEvents: [
-      {
-        message: {
-          type: 'message',
-          role: 'assistant',
-          content: [{ type: 'text', text: 'ok' }],
-          stop_reason: null,
-          stop_sequence: null,
-          stop_details: null,
-          diagnostics: null,
-          context_management: null,
-        },
-      },
-      {
-        message: {
-          type: 'message',
-          role: 'assistant',
-          content: [{ type: 'text', text: 'ok' }],
-          stop_reason: null,
-          stop_sequence: null,
-          stop_details: null,
-          diagnostics: null,
-          context_management: null,
-        },
-      },
-    ],
-  }, {
-    turnId: 'public-turn-1',
-    suppressAssistantTexts: ['ok'],
-    suppressFallbackAssistantText: true,
-  });
-
-  const parsed = parseJsonLinesWithoutVolatileIds(output);
-  const assistantTexts = parsed
-    .filter((event) => event.type === 'assistant')
-    .map((event) => (((event.message as Record<string, unknown>).content as Array<Record<string, unknown>>)[0]?.text));
-  assert.deepEqual(assistantTexts, ['ok']);
-  assert.equal(parsed.at(-1)?.type, 'result');
-});
-
-test('direct stream-json result suppresses already streamed default assistant text', () => {
-  const output = formatTurnResult({
-    ...RESULT,
-    text: 'final answer',
-    reasoningContent: null,
-    structuredOutput: undefined,
-    requestId: 'req_final',
-    assistantEvents: [
-      {
-        message: {
-          type: 'message',
-          role: 'assistant',
-          content: [{ type: 'text', text: 'final answer' }],
-          stop_reason: null,
-          stop_sequence: null,
-          stop_details: null,
-          diagnostics: null,
-          context_management: null,
-        },
-      },
-    ],
-  }, {
-    outputFormat: 'stream-json',
-    backendSessionId: '11111111-1111-4111-8111-111111111111',
-    suppressAssistantTexts: ['draft answer', 'final answer'],
-    suppressFallbackAssistantText: true,
-  });
-
-  const parsed = parseJsonLinesWithoutVolatileIds(output);
-  const assistantEvents = parsed.filter((event) => event.type === 'assistant');
-  assert.equal(assistantEvents.length, 0);
-  assert.equal(parsed.at(-1)?.type, 'result');
-  assert.equal(parsed.at(-1)?.result, 'final answer');
-});
-
-test('direct stream-json result preserves non-text snapshots after streamed assistant text', () => {
-  const output = formatTurnResult({
-    ...RESULT,
-    text: 'final answer',
-    reasoningContent: null,
-    structuredOutput: undefined,
-    requestId: 'req_final',
-    assistantEvents: [
-      {
-        message: {
-          type: 'message',
-          role: 'assistant',
-          content: [{ type: 'thinking', thinking: 'explicit reasoning' }],
-          stop_reason: null,
-          stop_sequence: null,
-          stop_details: null,
-          diagnostics: null,
-          context_management: null,
-        },
-      },
-      {
-        message: {
-          type: 'message',
-          role: 'assistant',
-          content: [{ type: 'text', text: 'final answer' }],
-          stop_reason: null,
-          stop_sequence: null,
-          stop_details: null,
-          diagnostics: null,
-          context_management: null,
-        },
-      },
-    ],
-  }, {
-    outputFormat: 'stream-json',
-    backendSessionId: '11111111-1111-4111-8111-111111111111',
-    suppressAssistantTexts: ['final answer'],
-    suppressFallbackAssistantText: true,
-  });
-
-  const parsed = parseJsonLinesWithoutVolatileIds(output);
-  const assistantContents = parsed
-    .filter((event) => event.type === 'assistant')
-    .map((event) => ((event.message as Record<string, unknown>).content as Array<Record<string, unknown>>).map((block) => block.type));
-  assert.deepEqual(assistantContents, [['thinking']]);
-  assert.equal(parsed.at(-1)?.type, 'result');
-});
-
-test('direct stream-json result drops empty reasoning-only snapshots', () => {
-  const output = formatTurnResult({
-    ...RESULT,
-    text: 'final answer',
-    reasoningContent: null,
-    structuredOutput: undefined,
-    requestId: 'req_final',
-    assistantEvents: [
-      {
-        message: {
-          type: 'message',
-          role: 'assistant',
-          content: [{ type: 'thinking', thinking: '' }],
-          stop_reason: null,
-          stop_sequence: null,
-          stop_details: null,
-          diagnostics: null,
-          context_management: null,
-        },
-      },
-    ],
-  }, {
-    outputFormat: 'stream-json',
-    backendSessionId: '11111111-1111-4111-8111-111111111111',
-  });
-
-  const parsed = parseJsonLinesWithoutVolatileIds(output);
-  const assistantContents = parsed
-    .filter((event) => event.type === 'assistant')
-    .map((event) => ((event.message as Record<string, unknown>).content as Array<Record<string, unknown>>).map((block) => block.type));
-  assert.deepEqual(assistantContents, [['text']]);
-  assert.equal(parsed.at(-1)?.type, 'result');
-});
-
-test('direct stream-json result suppresses already streamed fallback reasoning', () => {
-  const output = formatTurnResult({
-    ...RESULT,
-    text: 'final answer',
-    reasoningContent: 'thinking live',
-    structuredOutput: undefined,
-    requestId: 'req_final',
-    assistantEvents: undefined,
-  }, {
-    outputFormat: 'stream-json',
-    backendSessionId: '11111111-1111-4111-8111-111111111111',
-    suppressAssistantTexts: ['final answer'],
-    suppressAssistantReasoningTexts: ['thinking live'],
-    suppressFallbackAssistantText: true,
-  });
-
-  const parsed = parseJsonLinesWithoutVolatileIds(output);
-  assert.equal(parsed.some((event) => event.type === 'assistant'), false);
-  assert.equal(parsed.at(-1)?.type, 'result');
-});
-
-test('worker stream-json result suppresses cumulative streamed reasoning snapshots', () => {
-  const output = formatWorkerTurnResult({
-    ...WORKER_RESULT,
-    content: 'worker final',
-    reasoningContent: 'think A\n\nthink B',
-    structuredOutput: undefined,
-    requestId: undefined,
-    assistantEvents: [
-      {
-        message: {
-          type: 'message',
-          role: 'assistant',
-          content: [{ type: 'thinking', thinking: 'think A' }],
-          stop_reason: null,
-          stop_sequence: null,
-          stop_details: null,
-          diagnostics: null,
-          context_management: null,
-        },
-      },
-      {
-        message: {
-          type: 'message',
-          role: 'assistant',
-          content: [{ type: 'reasoning', summary: [{ text: 'think B' }] }],
-          stop_reason: null,
-          stop_sequence: null,
-          stop_details: null,
-          diagnostics: null,
-          context_management: null,
-        },
-      },
-    ],
-  }, {
-    turnId: 'public-turn-1',
-    suppressAssistantTexts: ['worker final'],
-    suppressAssistantReasoningTexts: ['think A\n\nthink B'],
-    suppressFallbackAssistantText: true,
-  });
-
-  const parsed = parseJsonLinesWithoutVolatileIds(output);
-  assert.equal(parsed.some((event) => event.type === 'assistant'), false);
-  assert.equal(parsed.at(-1)?.type, 'result');
-});
-
-test('worker stream-json result suppresses repeated cumulative reasoning snapshots', () => {
-  const output = formatWorkerTurnResult({
-    ...WORKER_RESULT,
-    content: 'worker final',
-    reasoningContent: 'think A\n\nthink B',
-    structuredOutput: undefined,
-    requestId: undefined,
-    assistantEvents: [
-      {
-        message: {
-          type: 'message',
-          role: 'assistant',
-          content: [{ type: 'thinking', thinking: 'think A' }],
-          stop_reason: null,
-          stop_sequence: null,
-          stop_details: null,
-          diagnostics: null,
-          context_management: null,
-        },
-      },
-      {
-        message: {
-          type: 'message',
-          role: 'assistant',
-          content: [{ type: 'thinking', thinking: 'think A\n\nthink B' }],
-          stop_reason: null,
-          stop_sequence: null,
-          stop_details: null,
-          diagnostics: null,
-          context_management: null,
-        },
-      },
-    ],
-  }, {
-    turnId: 'public-turn-1',
-    suppressAssistantTexts: ['worker final'],
-    suppressAssistantReasoningTexts: ['think A', 'think A\n\nthink B'],
-    suppressFallbackAssistantText: true,
-  });
-
-  const parsed = parseJsonLinesWithoutVolatileIds(output);
-  assert.equal(parsed.some((event) => event.type === 'assistant'), false);
-  assert.equal(parsed.at(-1)?.type, 'result');
-});
-
-test('worker stream-json result prefers cumulative reasoning suppression over earlier exact prefix', () => {
-  const output = formatWorkerTurnResult({
-    ...WORKER_RESULT,
-    content: 'worker final',
-    reasoningContent: 'think A\n\nthink B',
-    structuredOutput: undefined,
-    requestId: undefined,
-    assistantEvents: [
-      {
-        message: {
-          type: 'message',
-          role: 'assistant',
-          content: [{ type: 'thinking', thinking: 'think A' }],
-          stop_reason: null,
-          stop_sequence: null,
-          stop_details: null,
-          diagnostics: null,
-          context_management: null,
-        },
-      },
-      {
-        message: {
-          type: 'message',
-          role: 'assistant',
-          content: [{ type: 'reasoning', summary: [{ text: 'think B' }] }],
-          stop_reason: null,
-          stop_sequence: null,
-          stop_details: null,
-          diagnostics: null,
-          context_management: null,
-        },
-      },
-    ],
-  }, {
-    turnId: 'public-turn-1',
-    suppressAssistantTexts: ['worker final'],
-    suppressAssistantReasoningTexts: ['think A', 'think A\n\nthink B'],
-    suppressFallbackAssistantText: true,
-  });
-
-  const parsed = parseJsonLinesWithoutVolatileIds(output);
-  assert.equal(parsed.some((event) => event.type === 'assistant'), false);
-  assert.equal(parsed.at(-1)?.type, 'result');
-});
-
-test('injects turn-level usage into last assistant snapshot when snapshot lacks usage', () => {
-  const output = formatTurnResult({
-    ...RESULT,
-    text: 'final answer',
-    structuredOutput: undefined,
-    diagnostics: {
-      ...RESULT.diagnostics,
-      usage: {
-        inputTokens: 5000,
-        cacheReadInputTokens: 45000,
-        outputTokens: 200,
-      },
-    },
-    assistantEvents: [
-      {
-        message: {
-          type: 'message',
-          role: 'assistant',
-          content: [{ type: 'text', text: 'partial' }],
-          stop_reason: null,
-          stop_sequence: null,
-          stop_details: null,
-          diagnostics: null,
-          context_management: null,
-        },
-      },
-      {
-        message: {
-          type: 'message',
-          role: 'assistant',
-          content: [{ type: 'text', text: 'final answer' }],
-          stop_reason: 'end_turn',
-          stop_sequence: null,
-          stop_details: null,
-          diagnostics: null,
-          context_management: null,
-        },
-      },
-    ],
-  }, {
-    outputFormat: 'stream-json',
-    backendSessionId: '11111111-1111-4111-8111-111111111111',
-  });
-
-  const parsed = parseJsonLinesWithoutVolatileIds(output);
-  const assistantEvents = parsed.filter((event) => event.type === 'assistant');
-  assert.ok(assistantEvents.length >= 1);
-  const lastAssistant = assistantEvents.at(-1)!;
-  const message = lastAssistant.message as Record<string, unknown>;
-  const usage = message.usage as Record<string, unknown> | undefined;
-  assert.ok(usage, 'last assistant event must have usage');
-  assert.equal(usage.input_tokens, 5000);
-  assert.equal(usage.cache_read_input_tokens, 45000);
-  assert.equal(usage.output_tokens, 200);
-});
-
-test('does not overwrite existing usage on assistant snapshot', () => {
-  const output = formatTurnResult({
-    ...RESULT,
-    text: 'final answer',
-    structuredOutput: undefined,
-    diagnostics: {
-      ...RESULT.diagnostics,
-      usage: {
-        inputTokens: 5000,
-        cacheReadInputTokens: 45000,
-        outputTokens: 200,
-      },
-    },
-    assistantEvents: [
-      {
-        message: {
-          type: 'message',
-          role: 'assistant',
-          content: [{ type: 'text', text: 'final answer' }],
-          stop_reason: 'end_turn',
-          stop_sequence: null,
-          stop_details: null,
-          diagnostics: null,
-          context_management: null,
-          usage: {
-            input_tokens: 3000,
-            cache_read_input_tokens: 30000,
-            output_tokens: 100,
-          },
-        },
-      },
-    ],
-  }, {
-    outputFormat: 'stream-json',
-    backendSessionId: '11111111-1111-4111-8111-111111111111',
-  });
-
-  const parsed = parseJsonLinesWithoutVolatileIds(output);
-  const assistantEvents = parsed.filter((event) => event.type === 'assistant');
-  const lastAssistant = assistantEvents.at(-1)!;
-  const message = lastAssistant.message as Record<string, unknown>;
-  const usage = message.usage as Record<string, unknown>;
-  assert.equal(usage.input_tokens, 3000);
-  assert.equal(usage.cache_read_input_tokens, 30000);
-  assert.equal(usage.output_tokens, 100);
-});
-
-test('worker path injects usage into last assistant snapshot when snapshot lacks usage', () => {
-  const output = formatWorkerTurnResult({
-    ...WORKER_RESULT,
-    content: 'worker final',
-    reasoningContent: null,
-    structuredOutput: undefined,
-    assistantEvents: [
-      {
-        message: {
-          type: 'message',
-          role: 'assistant',
-          content: [{ type: 'text', text: 'worker final' }],
-          stop_reason: 'end_turn',
-          stop_sequence: null,
-          stop_details: null,
-          diagnostics: null,
-          context_management: null,
-        },
-      },
-    ],
-  }, {
-    turnId: 'public-turn-1',
-    model: 'claude-test',
-  });
-
-  const parsed = parseJsonLinesWithoutVolatileIds(output);
-  const assistantEvents = parsed.filter((event) => event.type === 'assistant');
-  assert.ok(assistantEvents.length >= 1);
-  const lastAssistant = assistantEvents.at(-1)!;
-  const message = lastAssistant.message as Record<string, unknown>;
-  const usage = message.usage as Record<string, unknown> | undefined;
-  assert.ok(usage, 'worker assistant event must have usage');
-  assert.equal(usage.input_tokens, 20);
-  assert.equal(usage.cache_read_input_tokens, 5);
-  assert.equal(usage.output_tokens, 4);
-});
-
-function parseJsonLinesWithoutVolatileIds(output: string): Record<string, unknown>[] {
-  return output.trim().split('\n').map((line) => stripVolatileIds(JSON.parse(line)) as Record<string, unknown>);
+function parseJsonOpenP(output: string): Record<string, any> {
+  assert.match(output, /\n$/);
+  const event = JSON.parse(output) as Record<string, any>;
+  assert.deepEqual(Object.keys(event), ['openp']);
+  assertOpenPRecord(event.openp);
+  return event.openp;
 }
 
-function stripVolatileIds(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value.map(stripVolatileIds);
-  }
-  if (!value || typeof value !== 'object') {
-    return value;
-  }
-  const result: Record<string, unknown> = {};
-  for (const [key, child] of Object.entries(value)) {
-    if (key === 'uuid' || key === 'id') {
-      continue;
-    }
-    if (key === 'timestamp' || key === 'tool_use_id') {
-      continue;
-    }
-    result[key] = stripVolatileIds(child);
-  }
-  return result;
+function parseSingleOpenPRecord(output: string): Record<string, any> {
+  const records = parseOpenPRecords(output);
+  assert.equal(records.length, 1);
+  return records[0]!;
 }
 
-function assertNoOpenPOnlyStreamFields(event: Record<string, unknown>): void {
-  assert.equal(Object.prototype.hasOwnProperty.call(event, 'turnId'), false);
-  assert.equal(Object.prototype.hasOwnProperty.call(event, 'sessionId'), false);
-  assert.equal(Object.prototype.hasOwnProperty.call(event, 'text'), false);
-  assert.equal(Object.prototype.hasOwnProperty.call(event, 'diagnostics'), false);
-  const modelUsage = event.modelUsage;
-  if (modelUsage && typeof modelUsage === 'object' && !Array.isArray(modelUsage)) {
-    assert.equal(Object.prototype.hasOwnProperty.call(modelUsage, 'openp'), false);
+function parseOpenPRecords(output: string): Array<Record<string, any>> {
+  assert.match(output, /\n$/);
+  return output.trim().split('\n').filter(Boolean).map((line) => {
+    const event = JSON.parse(line) as Record<string, any>;
+    assert.deepEqual(Object.keys(event), ['openp']);
+    assertOpenPRecord(event.openp);
+    return event.openp;
+  });
+}
+
+function assertOpenPRecord(openp: Record<string, any>): void {
+  assert.ok(openp && typeof openp === 'object' && !Array.isArray(openp));
+  assert.ok(openp.form === 'streaming' || openp.form === 'result');
+  assert.ok(openp.scope === 'active' || openp.scope === 'background');
+  assert.ok(openp.output && typeof openp.output === 'object' && !Array.isArray(openp.output));
+  for (const field of forbiddenPublicPayloadFields()) {
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(openp, field),
+      false,
+      `openp must not expose ${field}`,
+    );
   }
+  if (openp.form === 'streaming') {
+    const keys = Object.keys(openp.output);
+    assert.equal(keys.length, 1);
+    assert.ok(['answer', 'reasoning', 'toolCall', 'toolResult'].includes(keys[0]!));
+  } else {
+    assert.deepEqual(Object.keys(openp.output).sort(), ['answer', 'reasoning', 'toolCall', 'toolResult'].sort());
+    assert.ok(Array.isArray(openp.output.answer));
+    assert.ok(Array.isArray(openp.output.reasoning));
+    assert.ok(Array.isArray(openp.output.toolCall));
+    assert.ok(Array.isArray(openp.output.toolResult));
+  }
+  const itemMetadata = openp.metadata && typeof openp.metadata === 'object' && !Array.isArray(openp.metadata)
+    ? openp.metadata as Record<string, unknown>
+    : {};
+  if (Array.isArray(itemMetadata.messageBlocks)) {
+    for (const block of itemMetadata.messageBlocks) {
+      assertNeutralOpenPMetadataBlock(block);
+    }
+  }
+}
+
+function forbiddenPublicPayloadFields(): string[] {
+  return [
+    'type',
+    'kind',
+    'text',
+    'textDelta',
+    'answerText',
+    'answers',
+    'reasoningText',
+    'reasoning',
+    'toolCalls',
+    'toolResults',
+    'assistant.message',
+    'assistant.event',
+  ];
+}
+
+function streamingOutput(openp: Record<string, any>): Record<string, unknown> {
+  assert.equal(openp.form, 'streaming');
+  return openp.output as Record<string, unknown>;
+}
+
+function resultOutput(openp: Record<string, any>): {
+  answer: string[];
+  reasoning: string[];
+  toolCall: Array<Record<string, any>>;
+  toolResult: Array<Record<string, any>>;
+} {
+  assert.equal(openp.form, 'result');
+  const output = openp.output as Record<string, unknown>;
+  return {
+    answer: output.answer as string[],
+    reasoning: output.reasoning as string[],
+    toolCall: output.toolCall as Array<Record<string, any>>,
+    toolResult: output.toolResult as Array<Record<string, any>>,
+  };
+}
+
+function metadata(openp: Record<string, any>): Record<string, any> {
+  assert.ok(openp.metadata && typeof openp.metadata === 'object' && !Array.isArray(openp.metadata));
+  return openp.metadata as Record<string, any>;
+}
+
+function assertNeutralOpenPMetadataBlock(block: unknown): void {
+  assert.ok(block && typeof block === 'object' && !Array.isArray(block));
+  const item = block as Record<string, unknown>;
+  assert.equal(typeof item.type, 'string');
+  assert.equal([
+    'answer',
+    'toolCall',
+    'toolResult',
+    'output',
+    'kind',
+    'text',
+    'textDelta',
+    'answerText',
+    'answers',
+    'reasoningText',
+    'thinking',
+    'reasoning',
+    'toolCalls',
+    'toolResults',
+    'assistantEvents',
+    'assistant.message',
+    'assistant.event',
+    'tool_use',
+    'server_tool_use',
+    'tool_result',
+    'output_text',
+    'message.partial',
+    'message.final',
+  ].includes(String(item.type)), false);
+  assert.equal(hasOpenPMetadataForbiddenField(item), false);
+}
+
+function isForbiddenOpenPMetadataTypeValue(value: string): boolean {
+  return new Set([
+    'answer',
+    'toolCall',
+    'toolResult',
+    'output',
+    'kind',
+    'text',
+    'textDelta',
+    'answerText',
+    'answers',
+    'reasoningText',
+    'thinking',
+    'reasoning',
+    'toolCalls',
+    'toolResults',
+    'assistantEvents',
+    'assistant.message',
+    'assistant.event',
+    'tool_use',
+    'server_tool_use',
+    'tool_result',
+    'output_text',
+    'message.partial',
+    'message.final',
+  ]).has(value);
+}
+
+function hasOpenPMetadataForbiddenField(value: unknown): boolean {
+  const forbiddenFields = new Set([
+    'answer',
+    'toolCall',
+    'toolResult',
+    'output',
+    'kind',
+    'text',
+    'textDelta',
+    'answerText',
+    'answers',
+    'reasoningText',
+    'thinking',
+    'reasoning',
+    'toolCalls',
+    'toolResults',
+    'assistantEvents',
+    'assistant.message',
+    'assistant.event',
+    'input',
+    'content',
+    'tool_use_id',
+    'is_error',
+  ]);
+  const visit = (item: unknown): boolean => {
+    if (Array.isArray(item)) {
+      return item.some((nested) => visit(nested));
+    }
+    if (!item || typeof item !== 'object') {
+      return false;
+    }
+    for (const [key, nested] of Object.entries(item as Record<string, unknown>)) {
+      if (forbiddenFields.has(key)) {
+        return true;
+      }
+      if (
+        key === 'type' &&
+        typeof nested === 'string' &&
+        isForbiddenOpenPMetadataTypeValue(nested)
+      ) {
+        return true;
+      }
+      if (visit(nested)) {
+        return true;
+      }
+    }
+    return false;
+  };
+  return visit(value);
 }

@@ -1,95 +1,162 @@
 # open-p
 
-open-p is a PTY-based compatibility layer for running prompt-driven turns through interactive agent CLIs.
-
-The initial backend runs Claude Code without backend print mode. Text-prompt turns use the PTY/session-log runner. Stream-json worker turns use Claude Code's non-print stream-json stdin/stdout mode and format that structured output into the public compatibility contract.
-
-## Current Support
-
-The current implementation supports trusted local workspaces:
-
-- start a Claude Code interactive session in tmux
-- submit one prompt after the TTY is ready
-- read the local Claude Code session log
-- extract one final response
-- write the response to stdout
-- persist local session state outside the target project tree
-- serialize same-session turns with a local lock
-- resume a known local session with `--resume`
-- read one or more `stream-json` user events from stdin with `--input-format stream-json --output-format stream-json`
-- write a structured JSON result with `--output-format json`
-- write JSONL result events with `--output-format stream-json`
-- validate `--json-schema` structured output and emit `structured_output` in JSON result events
-- emit a minimal `system init` event in stream-json mode before assistant/result events
-- emit default stream-json assistant updates as scoped cumulative snapshots that callers should treat as whole-message replacements
-- expose `--include-partial-messages` for callers that want Claude-style partial `stream_event` deltas when snapshots are prefix-compatible
-- return non-zero exit codes for usage, backend, timeout, and protocol failures
-
-The final result is derived from Claude Code structured output. In text-prompt mode that source is the scoped local session log; in stream-json WorkerBridge mode it is the internal Claude Code stream-json stdout result. Default `stream-json` assistant events are emitted from scoped structured assistant snapshots, not from terminal screen text. Those default assistant events may be cumulative snapshots rather than fine-grained deltas; consumers should replace the displayed assistant text with the latest snapshot for the active turn. `--include-partial-messages` is the explicit opt-in path for Claude-style partial `stream_event` lifecycle and delta events. open-p does not read private transport credentials. Command-name compatibility is available only through the optional shim workflow; it is not installed as the default package executable.
-The `stream-json` output mode follows the supported `claude` stream-json public event shape with the documented cumulative-snapshot exception above and must not publish `open-p`-specific stdout fields.
-
-## Name
-
-- Project: `open-p`
-- Default binary: `openp`
-- Optional compatibility shim: `claude`
-
-The optional shim is not the default executable. It is only for environments that explicitly need command-name compatibility.
+open-p runs one prompt turn through a selected local agent CLI backend and returns the result through a small, stable `openp` interface.
 
 ## Install From Source
 
 ```bash
 npm install
+npm run build
 npm link
 openp --version
 ```
 
-The package executable points at `dist/src/cli.js`. `npm install` runs the build through the package `prepare` script. If lifecycle scripts are disabled, run `npm run build` before linking or running the binary from a fresh checkout.
+The linked executable is `openp`.
 
-## Optional Command Shim
-
-Some automation tools resolve the command name `claude`. To use open-p for that path, install an explicit shim directory and put that directory first on the tool's agent `PATH`:
+## Quick Start
 
 ```bash
-npm run build
-npm run install:claude-shim -- --target-dir ~/.local/share/open-p/shims --claude-bin "$(command -v claude)"
+openp claude "hello"
+openp codex "hello"
+openp kiro "hello"
 ```
 
-The shim sets `OPENP_CLAUDE_CODE_BIN` to the real Claude Code binary before invoking open-p. This prevents recursive shim invocation when open-p starts the interactive backend.
+The first non-option positional argument is the backend. There is no implicit default backend.
 
-## Principles
+## Backends
 
-- No MITM.
-- No TLS interception.
-- No credential capture.
-- No private transport parsing.
-- No terminal screen scraping as the source of truth.
-- No PTY screen text in the public stdout streaming contract.
+| Command | Backend |
+|---|---|
+| `openp claude` | Claude backend |
+| `openp codex` | Codex backend |
+| `openp kiro` | Kiro backend |
 
-The runner observes structured artifacts or structured stdout produced by the backend CLI and treats terminal rendering as an execution surface, not as a response API.
+Use trusted-tool options only in workspaces where backend tool execution is acceptable.
 
-## CLI Shape
+## Command Shape
 
 ```bash
-openp claude "prompt"
-echo "prompt" | openp claude
-openp claude --session-id <uuid> "prompt"
-openp claude --resume <uuid> "prompt"
-openp claude --timeout 60 "prompt"
-openp claude --output-format json "prompt"
-openp claude --output-format json --json-schema '{"type":"object"}' "prompt"
-openp claude --output-format stream-json "prompt"
-openp claude --output-format stream-json --include-partial-messages "prompt"
-printf '{"type":"user","message":{"content":"prompt"}}\n' | openp claude --input-format stream-json --output-format stream-json
-printf '{"type":"user","message":{"content":"prompt"}}\n' | openp claude --input-format stream-json --output-format stream-json --include-partial-messages
-printf '%s\n%s\n' \
-  '{"type":"user","message":{"content":"first prompt"}}' \
-  '{"type":"user","message":{"content":"second prompt"}}' \
+openp [options] <backend> [options] [prompt]
+echo "prompt" | openp [options] <backend> [options]
+```
+
+Public options may appear before or after the backend.
+
+Prompt text comes from positional arguments. If no positional prompt is supplied, `openp` reads stdin.
+
+For stream-json input, pass newline-delimited user events on stdin:
+
+```bash
+printf '{"type":"user","message":{"content":"hello"}}\n' \
   | openp claude --input-format stream-json --output-format stream-json
 ```
 
-The first argument (`claude`) is the backend subcommand. It selects the `claude-code` backend. A backend is always required; there is no implicit default.
+## Output Modes
 
-## Workspace Trust
+| Mode | stdout |
+|---|---|
+| `--output-format text` | result answer text only |
+| `--output-format json` | one JSON result object |
+| `--output-format stream-json` | JSONL `openp` records ending with `openp.form: "result"` |
 
-Claude Code print mode skips the workspace trust dialog in non-interactive output. For compatibility, `openp` confirms the initial Claude Code workspace trust prompt once when starting the interactive backend. If the backend still waits for startup input after that confirmation, `openp` fails closed instead of parsing the terminal screen.
+JSON-family outputs emit `openp` as the public contract.
+Use `openp.form`, `openp.scope`, and `openp.output` to distinguish streaming output, result output, answer, reasoning, tool calls, and tool results.
+Result output is the confirmed turn result as a whole; streaming output is not the result.
+Backend-native labels are source metadata, not public output item discriminators. Backend-specific source-field mapping is documented under `src/backends/<backend>/SPEC.md`.
+JSON-family stdout uses `openp` as the only top-level public object.
+
+Default `stream-json` output is result-oriented for the active turn. It emits the terminal `openp.form: "result"` record after the backend result is available. Confirmed result artifacts are nested inside aggregate `openp.output` arrays for `answer`, `reasoning`, `toolCall`, and `toolResult`.
+
+Use `--streaming` only when the caller wants active-turn streaming events:
+
+```bash
+openp claude --output-format stream-json --streaming "hello"
+```
+
+Streaming output uses `openp.form: "streaming"` records whose `openp.output` object has exactly one of `answer`, `reasoning`, `toolCall`, or `toolResult`. For answer and reasoning streaming, that value is the cumulative active-turn snapshot visible so far, not a delta and not only the latest backend segment. Tool streaming records contain complete `toolCall` or `toolResult` objects, not public tool deltas.
+
+Streaming `openp.output` is strict oneOf:
+
+```yaml
+output:
+  answer: string
+```
+
+Result `openp.output` is not oneOf:
+
+```yaml
+output:
+  answer: []
+  reasoning: []
+  toolCall: []
+  toolResult: []
+```
+
+Result diagnostics live under `openp.metadata`. When the backend provides token diagnostics, `openp.metadata.usage` contains full-turn usage, `openp.metadata.lastSubturnUsage` contains the last assistant subturn usage, `openp.metadata.lastSubturnContextTokens` contains `inputTokens + cacheReadInputTokens` for that last subturn, and `openp.metadata.contextWindow` contains the model context window size when known. Unknown diagnostics are `null` or omitted.
+
+Public JSON-family output does not use `type`, `kind`, `assistant.message`, `assistant.event`, `text`, `textDelta`, `answerText`, `answers`, `reasoningText`, `toolCalls`, or `toolResults` as alternate payload fields.
+
+## Sessions
+
+First-turn session ids are generated by `openp` or the selected backend. Callers do not choose first-turn session ids.
+
+For resume-capable automation, use `json` or `stream-json` output, read the returned `openp.sessionId`, and pass it to `--resume`.
+
+```bash
+openp codex --output-format json "first prompt"
+openp codex --resume <session-id> "follow-up prompt"
+```
+
+Text output prints result answer text only, so it is not suitable when the caller needs to capture a session id.
+
+## Timeout And Interrupt
+
+`openp` has no default turn timeout.
+
+```bash
+openp claude --timeout 60 "prompt"
+openp claude --timeout 0 "prompt"
+```
+
+`--timeout 0` disables the timeout. Ctrl-C requests graceful interruption first; repeated Ctrl-C escalates interruption.
+
+## Public Options
+
+Only these options are the public `openp` interface. Backend support for option values can vary; when a selected backend has no verified support for an option, `openp` fails instead of silently forwarding it.
+
+| Option | Purpose |
+|---|---|
+| `--resume <session-id>` | resume a previously returned session id |
+| `--timeout <seconds>` | explicit per-turn wall-clock timeout |
+| `--input-format <fmt>` | `text` or `stream-json` |
+| `--output-format <fmt>` | `text`, `json`, or `stream-json` |
+| `--model <model>` | selected backend model value |
+| `--effort <level>` | selected backend effort value where supported |
+| `--tools <tools>` | selected backend tool policy where supported |
+| `--json-schema <json>` | structured output schema where supported |
+| `--streaming` | active-turn streaming opt-in |
+| `--include-partial-messages` | deprecated alias for `--streaming` |
+| `--dangerously-skip-permissions` | trusted tool execution where supported |
+| `--debug-log` | write local runner diagnostics to the default open-p state log |
+| `--verbose` | include open-p diagnostic markers or warnings in output |
+
+Options not listed by `openp --help` are not part of the public interface.
+
+## Diagnostics
+
+`--debug-log` writes local diagnostics to:
+
+```text
+${XDG_STATE_HOME:-~/.local/state}/open-p/workspaces/<workspace-hash>/logs/debug.jsonl
+```
+
+Debug logs can include session ids, errors, prompts, response previews, and other sensitive failure context.
+
+`--verbose` does not enable debug logging by itself. In text mode it appends an open-p verbose marker after the result answer text. When warnings exist, text output includes warning lines, and JSON / stream-json outputs include canonical warnings under `openp.metadata.warnings`.
+
+## Help
+
+```bash
+openp --help
+openp --version
+```

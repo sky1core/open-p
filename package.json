@@ -1,14 +1,13 @@
 {
   "name": "open-p",
-  "version": "0.1.0",
-  "private": true,
+  "version": "0.5.0",
+  "license": "MIT",
   "type": "module",
   "bin": {
     "openp": "./dist/src/cli.js"
   },
   "files": [
     "dist/src/",
-    "scripts/install-claude-shim.mjs",
     "README.md"
   ],
   "scripts": {
@@ -18,9 +17,8 @@
     "test": "tsx --test test/*.test.ts",
     "verify": "npm run typecheck && npm test",
     "prepare": "npm run build",
-    "install:claude-shim": "node scripts/install-claude-shim.mjs",
     "smoke:live": "node scripts/live-smoke.mjs",
-    "verify:claude-p-contract": "node scripts/verify-claude-p-contract.mjs"
+    "verify:stream-json-contract": "node scripts/verify-stream-json-contract.mjs"
   },
   "engines": {
     "node": ">=20"

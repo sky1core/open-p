@@ -6,15 +6,15 @@ import test from 'node:test';
 import {
   loadLocalClaudeCodeBackendRuntimesFromModelsYaml,
   loadLocalClaudeCodeBackendsFromModelsYaml,
-} from '../src/backends/claude-code/models-config.js';
+} from '../src/backends/claude/models-config.js';
 
-test('loads claude-code local backends from config models yaml arrays', async () => {
+test('loads claude local backends from config models yaml arrays', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'openp-models-'));
   const path = join(dir, 'models.yaml');
   await writeFile(path, [
     'backends:',
-    '  - id: local-claude-code',
-    '    kind: claude-code',
+    '  - id: local-claude',
+    '    kind: claude',
     '    label: Local Claude Code',
     '    anthropicBaseUrl: http://127.0.0.1:9999',
     '    defaultModel: local-sonnet',
@@ -31,19 +31,19 @@ test('loads claude-code local backends from config models yaml arrays', async ()
   const backends = await loadLocalClaudeCodeBackendsFromModelsYaml(path);
 
   assert.equal(backends.length, 1);
-  assert.equal(backends[0]?.id, 'local-claude-code');
+  assert.equal(backends[0]?.id, 'local-claude');
   assert.equal(backends[0]?.anthropicBaseUrl, 'http://127.0.0.1:9999');
   assert.equal(backends[0]?.models?.[0]?.maxContextTokens, 123_000);
   assert.deepEqual(backends[0]?.models?.[0]?.reasoningEfforts, ['low', 'medium', 'high']);
 });
 
-test('loads claude-code local backends from config backend maps', async () => {
+test('loads claude local backends from config backend maps', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'openp-models-'));
   const path = join(dir, 'models.yaml');
   await writeFile(path, [
     'backends:',
-    '  local-claude-code:',
-    '    kind: claude-code',
+    '  local-claude:',
+    '    kind: claude',
     '    baseUrl: http://127.0.0.1:8888',
     '',
   ].join('\n'));
@@ -51,7 +51,7 @@ test('loads claude-code local backends from config backend maps', async () => {
   const backends = await loadLocalClaudeCodeBackendsFromModelsYaml(path);
 
   assert.equal(backends.length, 1);
-  assert.equal(backends[0]?.id, 'local-claude-code');
+  assert.equal(backends[0]?.id, 'local-claude');
   assert.equal(backends[0]?.baseUrl, 'http://127.0.0.1:8888');
 });
 
@@ -60,8 +60,8 @@ test('loads caller-ready local backend runtimes from config models yaml', async 
   const path = join(dir, 'models.yaml');
   await writeFile(path, [
     'backends:',
-    '  local-claude-code:',
-    '    kind: claude-code',
+    '  local-claude:',
+    '    kind: claude',
     '    anthropicBaseUrl: http://127.0.0.1:9999',
     '    defaultModel: local-sonnet',
     '    models:',
@@ -73,7 +73,7 @@ test('loads caller-ready local backend runtimes from config models yaml', async 
   const runtimes = await loadLocalClaudeCodeBackendRuntimesFromModelsYaml(path);
 
   assert.equal(runtimes.length, 1);
-  assert.equal(runtimes[0]?.id, 'local-claude-code');
+  assert.equal(runtimes[0]?.id, 'local-claude');
   assert.equal(runtimes[0]?.descriptor.defaultModel, 'local-sonnet');
   assert.equal(runtimes[0]?.workerDefaults.local, true);
   assert.deepEqual(runtimes[0]?.workerDefaults.env, {
@@ -84,14 +84,14 @@ test('loads caller-ready local backend runtimes from config models yaml', async 
   });
 });
 
-test('fails closed when claude-code backend or model id is missing', async () => {
+test('fails closed when claude backend or model id is missing', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'openp-models-'));
   const missingBackendId = join(dir, 'missing-backend-id.yaml');
   const missingModelId = join(dir, 'missing-model-id.yaml');
-  await writeFile(missingBackendId, 'kind: claude-code\n');
+  await writeFile(missingBackendId, 'kind: claude\n');
   await writeFile(missingModelId, [
-    'id: local-claude-code',
-    'kind: claude-code',
+    'id: local-claude',
+    'kind: claude',
     'models:',
     '  - maxContextTokens: 1',
     '',
@@ -106,8 +106,8 @@ test('fails closed when defaultModel is absent from configured models in models 
   const path = join(dir, 'default-model-missing.yaml');
   await writeFile(path, [
     'backends:',
-    '  local-claude-code:',
-    '    kind: claude-code',
+    '  local-claude:',
+    '    kind: claude',
     '    defaultModel: missing-model',
     '    models:',
     '      - id: local-sonnet',

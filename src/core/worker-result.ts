@@ -12,11 +12,17 @@ export interface WorkerResultMappingOptions {
 
 export function toWorkerTurnResult(
   result: TurnResult,
-  sessionId: string,
+  fallbackSessionId: string,
   options: WorkerResultMappingOptions = {},
 ): WorkerTurnResult {
   const inputTokens = result.diagnostics.usage.inputTokens;
   const cacheReadInputTokens = result.diagnostics.usage.cacheReadInputTokens;
+  const lastSubturnUsage = result.diagnostics.lastSubturnUsage ?? null;
+  const lastSubturnContextTokens = result.diagnostics.lastSubturnContextTokens ??
+    (lastSubturnUsage
+      ? addNullable(lastSubturnUsage.inputTokens, lastSubturnUsage.cacheReadInputTokens)
+      : null);
+  const sessionId = result.sessionId ?? fallbackSessionId;
   return {
     content: result.text,
     reasoningContent: result.reasoningContent ?? null,
@@ -30,8 +36,10 @@ export function toWorkerTurnResult(
       outputTokens: result.diagnostics.usage.outputTokens,
       cacheReadInputTokens,
       ...(result.diagnostics.rawUsage ? { rawUsage: result.diagnostics.rawUsage } : {}),
-      contextWindow: options.contextWindow ?? null,
-      lastSubturnContextTokens: addNullable(inputTokens, cacheReadInputTokens),
+      ...(result.diagnostics.model ? { model: result.diagnostics.model } : {}),
+      contextWindow: result.diagnostics.contextWindow ?? options.contextWindow ?? null,
+      ...(lastSubturnUsage ? { lastSubturnUsage } : {}),
+      lastSubturnContextTokens,
       durationMs: result.diagnostics.durationMs,
       totalCostUsd: options.totalCostUsd ?? null,
       stopReason: (options.stopReason ?? result.diagnostics.stopReason) ?? null,

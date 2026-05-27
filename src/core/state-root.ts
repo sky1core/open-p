@@ -4,13 +4,7 @@ import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 
 export function resolveOpenPStateRoot(projectRoot: string, env: NodeJS.ProcessEnv = process.env): string {
-  const override = normalizeEnvPath(env.OPENP_STATE_DIR);
   const workspaceKey = workspaceStateKey(projectRoot);
-
-  if (override) {
-    return join(override, 'workspaces', workspaceKey);
-  }
-
   const xdgStateHome = normalizeEnvPath(env.XDG_STATE_HOME);
   const base = xdgStateHome || join(homedir(), '.local', 'state');
   return join(base, 'open-p', 'workspaces', workspaceKey);

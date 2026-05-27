@@ -3,74 +3,90 @@
 import { randomUUID } from 'node:crypto';
 import { createInterface } from 'node:readline';
 import { stdin } from 'node:process';
-import { parseCliArgs, resolvePrompt, type CliOptions } from './core/cli-args.js';
-import { createAbortError } from './core/abort.js';
-import { appendDebugLog } from './core/debug-log.js';
-import { EXIT_CODES, OpenPError, toExitCode } from './core/errors.js';
-import { parseJsonSchemaText } from './core/json-schema.js';
-import { isPreviewCompatibleWithFinalText } from './core/preview-compat.js';
+import { resolveInitialTurnSessionId } from './core/backend-session-policy.js';
 import {
-  createPartialMessageStreamState,
-  extractAssistantSnapshotReasoningText,
-  extractAssistantSnapshotText,
-  formatBackgroundAssistantTextEvent,
-  formatIntermediateAssistantSnapshotEvent,
-  formatIntermediateReasoningEvent,
-  formatIntermediateTextEvent,
-  formatPartialMessageLifecycleEvents,
-  formatPartialMessageStopEvents,
-  formatPartialDeltaEvents,
-  formatSystemInitEvent,
-  formatSystemStatusEvent,
+  parseCliArgs,
+  parseDebugLogOption,
+  parseVerboseOption,
+  resolvePrompt,
+  type CliOptions,
+  type DebugLogOption,
+  type ResolvedCliOptions,
+} from './core/cli-args.js';
+import { createAbortError } from './core/abort.js';
+import { appendDebugLog, resolveDefaultDebugLogPath, type DebugLogEntry } from './core/debug-log.js';
+import { EXIT_CODES, OpenPError, toExitCode } from './core/errors.js';
+import { installProcessSignalHandlers } from './core/graceful-interrupt.js';
+import { parseJsonSchemaText } from './core/json-schema.js';
+import {
+  buildIntermediateAssistantSnapshotEvents,
+  createStreamingMessageState,
+  formatStreamingMessageSnapshotEvents,
   formatTurnResult,
-  formatWorkerTurnResult,
-  resolveKnownContextWindow,
+  isStreamingReasoningReplacementError,
+  resetStreamingMessageState,
+  type OutputWarning,
   resolveStructuredOutputToolUseId,
 } from './core/output.js';
+import {
+  StreamingResultDiagnosticTracker,
+  type StreamingResultDiagnosticViolation,
+} from './core/streaming-result-diagnostics.js';
 import { SessionStateStore, validateSessionStateCompatibility } from './core/session-state.js';
 import { runStreamJsonWorkerLines } from './core/stream-json-worker-runner.js';
-import type { AssistantEventSnapshot } from './core/types.js';
+import type { AssistantEventSnapshot, TurnResult } from './core/types.js';
 import { TmuxProvider } from './runners/tmux.js';
-import { registerBackend, getBackendProvider, getKnownBackendNames, resolveCanonicalBackendId } from './core/backend-registry.js';
-import { claudeCodeBackendProvider } from './backends/claude-code/index.js';
+import { registerBackend, getBackendProvider, getKnownBackendNames, resolveRegisteredBackendId } from './core/backend-registry.js';
+import { getOpenPVersion } from './core/version.js';
+import { claudeBackendProvider } from './backends/claude/index.js';
+import { codexBackendProvider } from './backends/codex/index.js';
+import { kiroBackendProvider } from './backends/kiro/index.js';
 
-registerBackend(claudeCodeBackendProvider);
+registerBackend(claudeBackendProvider);
+registerBackend(codexBackendProvider);
+registerBackend(kiroBackendProvider);
 
 const HELP = `openp
 
-PTY-based prompt runner for interactive agent CLIs.
+Prompt-turn compatibility runner for local agent CLIs.
 
 Usage:
-  openp <backend> [options] [prompt]
-  openp --backend <id> [options] [prompt]
+  openp [options] <backend> [options] [prompt]
+  echo "prompt" | openp [options] <backend> [options]
 
 Backends:
-  claude               Claude Code interactive CLI (alias for claude-code)
+  claude    Claude Code interactive backend
+  codex     Codex exec backend
+  kiro      Kiro ACP backend
 
-Options:
-  --backend <id>       Backend id (alternative to positional)
-  --provider <id>      PTY provider. Default: tmux
-  --session-id <uuid>  Use or create a backend session with this id
-  --resume <uuid>      Resume a backend session with this id
-  --timeout <seconds>  Turn timeout
-  --input-format <fmt>   text or stream-json
-  --output-format <fmt>  text, json, or stream-json
-  --model <model>      Backend model
-  --permission-mode <mode>
-  --effort <level>     Backend reasoning effort pass-through
-  --brief              Backend SendUserMessage compatibility pass-through
-  --verbose            Backend verbose mode pass-through
-  --append-system-prompt <text>
-  --system-prompt <text>
-  --json-schema <json> Validate and return structured output
-  --include-partial-messages
+Core options:
+  --resume <session-id>       Resume a previously returned open-p session id
+  --timeout <seconds>         Wall-clock turn timeout. Default: disabled; 0 disables
+  --input-format <fmt>        text or stream-json
+  --output-format <fmt>       text, json, or stream-json
+  --model <model>             Backend model where supported
+  --effort <level>            Backend reasoning effort where supported
+  --tools <tools>             Tool allowlist where supported
+  --json-schema <json>        Validate and return structured output
   --dangerously-skip-permissions
-  --debug-log <path>   Write runner diagnostics to a local file
-  --version            Show version
-  -h, --help           Show this help
-`;
+                              Trust backend tool execution where supported
 
-const VERSION = '0.1.0';
+Streaming and diagnostics:
+  --streaming                 Opt in to active-turn streaming snapshots
+  --include-partial-messages  Deprecated alias for --streaming
+  --debug-log                 Write runner diagnostics to the default open-p state log
+  --verbose                   Mark verbose text output and include diagnostics
+
+Top-level commands:
+  openp --version             Show version
+  openp -h, openp --help      Show this help
+
+Contract:
+  Backend selection is the first non-option positional argument.
+  Public options may appear before or after the backend.
+  Default stream-json output is result-only. Use --streaming for active-turn streaming.
+  Only the options listed above are public openp options.
+`;
 
 async function main(argv: readonly string[]): Promise<number> {
   if (argv.length === 1 && (argv[0] === '--help' || argv[0] === '-h')) {
@@ -78,18 +94,23 @@ async function main(argv: readonly string[]): Promise<number> {
     return EXIT_CODES.success;
   }
   if (argv.length === 1 && argv[0] === '--version') {
-    process.stdout.write(`openp ${VERSION}\n`);
+    process.stdout.write(`openp ${getOpenPVersion()}\n`);
     return EXIT_CODES.success;
   }
 
-  let debugLogPath: string | null = null;
+  const cwd = process.cwd();
+  let debugLogPath = resolveDebugLogPath(parseDebugLogOption(argv), cwd);
+  let verbose = parseVerboseOption(argv);
   try {
     const rawOptions = parseCliArgs(argv, getKnownBackendNames());
-    const canonicalBackend = resolveCanonicalBackendId(rawOptions.backend);
-    const options = canonicalBackend !== rawOptions.backend
-      ? { ...rawOptions, backend: canonicalBackend } as typeof rawOptions
-      : rawOptions;
+    const registeredBackendId = resolveRegisteredBackendId(rawOptions.backend);
+    const registeredOptions = { ...rawOptions, backend: registeredBackendId } as typeof rawOptions;
+    const options: ResolvedCliOptions = {
+      ...registeredOptions,
+      debugLog: resolveDebugLogPath(registeredOptions.debugLog, cwd),
+    };
     debugLogPath = options.debugLog;
+    verbose = options.verbose;
     if (options.inputFormat === 'stream-json' && options.outputFormat === 'stream-json') {
       return await runStreamJsonWorker(options);
     }
@@ -97,7 +118,6 @@ async function main(argv: readonly string[]): Promise<number> {
     await appendDebugLog(debugLogPath, {
       event: 'start',
       backend: options.backend,
-      provider: options.provider,
       backendSessionId: options.backendSessionId,
       resume: options.resume,
       outputFormat: options.outputFormat,
@@ -106,221 +126,238 @@ async function main(argv: readonly string[]): Promise<number> {
     const backendProvider = getBackendProvider(options.backend);
     const provider = new TmuxProvider();
     const backend = backendProvider.createBackend(provider);
-    const wroteStreamInit = options.outputFormat === 'stream-json';
-    const outputMetadata = buildOutputMetadata(options, process.cwd());
-    if (wroteStreamInit) {
-      process.stdout.write(formatSystemInitEvent(options.backendSessionId, outputMetadata));
-      if (options.includePartialMessages) {
-        process.stdout.write(formatSystemStatusEvent({
-          sessionId: options.backendSessionId,
-          status: 'requesting',
-        }));
-      }
+    const stateStore = new SessionStateStore(cwd);
+    const expectedState = {
+      backend: options.backend,
+      backendSessionId: options.backendSessionId,
+      cwd,
+    };
+    const existingState = options.resume
+      ? await stateStore.requireCompatible(expectedState)
+      : await stateStore.load(options.backendSessionId);
+    if (existingState) {
+      validateSessionStateCompatibility(existingState, expectedState);
     }
-    const partialState = createPartialMessageStreamState();
-    let partialDeltaFailed = false;
-    let latestReasoningText: string | null = null;
-    let latestIntermediateText: string | null = null;
-    const emittedIntermediateTexts: string[] = [];
-    const emittedIntermediateReasoningTexts: string[] = [];
-    const emittedIntermediateSnapshots: AssistantEventSnapshot[] = [];
-    const writeIntermediateSnapshot = (snapshot: AssistantEventSnapshot): void => {
-      if (
-        options.outputFormat !== 'stream-json' ||
-        options.includePartialMessages ||
-        options.jsonSchema
-      ) {
-        return;
-      }
-      const text = extractAssistantSnapshotText(snapshot);
-      const reasoningText = extractAssistantSnapshotReasoningText(snapshot);
-      if (text) {
-        if (emittedIntermediateTexts.length > 0) {
-          const publishedText = writeIntermediateText(text, 'jsonl');
-          if (publishedText || text === latestIntermediateText) {
-            if (reasoningText) {
-              writeIntermediateReasoning(reasoningText, 'jsonl');
-            }
-            return;
-          }
-          return;
-        }
-        latestIntermediateText = text;
-        emittedIntermediateTexts.push(text);
-      }
-      if (reasoningText) {
-        latestReasoningText = reasoningText;
-        emittedIntermediateReasoningTexts.push(reasoningText);
-      }
-      emittedIntermediateSnapshots.push(snapshot);
-      process.stdout.write(formatIntermediateAssistantSnapshotEvent({
-        snapshot,
-        sessionId: options.backendSessionId,
-      }));
-    };
-    const writeIntermediateReasoning = (
+    const initialPublicSessionId = resolveInitialTurnSessionId({
+      resume: options.resume,
+      backendSessionId: options.backendSessionId,
+    });
+    const outputMetadata = buildOutputMetadata(options, cwd);
+    const streamingState = createStreamingMessageState();
+    const streamingResultTracker = new StreamingResultDiagnosticTracker();
+    const emittedAssistantSnapshots: AssistantEventSnapshot[] = [];
+    const emittedAssistantEvents: Record<string, unknown>[] = [];
+    let streamingSnapshotFailed = false;
+    let streamingReasoningSnapshotSuppressed = false;
+    let streamingSnapshotError: unknown = null;
+    const writeStreamingSnapshot = (
       text: string,
-      _source?: 'jsonl' | 'screen',
-      contentBlocks?: readonly Record<string, unknown>[] | null,
-    ): void => {
-      if (
-        options.outputFormat !== 'stream-json' ||
-        options.includePartialMessages ||
-        options.jsonSchema ||
-        !text ||
-        text === latestReasoningText
-      ) {
-        return;
-      }
-      latestReasoningText = text;
-      emittedIntermediateReasoningTexts.push(text);
-      process.stdout.write(formatIntermediateReasoningEvent({
-        turnId: options.turnId,
-        sessionId: options.backendSessionId,
-        text,
-        contentBlocks,
-        model: options.model,
-      }));
-    };
-    const writeIntermediateText = (text: string, source: 'jsonl' | 'screen'): boolean => {
-      if (
-        options.outputFormat !== 'stream-json' ||
-        options.includePartialMessages ||
-        options.jsonSchema ||
-        source === 'screen' ||
-        !text ||
-        text === latestIntermediateText ||
-        (latestIntermediateText !== null &&
-          (text.length <= latestIntermediateText.length || !text.startsWith(latestIntermediateText)))
-      ) {
+      reasoningText: string | null = null,
+      sessionId: string | null = initialPublicSessionId,
+    ): boolean => {
+      if (streamingSnapshotFailed) {
         return false;
       }
-      latestIntermediateText = text;
-      emittedIntermediateTexts.push(text);
-      process.stdout.write(formatIntermediateTextEvent({
-        turnId: options.turnId,
-        sessionId: options.backendSessionId,
-        text,
-        model: options.model,
-      }));
-      return true;
-    };
-    const writePartialDelta = (text: string, reasoningText: string | null = latestReasoningText): void => {
-      if (partialDeltaFailed) {
-        return;
-      }
+      const reasoningForSnapshot = streamingReasoningSnapshotSuppressed ? null : reasoningText;
       try {
-        process.stdout.write(formatPartialDeltaEvents(partialState, {
-          sessionId: options.backendSessionId,
+        const previousText = streamingState.previousText;
+        const previousReasoningText = streamingState.previousReasoningText;
+        const streamingOutput = formatStreamingMessageSnapshotEvents(streamingState, {
+          turnId: options.turnId,
+          sessionId,
           model: options.model,
           text,
-          reasoningText,
-        }));
-      } catch {
-        partialDeltaFailed = true;
+          reasoningText: reasoningForSnapshot,
+        });
+        process.stdout.write(streamingOutput);
+        if (text && text !== previousText) {
+          streamingResultTracker.recordAnswerText(text);
+        }
+        if (reasoningForSnapshot && reasoningForSnapshot !== previousReasoningText) {
+          streamingResultTracker.recordReasoningText(reasoningForSnapshot);
+        }
+        return true;
+      } catch (error) {
+        if (reasoningForSnapshot && isStreamingReasoningReplacementError(error)) {
+          streamingReasoningSnapshotSuppressed = true;
+          streamingSnapshotError ??= error;
+          try {
+            const previousText = streamingState.previousText;
+            const streamingOutput = formatStreamingMessageSnapshotEvents(streamingState, {
+              turnId: options.turnId,
+              sessionId,
+              model: options.model,
+              text,
+              reasoningText: null,
+            });
+            process.stdout.write(streamingOutput);
+            if (text && text !== previousText) {
+              streamingResultTracker.recordAnswerText(text);
+            }
+            return true;
+          } catch (retryError) {
+            streamingSnapshotFailed = true;
+            streamingSnapshotError = retryError;
+            return false;
+          }
+        }
+        streamingSnapshotFailed = true;
+        streamingSnapshotError = error;
+        return false;
       }
     };
-    const streamingEnabled = options.outputFormat === 'stream-json' && options.includePartialMessages && !options.jsonSchema;
-    const result = await backend.runTurn(
-      {
-        turnId: options.turnId,
-        prompt,
-        jsonSchema: options.jsonSchema ? parseJsonSchemaText(options.jsonSchema) : null,
-      },
-      {
-        cwd: process.cwd(),
-        provider: options.provider,
-        backendSessionId: options.backendSessionId,
-        resume: options.resume,
-        timeoutMs: options.timeoutMs,
-        model: options.model,
-        permissionMode: options.permissionMode,
-        appendSystemPrompt: options.appendSystemPrompt,
-        jsonSchema: options.jsonSchema,
-        backendArgs: options.backendArgs,
-        debugLog: options.debugLog,
-        paceIntermediateEvents: options.outputFormat === 'stream-json' && !options.includePartialMessages && !options.jsonSchema,
-        onIntermediateText: streamingEnabled
-          ? (text, source) => {
-              if (source === 'jsonl') {
-                writePartialDelta(text);
+    const writeCumulativeStreamingAnswerSnapshot = (text: string): boolean => {
+      return writeStreamingSnapshot(
+        text,
+        streamingState.previousReasoningText || null,
+      );
+    };
+    const writeCumulativeStreamingReasoningSnapshot = (text: string): boolean => {
+      return writeStreamingSnapshot(
+        streamingState.previousText,
+        text,
+      );
+    };
+    const streamingEnabled = options.outputFormat === 'stream-json' && options.streaming;
+    const signalHandlers = installProcessSignalHandlers();
+    let result: TurnResult;
+    try {
+      result = await backend.runTurn(
+        {
+          turnId: options.turnId,
+          prompt,
+          jsonSchema: options.jsonSchema ? parseJsonSchemaText(options.jsonSchema) : null,
+        },
+        {
+          cwd,
+          backendSessionId: options.backendSessionId,
+          resume: options.resume,
+          timeoutMs: options.timeoutMs,
+          model: options.model,
+          reasoningEffort: options.reasoningEffort,
+          permissionMode: options.permissionMode,
+          tools: options.tools,
+          jsonSchema: options.jsonSchema,
+          backendArgs: options.backendArgs,
+          debugLog: options.debugLog,
+          paceIntermediateEvents: streamingEnabled,
+          signal: signalHandlers.signal,
+          forceSignal: signalHandlers.forceSignal,
+          killSignal: signalHandlers.killSignal,
+          onIntermediateText: streamingEnabled
+              ? (text, source) => {
+                if (source === 'jsonl') {
+                  writeCumulativeStreamingAnswerSnapshot(text);
+                }
               }
-            }
-          : writeIntermediateText,
-        onIntermediateReasoning: streamingEnabled
-          ? (text) => {
-              latestReasoningText = text;
-              writePartialDelta(partialState.previousText, text);
-            }
-          : writeIntermediateReasoning,
-        onIntermediateAssistantSnapshot: streamingEnabled ? undefined : writeIntermediateSnapshot,
-      },
-    );
+            : undefined,
+          onIntermediateReasoning: streamingEnabled
+            ? (text) => {
+                writeCumulativeStreamingReasoningSnapshot(text);
+              }
+            : undefined,
+            onIntermediateAssistantSnapshot: streamingEnabled
+              ? (snapshot, source) => {
+                if (source !== 'jsonl') {
+                  return;
+                }
+                const assistantEvents = buildIntermediateAssistantSnapshotEvents({
+                  snapshot,
+                  sessionId: initialPublicSessionId,
+                  turnId: options.turnId,
+                }).filter((event) => snapshot.semanticKind === 'background' || !isStreamingAssistantTextEvent(event));
+                emittedAssistantSnapshots.push(snapshot);
+                emittedAssistantEvents.push(...assistantEvents);
+                for (const assistantEvent of assistantEvents) {
+                  process.stdout.write(`${JSON.stringify(assistantEvent)}\n`);
+                }
+              }
+            : undefined,
+        },
+      );
+    } finally {
+      signalHandlers.dispose();
+    }
+    if (signalHandlers.signal.aborted) {
+      throw createAbortError();
+    }
     await appendDebugLog(debugLogPath, {
       event: 'success',
       backendSessionId: options.backendSessionId,
       turnId: result.turnId,
       diagnostics: result.diagnostics,
     });
-    if (options.outputFormat === 'stream-json' && options.includePartialMessages) {
+    if (options.resume && result.sessionId && result.sessionId !== options.backendSessionId) {
+      throw new OpenPError('backend returned a different session id for a resumed turn', EXIT_CODES.protocolViolation);
+    }
+    const resultSessionId = result.sessionId ?? (options.resume ? options.backendSessionId : null);
+    if (!resultSessionId) {
+      throw new OpenPError('backend did not return a session id', EXIT_CODES.protocolViolation);
+    }
+    let successOutput = '';
+    let verboseWarnings: readonly OutputWarning[] = [];
+    if (options.outputFormat === 'stream-json' && options.streaming) {
+      const streamingIssues = await appendStreamingResultDiagnostic(debugLogPath, {
+        backend: options.backend,
+        turnId: result.turnId,
+        sessionId: resultSessionId,
+        streamingSnapshotError,
+        violations: streamingResultTracker.findViolations(result.text, result.reasoningContent ?? null),
+      });
+      verboseWarnings = options.verbose ? streamingIssuesToWarnings(streamingIssues, debugLogPath) : [];
+    }
+    if (options.outputFormat === 'stream-json' && options.streaming) {
       const structuredOutputToolUseId = resolveStructuredOutputToolUseId({
         structuredOutput: result.structuredOutput,
         assistantEvents: result.assistantEvents,
       });
-      const partialStop = {
-        sessionId: options.backendSessionId,
-        stopReason: result.diagnostics.stopReason,
-        usage: {
-          inputTokens: result.diagnostics.usage.inputTokens,
-          outputTokens: result.diagnostics.usage.outputTokens,
-          cacheReadInputTokens: result.diagnostics.usage.cacheReadInputTokens,
-        },
-      };
-      const partialTextTail = result.structuredOutput === undefined && !partialDeltaFailed
-        ? formatPartialTextDeltaBestEffort(partialState, {
-            sessionId: options.backendSessionId,
-            model: options.model,
-            text: result.text,
-            reasoningText: selectFinalReasoningText(latestReasoningText, result.reasoningContent ?? null),
-          })
-        : null;
-      process.stdout.write(result.structuredOutput === undefined
-        ? `${partialTextTail ?? ''}${formatPartialMessageStopEvents(partialState, partialStop)}`
-        : formatPartialMessageLifecycleEvents(partialState, {
-            model: options.model,
-            structuredOutput: result.structuredOutput,
-            structuredOutputToolUseId,
-            ...partialStop,
-          }));
-      process.stdout.write(formatTurnResult(result, {
+      resetStreamingMessageState(streamingState);
+      successOutput += formatTurnResult(result, {
         outputFormat: options.outputFormat,
-        backendSessionId: options.backendSessionId,
-        includeSystemInit: !wroteStreamInit,
+        backendSessionId: resultSessionId,
+        includeSystemInit: false,
         structuredOutputToolUseId,
+        suppressAssistantSnapshots: emittedAssistantSnapshots,
+        previouslyEmittedAssistantEvents: emittedAssistantEvents,
+        warnings: verboseWarnings,
+        verbose: options.verbose,
         ...outputMetadata,
-      }));
+      });
+      await stateStore.save({
+        backend: options.backend,
+        backendSessionId: resultSessionId,
+        cwd,
+        lastProviderSessionId: existingState?.lastProviderSessionId ?? null,
+        sessionLogPath: resultSessionId
+          ? await backendProvider.resolveSessionLogPath(resultSessionId, cwd)
+          : existingState?.sessionLogPath ?? null,
+        lastTurnId: result.turnId,
+      });
+      process.stdout.write(successOutput);
       return EXIT_CODES.success;
     }
-    const latestEmittedIntermediateText = emittedIntermediateTexts.at(-1) ?? null;
-    const suppressFinalAssistantText = options.outputFormat === 'stream-json' &&
-      isPreviewCompatibleWithFinalText(latestEmittedIntermediateText, result.text);
-    const suppressAssistantTexts = suppressFinalAssistantText
-      ? [...emittedIntermediateTexts, result.text]
-      : emittedIntermediateTexts;
-    const finalOutput = formatTurnResult(result, {
+    successOutput = formatTurnResult(result, {
       outputFormat: options.outputFormat,
-      backendSessionId: options.backendSessionId,
-      includeSystemInit: !wroteStreamInit,
-      suppressAssistantTexts,
-      suppressAssistantReasoningTexts: emittedIntermediateReasoningTexts,
-      suppressAssistantSnapshots: emittedIntermediateSnapshots,
-      suppressFallbackAssistantText: suppressFinalAssistantText,
+      backendSessionId: resultSessionId,
+      includeSystemInit: false,
+      warnings: verboseWarnings,
+      verbose: options.verbose,
       ...outputMetadata,
     });
+    await stateStore.save({
+      backend: options.backend,
+      backendSessionId: resultSessionId,
+      cwd,
+      lastProviderSessionId: existingState?.lastProviderSessionId ?? null,
+      sessionLogPath: resultSessionId
+        ? await backendProvider.resolveSessionLogPath(resultSessionId, cwd)
+        : existingState?.sessionLogPath ?? null,
+      lastTurnId: result.turnId,
+    });
     if (options.outputFormat === 'stream-json') {
-      process.stdout.write(finalOutput);
+      process.stdout.write(successOutput);
     } else {
-      process.stdout.write(finalOutput);
+      process.stdout.write(successOutput);
     }
     return EXIT_CODES.success;
   } catch (error) {
@@ -332,35 +369,34 @@ async function main(argv: readonly string[]): Promise<number> {
       exitCode,
     }).catch(() => undefined);
     process.stderr.write(`${message}\n`);
+    if (verbose) {
+      process.stderr.write(formatVerboseError(exitCode, debugLogPath));
+    }
     return exitCode;
   }
 }
 
-async function runStreamJsonWorker(options: CliOptions): Promise<number> {
+async function runStreamJsonWorker(options: ResolvedCliOptions): Promise<number> {
   if (stdin.isTTY === true) {
     throw new OpenPError('--input-format stream-json requires stdin', EXIT_CODES.usage);
   }
-  const abortController = new AbortController();
-  const handleSignal = (): void => {
-    abortController.abort();
-  };
-  process.once('SIGINT', handleSignal);
-  process.once('SIGTERM', handleSignal);
+  const signalHandlers = installProcessSignalHandlers();
   try {
     const backendProvider = getBackendProvider(options.backend);
     return await runStreamJsonWorkerLines({
       options,
-      lines: readStdinLines(abortController.signal),
+      lines: readStdinLines(signalHandlers.signal),
       bridge: backendProvider.createWorkerBridge(),
       projectRoot: process.cwd(),
       outputMetadata: buildOutputMetadata(options, process.cwd()),
-      signal: abortController.signal,
+      signal: signalHandlers.signal,
+      forceSignal: signalHandlers.forceSignal,
+      killSignal: signalHandlers.killSignal,
       resolveSessionLogPath: (sessionId, cwd) => backendProvider.resolveSessionLogPath(sessionId, cwd),
       write: (chunk) => process.stdout.write(chunk),
     });
   } finally {
-    process.removeListener('SIGINT', handleSignal);
-    process.removeListener('SIGTERM', handleSignal);
+    signalHandlers.dispose();
   }
 }
 
@@ -392,17 +428,81 @@ async function* readStdinLines(signal: AbortSignal): AsyncIterable<string> {
   }
 }
 
-function selectFinalReasoningText(latestReasoningText: string | null, finalReasoningText: string | null): string | null {
-  if (!finalReasoningText) {
-    return latestReasoningText;
+async function appendStreamingResultDiagnostic(
+  debugLogPath: string | null,
+  input: {
+    readonly backend: string;
+    readonly turnId: string;
+    readonly sessionId: string;
+    readonly streamingSnapshotError: unknown;
+    readonly violations: readonly StreamingResultDiagnosticViolation[];
+  },
+): Promise<readonly DebugLogEntry[]> {
+  const issues: DebugLogEntry[] = [];
+  if (input.streamingSnapshotError) {
+    issues.push({
+      event: 'streaming_snapshot_rejected',
+      message: 'streaming snapshot replacement is not prefix-compatible with the current stream message',
+      errorMessage: errorMessage(input.streamingSnapshotError),
+    });
   }
-  if (!latestReasoningText || finalReasoningText.startsWith(latestReasoningText)) {
-    return finalReasoningText;
+  issues.push(...input.violations.map((violation) => ({
+    event: 'streaming_result_mismatch',
+    ...violation,
+  })));
+  if (issues.length === 0) {
+    return issues;
   }
-  return latestReasoningText;
+  await appendDebugLog(debugLogPath, {
+    event: 'streaming_result_diagnostic',
+    severity: 'warning',
+    backend: input.backend,
+    turnId: input.turnId,
+    sessionId: input.sessionId,
+    issueCount: issues.length,
+    issues,
+  });
+  return issues;
 }
 
-function buildOutputMetadata(options: CliOptions, cwd: string): {
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function streamingIssuesToWarnings(
+  issues: readonly DebugLogEntry[],
+  debugLogPath: string | null,
+): readonly OutputWarning[] {
+  if (issues.length === 0) {
+    return [];
+  }
+  const message = debugLogPath
+    ? `Streaming result diagnostics were recorded (${issues.length}); result was preserved. See debug log: ${debugLogPath}.`
+    : `Streaming result diagnostics were detected (${issues.length}); result was preserved. Use --debug-log to record details.`;
+  return [{
+    severity: 'warning',
+    code: 'streaming_result_diagnostic',
+    message,
+  }];
+}
+
+function isStreamingAssistantTextEvent(event: Record<string, unknown>): boolean {
+  const openp = event.openp;
+  if (!openp || typeof openp !== 'object' || Array.isArray(openp)) return false;
+  const output = (openp as Record<string, unknown>).output;
+  if (!output || typeof output !== 'object' || Array.isArray(output)) return false;
+  return (openp as Record<string, unknown>).form === 'streaming' &&
+    (typeof (output as Record<string, unknown>).answer === 'string' ||
+      typeof (output as Record<string, unknown>).reasoning === 'string');
+}
+
+function formatVerboseError(exitCode: number, debugLogPath: string | null): string {
+  const debugLog = debugLogPath ? `\n[openp error] debug_log: ${debugLogPath}` : '';
+  return `[openp error] exit_code: ${exitCode}${debugLog}\n`;
+}
+
+function buildOutputMetadata(options: ResolvedCliOptions, cwd: string): {
+  readonly backend: string;
   readonly cwd: string;
   readonly model: string | null;
   readonly permissionMode: string | null;
@@ -410,22 +510,21 @@ function buildOutputMetadata(options: CliOptions, cwd: string): {
   readonly contextWindow: number | null;
 } {
   return {
+    backend: options.backend,
     cwd,
     model: options.model,
     permissionMode: options.permissionMode,
-    contextWindow: resolveKnownContextWindow(options.model),
-    ...(options.backendArgs.includes('--mcp-config') ? {} : { mcpServers: [] }),
+    contextWindow: null,
+    mcpServers: [],
   };
 }
 
-function formatPartialTextDeltaBestEffort(
-  state: ReturnType<typeof createPartialMessageStreamState>,
-  event: Parameters<typeof formatPartialDeltaEvents>[1],
-): string | null {
-  try {
-    return formatPartialDeltaEvents(state, event);
-  } catch {
-    return null;
+function resolveDebugLogPath(option: DebugLogOption, cwd: string): string | null {
+  switch (option.kind) {
+    case 'off':
+      return null;
+    case 'default':
+      return resolveDefaultDebugLogPath(cwd);
   }
 }
 

@@ -1,0 +1,273 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { formatWorkerTurnResult } from '../src/core/output.js';
+import {
+  extractKiroPromptScopedAssistantText,
+  extractKiroTurnResult,
+  extractKiroTurnResultText,
+  resolveKiroSessionLogPath,
+} from '../src/backends/kiro/session-log.js';
+
+function readKiroFixture(name: string): string {
+  return readFileSync(new URL(`./fixtures/kiro/${name}`, import.meta.url), 'utf8');
+}
+
+function firstBlocks(events: readonly any[]): any[] {
+  return events.map((event) => (event.message.content as any[])[0]);
+}
+
+function openPOutputForKiroResult(result: ReturnType<typeof extractKiroTurnResult>): any {
+  const output = formatWorkerTurnResult({
+    content: result.text ?? '',
+    reasoningContent: null,
+    assistantEvents: result.assistantEvents,
+    sessionId: '019e0000-0000-7000-8000-000000009999',
+    diagnostics: {
+      numTurns: 1,
+      inputTokens: null,
+      outputTokens: null,
+      cacheReadInputTokens: null,
+      contextWindow: null,
+      lastSubturnContextTokens: null,
+      durationMs: 1,
+      totalCostUsd: null,
+      stopReason: 'end_turn',
+      toolsUsed: result.toolsUsed,
+      autoCompacted: null,
+      intermediateTextCount: null,
+    },
+  }, {
+    turnId: 'turn_redacted_fixture',
+    backend: 'kiro',
+  });
+  return JSON.parse(output).openp.output;
+}
+
+test('resolveKiroSessionLogPath resolves the Kiro cli session jsonl path', () => {
+  assert.equal(
+    resolveKiroSessionLogPath('33333333-3333-4333-8333-333333333333', { HOME: '/tmp/openp-home' }),
+    join('/tmp/openp-home', '.kiro', 'sessions', 'cli', '33333333-3333-4333-8333-333333333333.jsonl'),
+  );
+});
+
+test('resolveKiroSessionLogPath rejects path-unsafe session ids', () => {
+  assert.equal(resolveKiroSessionLogPath('../bad', { HOME: '/tmp/openp-home' }), null);
+});
+
+test('extractKiroTurnResultText reads assistant text after the scoped prompt', () => {
+  const log = [
+    JSON.stringify({
+      version: 'v1',
+      kind: 'Prompt',
+      data: { content: [{ kind: 'text', data: 'hello' }] },
+    }),
+    JSON.stringify({
+      version: 'v1',
+      kind: 'AssistantMessage',
+      data: { content: [{ kind: 'text', data: 'A' }] },
+    }),
+    JSON.stringify({
+      version: 'v1',
+      kind: 'ToolResults',
+      data: { content: [{ kind: 'toolResult', data: { toolUseId: 'tooluse_read', content: [{ kind: 'text', data: 'tool output' }] } }] },
+    }),
+    JSON.stringify({
+      version: 'v1',
+      kind: 'AssistantMessage',
+      data: { content: [{ kind: 'text', data: 'B' }, { kind: 'toolUse', data: { toolUseId: 'tooluse_read', name: 'read' } }] },
+    }),
+  ].join('\n');
+
+  assert.equal(extractKiroTurnResultText(log), 'A\n\nB');
+  const result = extractKiroTurnResult(log);
+  assert.equal(result.text, 'A\n\nB');
+  assert.deepEqual(result.toolsUsed, ['read']);
+  assert.equal(result.assistantEvents.length, 2);
+  const toolResult = result.assistantEvents[0]!.message.content as any[];
+  assert.equal(toolResult[0].type, 'tool_result');
+  assert.equal(toolResult[0].tool_use_id, 'tooluse_read');
+  assert.equal(toolResult[0].content, 'tool output');
+  const toolUse = result.assistantEvents[1]!.message.content as any[];
+  assert.equal(toolUse[0].type, 'tool_use');
+  assert.equal(toolUse[0].id, 'tooluse_read');
+  assert.equal(toolUse[0].name, 'read');
+});
+
+test('extractKiroTurnResult preserves redacted Kiro long-answer session-log fixture', () => {
+  const result = extractKiroTurnResult(readKiroFixture('redacted-session-log-long-answer-no-tool.jsonl'));
+  const publicOutput = openPOutputForKiroResult(result);
+
+  assert.equal(result.text?.length, 1364);
+  assert.equal(result.assistantEvents.length, 0);
+  assert.deepEqual(result.toolsUsed, []);
+  assert.equal(publicOutput.answer.length, 1);
+  assert.equal(publicOutput.toolCall.length, 0);
+  assert.equal(publicOutput.toolResult.length, 0);
+});
+
+test('extractKiroTurnResult preserves redacted Kiro tool-use session-log fixture artifacts', () => {
+  const result = extractKiroTurnResult(readKiroFixture('redacted-session-log-tool-use-file.jsonl'));
+  const blocks = firstBlocks(result.assistantEvents);
+  const publicOutput = openPOutputForKiroResult(result);
+
+  assert.equal(result.text?.includes('sum=233'), true);
+  assert.equal(result.text?.length, 804);
+  assert.deepEqual(result.toolsUsed, ['read', 'write']);
+  assert.deepEqual(blocks.map((block) => block.type), ['tool_use', 'tool_result', 'tool_use', 'tool_result']);
+  assert.equal(blocks[0].name, 'read');
+  assert.equal(blocks[1].tool_use_id, blocks[0].id);
+  assert.equal(blocks[2].name, 'write');
+  assert.equal(blocks[3].tool_use_id, blocks[2].id);
+  assert.equal(publicOutput.answer.length, 1);
+  assert.equal(publicOutput.toolCall.length, 2);
+  assert.equal(publicOutput.toolResult.length, 2);
+});
+
+test('extractKiroTurnResult preserves redacted Kiro denied permission tool-result fixture artifacts', () => {
+  const result = extractKiroTurnResult(readKiroFixture('redacted-session-log-permission-tool-use.jsonl'));
+  const blocks = firstBlocks(result.assistantEvents);
+
+  assert.equal(result.text?.includes('파일 쓰기가 거부되었습니다'), true);
+  assert.equal(result.text?.length, 511);
+  assert.deepEqual(result.toolsUsed, ['read', 'write']);
+  assert.deepEqual(blocks.map((block) => block.type), ['tool_use', 'tool_result', 'tool_use', 'tool_result']);
+  assert.equal(blocks[1].tool_use_id, blocks[0].id);
+  assert.equal(blocks[3].tool_use_id, blocks[2].id);
+  assert.equal(String(blocks[3].content).includes('denied'), true);
+});
+
+test('extractKiroTurnResult preserves json tool result content', () => {
+  const log = [
+    JSON.stringify({
+      version: 'v1',
+      kind: 'Prompt',
+      data: { content: [{ kind: 'text', data: 'read json' }] },
+    }),
+    JSON.stringify({
+      version: 'v1',
+      kind: 'ToolResults',
+      data: {
+        content: [{
+          kind: 'toolResult',
+          data: {
+            toolUseId: 'tooluse_json',
+            content: [{ kind: 'json', data: { ok: true, items: [1, 2] } }],
+          },
+        }],
+      },
+    }),
+    JSON.stringify({
+      version: 'v1',
+      kind: 'AssistantMessage',
+      data: { content: [{ kind: 'text', data: 'done' }] },
+    }),
+  ].join('\n');
+
+  const result = extractKiroTurnResult(log);
+  assert.equal(result.text, 'done');
+  const toolResult = result.assistantEvents[0]!.message.content as any[];
+  assert.equal(toolResult[0].type, 'tool_result');
+  assert.equal(toolResult[0].tool_use_id, 'tooluse_json');
+  assert.equal(toolResult[0].content, '{"ok":true,"items":[1,2]}');
+});
+
+test('extractKiroTurnResultText uses the last prompt in a log segment', () => {
+  const log = [
+    JSON.stringify({
+      version: 'v1',
+      kind: 'Prompt',
+      data: { content: [{ kind: 'text', data: 'old prompt' }] },
+    }),
+    JSON.stringify({
+      version: 'v1',
+      kind: 'AssistantMessage',
+      data: { content: [{ kind: 'text', data: 'old answer' }] },
+    }),
+    JSON.stringify({
+      version: 'v1',
+      kind: 'Prompt',
+      data: { content: [{ kind: 'text', data: 'new prompt' }] },
+    }),
+    JSON.stringify({
+      version: 'v1',
+      kind: 'AssistantMessage',
+      data: { content: [{ kind: 'text', data: 'new answer' }] },
+    }),
+  ].join('\n');
+
+  assert.equal(extractKiroTurnResultText(log), 'new answer');
+});
+
+test('extractKiroTurnResultText fails closed without a prompt-scoped assistant message', () => {
+  const log = JSON.stringify({
+    version: 'v1',
+    kind: 'AssistantMessage',
+    data: { content: [{ kind: 'text', data: 'unscoped answer' }] },
+  });
+
+  assert.equal(extractKiroTurnResultText(log), null);
+});
+
+test('extractKiroTurnResultText keeps active answer even when it matches setup assistant text', () => {
+  const log = [
+    JSON.stringify({
+      version: 'v1',
+      kind: 'Prompt',
+      data: { content: [{ kind: 'text', data: 'hello' }] },
+    }),
+    JSON.stringify({
+      version: 'v1',
+      kind: 'AssistantMessage',
+      data: { content: [{ kind: 'text', data: 'Effort set to high.' }] },
+    }),
+    JSON.stringify({
+      version: 'v1',
+      kind: 'AssistantMessage',
+      data: { content: [{ kind: 'text', data: 'actual answer' }] },
+    }),
+  ].join('\n');
+
+  assert.equal(extractKiroTurnResultText(log), 'Effort set to high.\n\nactual answer');
+});
+
+test('extractKiroPromptScopedAssistantText reads the first setup prompt response after offset', () => {
+  const log = [
+    JSON.stringify({
+      version: 'v1',
+      kind: 'Prompt',
+      data: { content: [{ kind: 'text', data: '/effort high' }] },
+    }),
+    JSON.stringify({
+      version: 'v1',
+      kind: 'AssistantMessage',
+      data: { content: [{ kind: 'text', data: 'effort changed' }] },
+    }),
+  ].join('\n');
+
+  assert.deepEqual(extractKiroPromptScopedAssistantText(log), {
+    promptFound: true,
+    text: 'effort changed',
+    texts: ['effort changed'],
+  });
+});
+
+test('extractKiroPromptScopedAssistantText reports missing assistant text separately from missing prompt', () => {
+  const log = JSON.stringify({
+    version: 'v1',
+    kind: 'Prompt',
+    data: { content: [{ kind: 'text', data: '/effort high' }] },
+  });
+
+  assert.deepEqual(extractKiroPromptScopedAssistantText(log), {
+    promptFound: true,
+    text: null,
+    texts: [],
+  });
+  assert.deepEqual(extractKiroPromptScopedAssistantText(''), {
+    promptFound: false,
+    text: null,
+    texts: [],
+  });
+});

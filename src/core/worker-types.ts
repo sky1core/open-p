@@ -1,4 +1,4 @@
-import type { AssistantContentBlock, AssistantEventSnapshot, IntermediateTextSource } from './types.js';
+import type { AssistantContentBlock, AssistantEventSnapshot, BackendUsage, IntermediateTextSource } from './types.js';
 
 export interface WorkerTurnRequest {
   readonly sessionId: string | null;
@@ -10,7 +10,7 @@ export interface WorkerTurnRequest {
   readonly model?: string | null;
   readonly reasoningEffort?: string | null;
   readonly executionMode?: string | null;
-  readonly appendSystemPrompt?: string | null;
+  readonly tools?: string | null;
   readonly jsonSchema?: string | null;
   readonly bin?: string | null;
   readonly binArgs?: readonly string[];
@@ -21,6 +21,8 @@ export interface WorkerTurnRequest {
   readonly contextWindowsByModel?: Readonly<Record<string, number>>;
   readonly contextWindow?: number | null;
   readonly signal?: AbortSignal;
+  readonly forceSignal?: AbortSignal;
+  readonly killSignal?: AbortSignal;
   readonly onIntermediateText?: (text: string, source: IntermediateTextSource) => void;
   readonly onIntermediateReasoning?: (
     text: string,
@@ -40,7 +42,9 @@ export interface WorkerTurnDiagnostics {
   readonly outputTokens: number | null;
   readonly cacheReadInputTokens: number | null;
   readonly rawUsage?: Record<string, unknown> | null;
+  readonly model?: string | null;
   readonly contextWindow: number | null;
+  readonly lastSubturnUsage?: BackendUsage | null;
   readonly lastSubturnContextTokens: number | null;
   readonly durationMs: number | null;
   readonly totalCostUsd: number | null;
@@ -97,7 +101,7 @@ export interface LaunchSignature {
   readonly model: string | null;
   readonly reasoningEffort: string | null;
   readonly executionMode: string | null;
-  readonly appendSystemPrompt: string | null;
+  readonly tools: string | null;
   readonly jsonSchema: string | null;
   readonly env: Readonly<Record<string, string>>;
   readonly local: boolean;

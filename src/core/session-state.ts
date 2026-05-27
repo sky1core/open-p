@@ -1,15 +1,14 @@
 import { mkdir, readFile, stat, writeFile, chmod } from 'node:fs/promises';
 import { join } from 'node:path';
 import { EXIT_CODES, OpenPError } from './errors.js';
+import { isSafeSessionId } from './session-id.js';
 import { resolveOpenPStateRoot } from './state-root.js';
 
 export type BackendId = string;
-export type ProviderId = string;
 
 export interface SessionState {
   readonly schemaVersion: 1;
   readonly backend: BackendId;
-  readonly provider: ProviderId;
   readonly backendSessionId: string;
   readonly cwd: string;
   readonly lastProviderSessionId: string | null;
@@ -21,7 +20,6 @@ export interface SessionState {
 
 export interface SessionStateCompatibility {
   readonly backend: BackendId;
-  readonly provider: ProviderId;
   readonly backendSessionId: string;
   readonly cwd: string;
 }
@@ -89,7 +87,6 @@ export class SessionStateStore {
     const state: SessionState = {
       schemaVersion: 1,
       backend: input.backend,
-      provider: input.provider,
       backendSessionId: input.backendSessionId,
       cwd: input.cwd,
       lastProviderSessionId: input.lastProviderSessionId,
@@ -111,9 +108,6 @@ export function validateSessionStateCompatibility(state: SessionState, expected:
   if (state.backend !== expected.backend) {
     throw new OpenPError(`session ${expected.backendSessionId} belongs to backend ${state.backend}`, EXIT_CODES.sessionState);
   }
-  if (state.provider !== expected.provider) {
-    throw new OpenPError(`session ${expected.backendSessionId} belongs to provider ${state.provider}`, EXIT_CODES.sessionState);
-  }
   if (state.backendSessionId !== expected.backendSessionId) {
     throw new OpenPError(`session state id mismatch for ${expected.backendSessionId}`, EXIT_CODES.sessionState);
   }
@@ -131,7 +125,6 @@ function parseSessionState(value: unknown, path: string): SessionState {
   const state = {
     schemaVersion: object.schemaVersion,
     backend: object.backend,
-    provider: object.provider,
     backendSessionId: object.backendSessionId,
     cwd: object.cwd,
     lastProviderSessionId: object.lastProviderSessionId,
@@ -144,7 +137,6 @@ function parseSessionState(value: unknown, path: string): SessionState {
   if (
     state.schemaVersion !== 1 ||
     typeof state.backend !== 'string' || !state.backend ||
-    typeof state.provider !== 'string' || !state.provider ||
     typeof state.backendSessionId !== 'string' ||
     typeof state.cwd !== 'string' ||
     !isNullableString(state.lastProviderSessionId) ||
@@ -175,7 +167,7 @@ function isNotFoundError(error: unknown): boolean {
 }
 
 function assertValidSessionId(sessionId: string): void {
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(sessionId)) {
+  if (!isSafeSessionId(sessionId)) {
     throw new OpenPError(`invalid session id for state path: ${sessionId}`, EXIT_CODES.sessionState);
   }
 }

@@ -4,13 +4,13 @@ import { buildLaunchSignature, launchSignaturesEqual, stableLaunchSignatureKey }
 
 test('builds a stable launch signature with sorted env keys', () => {
   const first = buildLaunchSignature({
-    backendId: 'claude-code',
+    backendId: 'claude',
     bin: 'claude',
     binArgs: ['--allowedTools', 'Bash'],
     model: 'claude-haiku',
     reasoningEffort: 'medium',
-    executionMode: 'bypassPermissions',
-    appendSystemPrompt: 'extra rules',
+    executionMode: 'danger-full-access',
+    tools: 'Read',
     jsonSchema: '{"type":"object"}',
     env: {
       ZED: 'last',
@@ -19,13 +19,13 @@ test('builds a stable launch signature with sorted env keys', () => {
     local: true,
   });
   const second = buildLaunchSignature({
-    backendId: 'claude-code',
+    backendId: 'claude',
     bin: 'claude',
     binArgs: ['--allowedTools', 'Bash'],
     model: 'claude-haiku',
     reasoningEffort: 'medium',
-    executionMode: 'bypassPermissions',
-    appendSystemPrompt: 'extra rules',
+    executionMode: 'danger-full-access',
+    tools: 'Read',
     jsonSchema: '{"type":"object"}',
     env: {
       ANTHROPIC_BASE_URL: 'http://127.0.0.1:9999',
@@ -38,15 +38,15 @@ test('builds a stable launch signature with sorted env keys', () => {
   assert.equal(launchSignaturesEqual(first, second), true);
 });
 
-test('detects model, reasoning, permission, append prompt, json schema, env, and arg changes', () => {
+test('detects model, reasoning, permission, tools, json schema, env, and arg changes', () => {
   const base = buildLaunchSignature({
-    backendId: 'claude-code',
+    backendId: 'claude',
     bin: 'claude',
     binArgs: ['--allowedTools', 'Bash'],
     model: 'claude-haiku',
     reasoningEffort: 'medium',
-    executionMode: 'bypassPermissions',
-    appendSystemPrompt: 'extra rules',
+    executionMode: 'danger-full-access',
+    tools: 'Read',
     jsonSchema: '{"type":"object"}',
     env: {
       ANTHROPIC_BASE_URL: 'http://127.0.0.1:9999',
@@ -58,7 +58,7 @@ test('detects model, reasoning, permission, append prompt, json schema, env, and
     buildLaunchSignature({ ...base, model: 'claude-sonnet' }),
     buildLaunchSignature({ ...base, reasoningEffort: 'high' }),
     buildLaunchSignature({ ...base, executionMode: 'acceptEdits' }),
-    buildLaunchSignature({ ...base, appendSystemPrompt: 'different rules' }),
+    buildLaunchSignature({ ...base, tools: 'Bash' }),
     buildLaunchSignature({ ...base, jsonSchema: '{"type":"array"}' }),
     buildLaunchSignature({ ...base, env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8888' } }),
     buildLaunchSignature({ ...base, binArgs: ['--allowedTools', 'Read'] }),

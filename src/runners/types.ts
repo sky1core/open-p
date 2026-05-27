@@ -10,6 +10,7 @@ export interface PtySession {
   write(input: string): Promise<void>;
   submit(): Promise<void>;
   interrupt(): Promise<void>;
+  terminate(signal?: NodeJS.Signals): Promise<void>;
   exit(): Promise<void>;
   isAlive(): Promise<boolean>;
   captureText(): Promise<string>;

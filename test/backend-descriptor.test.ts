@@ -1,19 +1,20 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { CLAUDE_CODE_DESCRIPTOR } from '../src/backends/claude-code/descriptor.js';
+import { CLAUDE_CODE_DESCRIPTOR } from '../src/backends/claude/descriptor.js';
 
 test('Claude Code descriptor publishes backend identity and implemented capabilities', () => {
-  assert.equal(CLAUDE_CODE_DESCRIPTOR.id, 'claude-code');
-  assert.notEqual(CLAUDE_CODE_DESCRIPTOR.id, 'claude');
+  assert.equal(CLAUDE_CODE_DESCRIPTOR.id, 'claude');
+  assert.equal(CLAUDE_CODE_DESCRIPTOR.commandDisplay, 'claude');
   assert.notEqual(CLAUDE_CODE_DESCRIPTOR.id, 'codex');
   assert.deepEqual(CLAUDE_CODE_DESCRIPTOR.capabilities, {
     streaming: true,
     streamingGranularity: 'subturn',
-    backgroundAssistant: true,
+    backgroundAssistant: false,
     reasoningContent: true,
     abort: true,
     persistentProcess: true,
   });
+  assert.deepEqual(CLAUDE_CODE_DESCRIPTOR.executionModes, ['default', 'danger-full-access']);
 });
 
 test('Claude Code descriptor leaves model metadata to configured local backends', () => {

@@ -1,12 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { registerBackend, getBackendProvider, getRegisteredBackendIds, getKnownBackendNames, resolveCanonicalBackendId } from '../src/core/backend-registry.js';
+import { registerBackend, getBackendProvider, getRegisteredBackendIds, getKnownBackendNames, resolveRegisteredBackendId } from '../src/core/backend-registry.js';
 import type { BackendProvider } from '../src/core/backend.js';
 
-function stubProvider(id: string, aliases: string[] = []): BackendProvider {
+function stubProvider(id: string): BackendProvider {
   return {
     id,
-    aliases,
     descriptor: {} as never,
     createBackend: () => ({ runTurn: async () => ({}) }) as never,
     createWorkerBridge: () => ({
@@ -48,33 +47,13 @@ test('registerBackend replaces existing provider with same id', () => {
   assert.notEqual(getBackendProvider('test-replace'), first);
 });
 
-test('resolves alias to canonical provider', () => {
-  const provider = stubProvider('test-alias-target', ['test-short']);
-  registerBackend(provider);
-  assert.equal(getBackendProvider('test-short'), provider);
-  assert.equal(getBackendProvider('test-alias-target'), provider);
+test('resolveRegisteredBackendId validates registered backend id', () => {
+  registerBackend(stubProvider('test-registered'));
+  assert.equal(resolveRegisteredBackendId('test-registered'), 'test-registered');
 });
 
-test('replacement cleans up stale aliases', () => {
-  registerBackend(stubProvider('test-stale', ['test-old-alias']));
-  assert.equal(getBackendProvider('test-old-alias').id, 'test-stale');
-  registerBackend(stubProvider('test-stale', ['test-new-alias']));
-  assert.throws(
-    () => getBackendProvider('test-old-alias'),
-    /unsupported backend: test-old-alias/,
-  );
-  assert.equal(getBackendProvider('test-new-alias').id, 'test-stale');
-});
-
-test('resolveCanonicalBackendId returns canonical id for alias', () => {
-  registerBackend(stubProvider('test-canonical', ['test-canon-alias']));
-  assert.equal(resolveCanonicalBackendId('test-canon-alias'), 'test-canonical');
-  assert.equal(resolveCanonicalBackendId('test-canonical'), 'test-canonical');
-});
-
-test('getKnownBackendNames includes ids and aliases', () => {
-  registerBackend(stubProvider('test-known-id', ['test-known-alias']));
+test('getKnownBackendNames includes registered ids', () => {
+  registerBackend(stubProvider('test-known-id'));
   const names = getKnownBackendNames();
   assert.ok(names.has('test-known-id'));
-  assert.ok(names.has('test-known-alias'));
 });

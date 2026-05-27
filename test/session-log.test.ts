@@ -1,33 +1,77 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { appendFile, mkdtemp, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import {
+  resolveClaudeCodeProjectLogDir,
   resolveClaudeCodeSessionLogPath,
+  snapshotClaudeCodeSessionLogPaths,
   waitForClaudeCodeTurnResult,
-} from '../src/backends/claude-code/session-log.js';
+} from '../src/backends/claude/session-log.js';
 import { EXIT_CODES, OpenPError } from '../src/core/errors.js';
+import { formatTurnResult } from '../src/core/output.js';
 
 function line(event: unknown): string {
   return `${JSON.stringify(event)}\n`;
 }
 
+async function withClaudeProjectsRoot<T>(run: (root: string) => Promise<T>): Promise<T> {
+  const original = process.env.HOME;
+  const home = await mkdtemp(join(tmpdir(), 'openp-claude-home-'));
+  const root = join(home, '.claude', 'projects');
+  process.env.HOME = home;
+  try {
+    return await run(root);
+  } finally {
+    if (original === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = original;
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+function withDefaultClaudeProjectsRoot<T>(run: () => T): T {
+  return run();
+}
+
 test('resolves the direct Claude Code session log path for a cwd before the file exists', () => {
-  assert.equal(
-    resolveClaudeCodeSessionLogPath(
-      '11111111-1111-4111-8111-111111111111',
-      '/tmp/open-p',
-    ),
-    join(
-      homedir(),
-      '.claude',
-      'projects',
-      '-tmp-open-p',
-      '11111111-1111-4111-8111-111111111111.jsonl',
-    ),
-  );
+  withDefaultClaudeProjectsRoot(() => {
+    assert.equal(
+      resolveClaudeCodeSessionLogPath(
+        '11111111-1111-4111-8111-111111111111',
+        '/tmp/open-p',
+      ),
+      join(
+        homedir(),
+        '.claude',
+        'projects',
+        '-tmp-open-p',
+        '11111111-1111-4111-8111-111111111111.jsonl',
+      ),
+    );
+  });
+});
+
+test('resolves direct session log paths for opaque session ids', () => {
+  withDefaultClaudeProjectsRoot(() => {
+    assert.equal(
+      resolveClaudeCodeSessionLogPath(
+        'agent-session_01:opaque',
+        '/tmp/open-p',
+      ),
+      join(
+        homedir(),
+        '.claude',
+        'projects',
+        '-tmp-open-p',
+        'agent-session_01:opaque.jsonl',
+      ),
+    );
+  });
 });
 
 test('rejects unsafe session ids before building a session log path', () => {
@@ -55,6 +99,29 @@ test('reports backend exit during active turn instead of waiting for timeout', a
   );
 });
 
+test('notifies timeout before throwing an active turn timeout error', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-session-log-'));
+  const logPath = join(dir, 'session.jsonl');
+  await writeFile(logPath, '');
+  let timeoutCount = 0;
+
+  await assert.rejects(
+    () => waitForClaudeCodeTurnResult({
+      sessionId: '11111111-1111-4111-8111-111111111111',
+      turnId: 'turn-1',
+      timeoutMs: 25,
+      initialOffset: 0,
+      knownLogPath: logPath,
+      isBackendAlive: async () => true,
+      onTimeout: () => {
+        timeoutCount += 1;
+      },
+    }),
+    (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.timeout,
+  );
+  assert.equal(timeoutCount, 1);
+});
+
 test('reports missing expected session log as session log not found', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'openp-session-log-'));
   const missingLogPath = join(dir, 'missing-session.jsonl');
@@ -75,7 +142,535 @@ test('reports missing expected session log as session log not found', async () =
   );
 });
 
-test('publishes active assistant intermediate text while waiting for final turn result', async () => {
+test('discovers backend-generated first-turn session log without reusing preexisting recent logs', async () => {
+  await withClaudeProjectsRoot(async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'openp-session-log-cwd-'));
+  const logDir = resolveClaudeCodeProjectLogDir(cwd);
+  const oldSessionId = randomUUID();
+  const newSessionId = randomUUID();
+  const oldLogPath = join(logDir, `${oldSessionId}.jsonl`);
+  const newLogPath = join(logDir, `${newSessionId}.jsonl`);
+  await mkdir(logDir, { recursive: true });
+
+  try {
+    await writeFile(oldLogPath, [
+      line({
+        type: 'user',
+        cwd,
+        sessionId: oldSessionId,
+        message: { content: 'old prompt' },
+      }),
+      line({
+        type: 'assistant',
+        cwd,
+        sessionId: oldSessionId,
+        message: {
+          content: [{ type: 'text', text: 'old final' }],
+          stop_reason: 'end_turn',
+        },
+      }),
+      line({ type: 'system', subtype: 'turn_duration', cwd, sessionId: oldSessionId, durationMs: 1 }),
+    ].join(''));
+    const excludedLogPaths = await snapshotClaudeCodeSessionLogPaths(cwd);
+    await appendFile(oldLogPath, line({
+      type: 'system',
+      subtype: 'turn_duration',
+      cwd,
+      sessionId: oldSessionId,
+      durationMs: 2,
+    }));
+
+    const pendingResult = waitForClaudeCodeTurnResult({
+      sessionId: null,
+      turnId: 'turn-1',
+      timeoutMs: 10_000,
+      initialOffset: 0,
+      knownLogPath: null,
+      cwd,
+      discoveryStartedAtMs: Date.now() - 1000,
+      excludedLogPaths,
+      isBackendAlive: async () => true,
+    });
+    await sleep(50);
+    await writeFile(newLogPath, [
+      line({
+        type: 'user',
+        cwd,
+        sessionId: newSessionId,
+        message: { content: 'new prompt' },
+      }),
+      line({
+        type: 'assistant',
+        cwd,
+        sessionId: newSessionId,
+        message: {
+          content: [{ type: 'text', text: 'new final' }],
+          stop_reason: 'end_turn',
+        },
+      }),
+      line({ type: 'system', subtype: 'turn_duration', cwd, sessionId: newSessionId, durationMs: 3 }),
+    ].join(''));
+
+    const result = await pendingResult;
+
+    assert.equal(result.sessionId, newSessionId);
+    assert.equal(result.text, 'new final');
+  } finally {
+    await rm(logDir, { recursive: true, force: true });
+  }
+  });
+});
+
+test('first-turn session log discovery excludes preexisting empty jsonl logs', async () => {
+  await withClaudeProjectsRoot(async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'openp-session-log-cwd-'));
+  const logDir = resolveClaudeCodeProjectLogDir(cwd);
+  const oldSessionId = randomUUID();
+  const newSessionId = randomUUID();
+  const oldLogPath = join(logDir, `${oldSessionId}.jsonl`);
+  const newLogPath = join(logDir, `${newSessionId}.jsonl`);
+  await mkdir(logDir, { recursive: true });
+
+  try {
+    await writeFile(oldLogPath, '');
+    const excludedLogPaths = await snapshotClaudeCodeSessionLogPaths(cwd);
+    assert.equal(excludedLogPaths.has(oldLogPath), true);
+
+    const pendingResult = waitForClaudeCodeTurnResult({
+      sessionId: null,
+      turnId: 'turn-1',
+      timeoutMs: 10_000,
+      initialOffset: 0,
+      knownLogPath: null,
+      cwd,
+      discoveryStartedAtMs: Date.now() - 1000,
+      excludedLogPaths,
+      isBackendAlive: async () => true,
+    });
+    await sleep(50);
+    await writeFile(oldLogPath, [
+      line({
+        type: 'user',
+        cwd,
+        sessionId: oldSessionId,
+        message: { content: 'same prompt' },
+      }),
+      line({
+        type: 'assistant',
+        cwd,
+        sessionId: oldSessionId,
+        message: {
+          content: [{ type: 'text', text: 'old final' }],
+          stop_reason: 'end_turn',
+        },
+      }),
+      line({ type: 'system', subtype: 'turn_duration', cwd, sessionId: oldSessionId, durationMs: 1 }),
+    ].join(''));
+    await sleep(50);
+    await writeFile(newLogPath, [
+      line({
+        type: 'user',
+        cwd,
+        sessionId: newSessionId,
+        message: { content: 'same prompt' },
+      }),
+      line({
+        type: 'assistant',
+        cwd,
+        sessionId: newSessionId,
+        message: {
+          content: [{ type: 'text', text: 'new final' }],
+          stop_reason: 'end_turn',
+        },
+      }),
+      line({ type: 'system', subtype: 'turn_duration', cwd, sessionId: newSessionId, durationMs: 2 }),
+    ].join(''));
+
+    const result = await pendingResult;
+
+    assert.equal(result.sessionId, newSessionId);
+    assert.equal(result.text, 'new final');
+  } finally {
+    await rm(logDir, { recursive: true, force: true });
+  }
+  });
+});
+
+test('first-turn session log discovery fails on multiple structural workspace candidates', async () => {
+  await withClaudeProjectsRoot(async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'openp-session-log-cwd-'));
+  const logDir = resolveClaudeCodeProjectLogDir(cwd);
+  const targetSessionId = randomUUID();
+  const otherSessionId = randomUUID();
+  const targetLogPath = join(logDir, `${targetSessionId}.jsonl`);
+  const otherLogPath = join(logDir, `${otherSessionId}.jsonl`);
+  await mkdir(logDir, { recursive: true });
+
+  try {
+    await writeFile(targetLogPath, [
+      line({
+        type: 'user',
+        cwd,
+        sessionId: targetSessionId,
+        message: { content: 'target prompt' },
+      }),
+      line({
+        type: 'assistant',
+        cwd,
+        sessionId: targetSessionId,
+        message: {
+          content: [{ type: 'text', text: 'target final' }],
+          stop_reason: 'end_turn',
+        },
+      }),
+      line({ type: 'system', subtype: 'turn_duration', cwd, sessionId: targetSessionId, durationMs: 1 }),
+    ].join(''));
+    await sleep(20);
+    await writeFile(otherLogPath, [
+      line({
+        type: 'user',
+        cwd,
+        sessionId: otherSessionId,
+        message: { content: 'other prompt' },
+      }),
+      line({
+        type: 'assistant',
+        cwd,
+        sessionId: otherSessionId,
+        message: {
+          content: [{ type: 'text', text: 'other final' }],
+          stop_reason: 'end_turn',
+        },
+      }),
+      line({ type: 'system', subtype: 'turn_duration', cwd, sessionId: otherSessionId, durationMs: 2 }),
+    ].join(''));
+
+    await assert.rejects(
+      () => waitForClaudeCodeTurnResult({
+        sessionId: null,
+        turnId: 'turn-1',
+        timeoutMs: 10_000,
+        initialOffset: 0,
+        knownLogPath: null,
+        cwd,
+        discoveryStartedAtMs: Date.now() - 1000,
+        isBackendAlive: async () => true,
+      }),
+      (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.protocolViolation,
+    );
+  } finally {
+    await rm(logDir, { recursive: true, force: true });
+  }
+  });
+});
+
+test('first-turn session log discovery requires caller user-turn cwd to match workspace', async () => {
+  await withClaudeProjectsRoot(async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'openp-session-log-cwd-'));
+  const otherCwd = await mkdtemp(join(tmpdir(), 'openp-session-log-other-cwd-'));
+  const sessionId = randomUUID();
+  const logDir = resolveClaudeCodeProjectLogDir(cwd);
+  const logPath = join(logDir, `${sessionId}.jsonl`);
+  await mkdir(logDir, { recursive: true });
+
+  try {
+    await writeFile(logPath, [
+      line({
+        type: 'user',
+        cwd: otherCwd,
+        sessionId,
+        message: { content: 'other workspace prompt' },
+      }),
+      line({
+        type: 'assistant',
+        cwd,
+        sessionId,
+        message: {
+          content: [{ type: 'text', text: 'wrong workspace final' }],
+          stop_reason: 'end_turn',
+        },
+      }),
+      line({ type: 'system', subtype: 'turn_duration', cwd, sessionId, durationMs: 1 }),
+    ].join(''));
+
+    await assert.rejects(
+      () => waitForClaudeCodeTurnResult({
+        sessionId: null,
+        turnId: 'turn-1',
+        timeoutMs: 100,
+        initialOffset: 0,
+        knownLogPath: null,
+        cwd,
+        discoveryStartedAtMs: Date.now() - 1000,
+        isBackendAlive: async () => true,
+      }),
+      (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.protocolViolation,
+    );
+  } finally {
+    await rm(logDir, { recursive: true, force: true });
+    await rm(cwd, { recursive: true, force: true });
+    await rm(otherCwd, { recursive: true, force: true });
+  }
+  });
+});
+
+test('first-turn session log discovery fails when multiple new logs match the same prompt', async () => {
+  await withClaudeProjectsRoot(async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'openp-session-log-cwd-'));
+  const logDir = resolveClaudeCodeProjectLogDir(cwd);
+  const firstSessionId = randomUUID();
+  const secondSessionId = randomUUID();
+  await mkdir(logDir, { recursive: true });
+
+  try {
+    for (const sessionId of [firstSessionId, secondSessionId]) {
+      await writeFile(join(logDir, `${sessionId}.jsonl`), [
+        line({
+          type: 'user',
+          cwd,
+          sessionId,
+          message: { content: 'same prompt' },
+        }),
+        line({
+          type: 'assistant',
+          cwd,
+          sessionId,
+          message: {
+            content: [{ type: 'text', text: `final ${sessionId}` }],
+            stop_reason: 'end_turn',
+          },
+        }),
+        line({ type: 'system', subtype: 'turn_duration', cwd, sessionId, durationMs: 1 }),
+      ].join(''));
+    }
+
+    await assert.rejects(
+      () => waitForClaudeCodeTurnResult({
+        sessionId: null,
+        turnId: 'turn-1',
+        timeoutMs: 10_000,
+        initialOffset: 0,
+        knownLogPath: null,
+        cwd,
+        discoveryStartedAtMs: Date.now() - 1000,
+        isBackendAlive: async () => true,
+      }),
+      (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.protocolViolation,
+    );
+  } finally {
+    await rm(logDir, { recursive: true, force: true });
+  }
+  });
+});
+
+test('first-turn session log discovery rechecks ambiguity before returning a result', async () => {
+  await withClaudeProjectsRoot(async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'openp-session-log-cwd-'));
+  const logDir = resolveClaudeCodeProjectLogDir(cwd);
+  const firstSessionId = randomUUID();
+  const secondSessionId = randomUUID();
+  const firstLogPath = join(logDir, `${firstSessionId}.jsonl`);
+  const secondLogPath = join(logDir, `${secondSessionId}.jsonl`);
+  const intermediate: string[] = [];
+  await mkdir(logDir, { recursive: true });
+
+  try {
+    await writeFile(firstLogPath, [
+      line({
+        type: 'user',
+        cwd,
+        sessionId: firstSessionId,
+        message: { content: 'same prompt' },
+      }),
+      line({
+        type: 'assistant',
+        cwd,
+        sessionId: firstSessionId,
+        message: {
+          content: [{ type: 'text', text: 'working' }],
+        },
+      }),
+    ].join(''));
+
+    const pendingResult = waitForClaudeCodeTurnResult({
+      sessionId: null,
+      turnId: 'turn-1',
+      timeoutMs: 10_000,
+      initialOffset: 0,
+      knownLogPath: null,
+      cwd,
+      discoveryStartedAtMs: Date.now() - 1000,
+      isBackendAlive: async () => true,
+      onIntermediateText: (text) => intermediate.push(text),
+    });
+
+    await waitUntil(() => intermediate.length > 0);
+    await writeFile(secondLogPath, [
+      line({
+        type: 'user',
+        cwd,
+        sessionId: secondSessionId,
+        message: { content: 'same prompt' },
+      }),
+      line({
+        type: 'assistant',
+        cwd,
+        sessionId: secondSessionId,
+        message: {
+          content: [{ type: 'text', text: 'other final' }],
+          stop_reason: 'end_turn',
+        },
+      }),
+      line({ type: 'system', subtype: 'turn_duration', cwd, sessionId: secondSessionId, durationMs: 2 }),
+    ].join(''));
+    await appendFile(firstLogPath, line({
+      type: 'assistant',
+      cwd,
+      sessionId: firstSessionId,
+      message: {
+        content: [{ type: 'text', text: 'first final' }],
+        stop_reason: 'end_turn',
+      },
+    }));
+    await appendFile(firstLogPath, line({
+      type: 'system',
+      subtype: 'turn_duration',
+      cwd,
+      sessionId: firstSessionId,
+      durationMs: 3,
+    }));
+
+    await assert.rejects(
+      () => pendingResult,
+      (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.protocolViolation,
+    );
+  } finally {
+    await rm(logDir, { recursive: true, force: true });
+  }
+  });
+});
+
+test('first-turn session log discovery ignores subagent logs', async () => {
+  await withClaudeProjectsRoot(async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'openp-session-log-cwd-'));
+  const sessionId = randomUUID();
+  const topLevelLogDir = resolveClaudeCodeProjectLogDir(cwd);
+  const subagentDir = join(topLevelLogDir, 'subagents');
+  const subagentLogPath = join(subagentDir, `${randomUUID()}.jsonl`);
+  const topLevelLogPath = join(topLevelLogDir, `${sessionId}.jsonl`);
+  await mkdir(subagentDir, { recursive: true });
+
+  try {
+    await writeFile(subagentLogPath, [
+      line({
+        type: 'user',
+        cwd,
+        sessionId: randomUUID(),
+        message: { content: 'subagent prompt' },
+      }),
+      line({
+        type: 'assistant',
+        cwd,
+        sessionId: randomUUID(),
+        message: {
+          content: [{ type: 'text', text: 'subagent final' }],
+          stop_reason: 'end_turn',
+        },
+      }),
+      line({ type: 'system', subtype: 'turn_duration', cwd, sessionId: randomUUID(), durationMs: 1 }),
+    ].join(''));
+    await sleep(20);
+    await writeFile(topLevelLogPath, [
+      line({
+        type: 'user',
+        cwd,
+        sessionId,
+        message: { content: 'top-level prompt' },
+      }),
+      line({
+        type: 'assistant',
+        cwd,
+        sessionId,
+        message: {
+          content: [{ type: 'text', text: 'top-level final' }],
+          stop_reason: 'end_turn',
+        },
+      }),
+      line({ type: 'system', subtype: 'turn_duration', cwd, sessionId, durationMs: 1 }),
+    ].join(''));
+
+    const result = await waitForClaudeCodeTurnResult({
+      sessionId: null,
+      turnId: 'turn-1',
+      timeoutMs: 10_000,
+      initialOffset: 0,
+      knownLogPath: null,
+      cwd,
+      discoveryStartedAtMs: Date.now() - 1000,
+      isBackendAlive: async () => true,
+    });
+
+    assert.equal(result.sessionId, sessionId);
+    assert.equal(result.text, 'top-level final');
+  } finally {
+    await rm(topLevelLogDir, { recursive: true, force: true });
+  }
+  });
+});
+
+test('first-turn session log discovery searches realpath project log dir for symlink cwd', async () => {
+  await withClaudeProjectsRoot(async () => {
+  const realCwd = await realpath(await mkdtemp(join(tmpdir(), 'openp-session-log-real-cwd-')));
+  const linkParent = await mkdtemp(join(tmpdir(), 'openp-session-log-link-parent-'));
+  const linkCwd = join(linkParent, 'linked-cwd');
+  await symlink(realCwd, linkCwd);
+  const sessionId = randomUUID();
+  const logDir = resolveClaudeCodeProjectLogDir(realCwd);
+  const logPath = join(logDir, `${sessionId}.jsonl`);
+  await mkdir(logDir, { recursive: true });
+
+  try {
+    await writeFile(logPath, [
+      line({
+        type: 'user',
+        cwd: realCwd,
+        sessionId,
+        message: { content: 'realpath prompt' },
+      }),
+      line({
+        type: 'assistant',
+        cwd: realCwd,
+        sessionId,
+        message: {
+          content: [{ type: 'text', text: 'realpath final' }],
+          stop_reason: 'end_turn',
+        },
+      }),
+      line({ type: 'system', subtype: 'turn_duration', cwd: realCwd, sessionId, durationMs: 1 }),
+    ].join(''));
+
+    const result = await waitForClaudeCodeTurnResult({
+      sessionId: null,
+      turnId: 'turn-1',
+      timeoutMs: 10_000,
+      initialOffset: 0,
+      knownLogPath: null,
+      cwd: linkCwd,
+      discoveryStartedAtMs: Date.now() - 1000,
+      isBackendAlive: async () => true,
+    });
+
+    assert.equal(result.sessionId, sessionId);
+    assert.equal(result.text, 'realpath final');
+  } finally {
+    await rm(logDir, { recursive: true, force: true });
+    await rm(linkParent, { recursive: true, force: true });
+    await rm(realCwd, { recursive: true, force: true });
+  }
+  });
+});
+
+test('publishes active assistant intermediate text while waiting for turn result', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'openp-session-log-'));
   const logPath = join(dir, 'session.jsonl');
   await writeFile(logPath, [
@@ -116,8 +711,176 @@ test('publishes active assistant intermediate text while waiting for final turn 
 
   const result = await pendingResult;
 
-  assert.equal(result.text, 'final');
-  assert.deepEqual(intermediate, ['working', 'final']);
+  assert.equal(result.text, 'working\n\nfinal');
+  assert.deepEqual(intermediate, ['working', 'working\n\nfinal']);
+});
+
+test('publishes same-message Claude session-log snapshots as replacements, not appended answers', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-session-log-'));
+  const logPath = join(dir, 'session.jsonl');
+  await writeFile(logPath, line({
+    type: 'user',
+    message: {
+      content: 'hello',
+    },
+  }));
+  const intermediate: string[] = [];
+  const snapshots: string[] = [];
+
+  const pendingResult = waitForClaudeCodeTurnResult({
+    sessionId: '11111111-1111-4111-8111-111111111111',
+    turnId: 'turn-1',
+    timeoutMs: 10_000,
+    initialOffset: 0,
+    knownLogPath: logPath,
+    isBackendAlive: async () => true,
+    onIntermediateText: (text) => intermediate.push(text),
+    onIntermediateAssistantSnapshot: (snapshot) => {
+      const content = snapshot.message.content;
+      if (Array.isArray(content)) {
+        const first = content[0];
+        if (first && typeof first === 'object' && !Array.isArray(first)) {
+          const text = (first as Record<string, unknown>).text;
+          if (typeof text === 'string') {
+            snapshots.push(text);
+          }
+        }
+      }
+    },
+  });
+
+  await appendFile(logPath, line({
+    type: 'assistant',
+    message: {
+      id: 'msg_same',
+      content: [{ type: 'text', text: 'A' }],
+    },
+  }));
+  await waitUntil(() => intermediate.length === 1);
+  await appendFile(logPath, line({
+    type: 'assistant',
+    message: {
+      id: 'msg_same',
+      content: [{ type: 'text', text: 'AB' }],
+      stop_reason: 'end_turn',
+    },
+  }));
+  await appendFile(logPath, line({ type: 'system', subtype: 'turn_duration', durationMs: 12 }));
+
+  const result = await pendingResult;
+
+  assert.equal(result.text, 'AB');
+  assert.deepEqual(intermediate, ['A', 'AB']);
+  assert.deepEqual(snapshots, ['A', 'AB']);
+});
+
+test('session log result preserves tool-use assistant text through public result output', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-session-log-'));
+  const logPath = join(dir, 'session.jsonl');
+  await writeFile(logPath, [
+    line({
+      type: 'user',
+      message: {
+        content: 'hello',
+      },
+    }),
+    line({
+      type: 'assistant',
+      message: {
+        id: 'msg-tool',
+        content: [
+          { type: 'text', text: 'checking file' },
+          { type: 'tool_use', id: 'toolu_1', name: 'Read', input: { file_path: 'README.md' } },
+        ],
+        stop_reason: 'tool_use',
+      },
+    }),
+    line({
+      type: 'assistant',
+      message: {
+        id: 'msg-final',
+        content: [{ type: 'text', text: 'done' }],
+        stop_reason: 'end_turn',
+      },
+    }),
+    line({ type: 'system', subtype: 'turn_duration', durationMs: 12 }),
+  ].join(''));
+
+  const result = await waitForClaudeCodeTurnResult({
+    sessionId: '11111111-1111-4111-8111-111111111111',
+    turnId: 'turn-1',
+    timeoutMs: 10_000,
+    initialOffset: 0,
+    knownLogPath: logPath,
+    isBackendAlive: async () => true,
+  });
+  const textOutput = formatTurnResult(result, {
+    outputFormat: 'text',
+    backendSessionId: '11111111-1111-4111-8111-111111111111',
+    backend: 'claude',
+  });
+  const streamJsonOutput = JSON.parse(formatTurnResult(result, {
+    outputFormat: 'stream-json',
+    backendSessionId: '11111111-1111-4111-8111-111111111111',
+    backend: 'claude',
+  })).openp.output;
+
+  assert.equal(result.text, 'checking file\n\ndone');
+  assert.equal(textOutput, 'checking file\n\ndone\n');
+  assert.deepEqual(streamJsonOutput.answer, ['checking file', 'done']);
+  assert.deepEqual(streamJsonOutput.toolCall, [{
+    type: 'tool_use',
+    id: 'toolu_1',
+    name: 'Read',
+    input: { file_path: 'README.md' },
+  }]);
+});
+
+test('preserves newlines inside Claude Code JSONL text blocks', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-session-log-'));
+  const logPath = join(dir, 'session.jsonl');
+  await writeFile(logPath, [
+    line({
+      type: 'user',
+      message: {
+        content: 'hello',
+      },
+    }),
+    line({
+      type: 'assistant',
+      message: {
+        id: 'msg-active',
+        content: [{ type: 'text', text: 'line 1\nline 2' }],
+      },
+    }),
+  ].join(''));
+  const intermediate: string[] = [];
+
+  const pendingResult = waitForClaudeCodeTurnResult({
+    sessionId: '11111111-1111-4111-8111-111111111111',
+    turnId: 'turn-1',
+    timeoutMs: 10_000,
+    initialOffset: 0,
+    knownLogPath: logPath,
+    isBackendAlive: async () => true,
+    onIntermediateText: (text) => intermediate.push(text),
+  });
+
+  await waitUntil(() => intermediate.length === 1);
+  await appendFile(logPath, line({
+    type: 'assistant',
+    message: {
+      id: 'msg-active',
+      content: [{ type: 'text', text: 'line 1\nline 2\nline 3' }],
+      stop_reason: 'end_turn',
+    },
+  }));
+  await appendFile(logPath, line({ type: 'system', subtype: 'turn_duration', durationMs: 12 }));
+
+  const result = await pendingResult;
+
+  assert.deepEqual(intermediate, ['line 1\nline 2', 'line 1\nline 2\nline 3']);
+  assert.equal(result.text, 'line 1\nline 2\nline 3');
 });
 
 test('ignores Claude Code synthetic no-response assistant before the active user turn', async () => {
@@ -212,8 +975,8 @@ test('publishes intermediate reasoning before text for combined assistant snapsh
 
   const result = await pendingResult;
 
-  assert.equal(result.text, 'final');
-  assert.deepEqual(callbacks, ['reasoning:thinking', 'text:working', 'text:final']);
+  assert.equal(result.text, 'working\n\nfinal');
+  assert.deepEqual(callbacks, ['reasoning:thinking', 'text:working', 'text:working\n\nfinal']);
 });
 
 test('publishes reasoning log append before later text append during active polling', async () => {
@@ -305,7 +1068,7 @@ test('publishes reasoning before text when log appends are closer than the polli
   assert.deepEqual(callbacks, ['reasoning:thinking', 'text:final']);
 });
 
-test('publishes final assistant content before returning when completion is already in the chunk', async () => {
+test('publishes result assistant content before returning when completion is already in the chunk', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'openp-session-log-'));
   const logPath = join(dir, 'session.jsonl');
   await writeFile(logPath, [

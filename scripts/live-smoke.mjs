@@ -1,27 +1,22 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const rootDir = dirname(dirname(fileURLToPath(import.meta.url)));
 const cliPath = join(rootDir, 'dist', 'src', 'cli.js');
-const mcpConfigPath = join(rootDir, 'test', 'fixtures', 'live-smoke', 'mcp-config.json');
-const settingsPath = join(rootDir, 'test', 'fixtures', 'live-smoke', 'settings.json');
-const enabled = process.env.OPENP_LIVE_SMOKE === '1';
-const timeoutMs = Number.parseInt(process.env.OPENP_LIVE_SMOKE_TIMEOUT_MS ?? '90000', 10);
+const args = process.argv.slice(2);
+const enabled = args.includes('--run');
+const timeoutMs = Number.parseInt(readArg('--timeout-ms') ?? '90000', 10);
 
 if (!enabled) {
-  console.log('Skipping live smoke. Set OPENP_LIVE_SMOKE=1 after running npm run build.');
+  console.log('Skipping live smoke. Run `npm run smoke:live -- --run` after `npm run build`.');
   process.exit(0);
 }
 
 if (!existsSync(cliPath)) {
   throw new Error('dist/src/cli.js is missing. Run npm run build first.');
-}
-if (!existsSync(mcpConfigPath) || !existsSync(settingsPath)) {
-  throw new Error('live smoke fixture config files are missing.');
 }
 
 const checks = [
@@ -29,8 +24,7 @@ const checks = [
   smokeStreamJsonOutput,
   smokePersistentStreamJsonInput,
   smokeResumeStreamJsonInput,
-  smokeSafePassThroughFlags,
-  smokeEmptyToolsFlag,
+  smokePublicOptions,
 ];
 
 for (const check of checks) {
@@ -48,7 +42,8 @@ async function smokeJsonOutput() {
     'Return exactly openp-live-json-ok',
   ]);
   const result = JSON.parse(stdout);
-  assertEqual(result.result, 'openp-live-json-ok', 'json output result');
+  assertOpenPRecord(result, 'json output result record');
+  assertEqual(openPResultText(result.openp), 'openp-live-json-ok', 'json output result');
 }
 
 async function smokeStreamJsonOutput() {
@@ -60,17 +55,14 @@ async function smokeStreamJsonOutput() {
     'Return exactly openp-live-stream-json-ok',
   ]);
   const events = parseJsonLines(stdout);
-  const result = events.find((event) => event.type === 'result');
-  assertEqual(result?.result, 'openp-live-stream-json-ok', 'stream-json result');
+  const result = findOpenPResult(events, 'stream-json result');
+  assertEqual(openPResultText(result.openp), 'openp-live-stream-json-ok', 'stream-json result');
 }
 
 async function smokePersistentStreamJsonInput() {
-  const sessionId = randomUUID();
   const stdout = await runOpenP([
     '--timeout',
     '60',
-    '--session-id',
-    sessionId,
     '--input-format',
     'stream-json',
     '--output-format',
@@ -79,29 +71,35 @@ async function smokePersistentStreamJsonInput() {
     userEvent('live-worker-1', 'Return exactly openp-live-worker-first-ok'),
     userEvent('live-worker-2', 'Return exactly openp-live-worker-second-ok'),
   ].join('\n') + '\n');
-  const results = parseJsonLines(stdout).filter((event) => event.type === 'result');
+  const events = parseJsonLines(stdout);
+  for (const [index, event] of events.entries()) {
+    assertOpenPRecord(event, `persistent stream-json event ${index}`);
+  }
+  const results = events.filter((event) => event.openp.form === 'result');
   assertEqual(results.length, 2, 'persistent stream-json result count');
-  assertEqual(results[0]?.result, 'openp-live-worker-first-ok', 'persistent stream-json first result');
-  assertEqual(results[1]?.result, 'openp-live-worker-second-ok', 'persistent stream-json second result');
-  assertEqual(results[0]?.session_id, sessionId, 'persistent stream-json first session id');
-  assertEqual(results[1]?.session_id, sessionId, 'persistent stream-json second session id');
+  assertEqual(openPResultText(results[0]?.openp), 'openp-live-worker-first-ok', 'persistent stream-json first result');
+  assertEqual(openPResultText(results[1]?.openp), 'openp-live-worker-second-ok', 'persistent stream-json second result');
+  if (!results[0]?.openp?.sessionId) {
+    throw new Error('persistent stream-json first session id is missing');
+  }
+  assertEqual(results[1]?.openp?.sessionId, results[0].openp.sessionId, 'persistent stream-json second session id');
 }
 
 async function smokeResumeStreamJsonInput() {
-  const sessionId = randomUUID();
   const first = await runOpenP([
     '--timeout',
     '60',
-    '--session-id',
-    sessionId,
     '--input-format',
     'stream-json',
     '--output-format',
     'stream-json',
   ], userEvent('live-resume-1', 'Return exactly openp-live-resume-first-ok') + '\n');
-  const firstResult = parseJsonLines(first).find((event) => event.type === 'result');
-  assertEqual(firstResult?.result, 'openp-live-resume-first-ok', 'resume smoke first result');
-  assertEqual(firstResult?.session_id, sessionId, 'resume smoke first session id');
+  const firstResult = findOpenPResult(parseJsonLines(first), 'resume smoke first result');
+  assertEqual(openPResultText(firstResult.openp), 'openp-live-resume-first-ok', 'resume smoke first result');
+  const sessionId = firstResult.openp.sessionId;
+  if (!sessionId) {
+    throw new Error('resume smoke first session id is missing');
+  }
 
   const second = await runOpenP([
     '--timeout',
@@ -113,53 +111,26 @@ async function smokeResumeStreamJsonInput() {
     '--output-format',
     'stream-json',
   ], userEvent('live-resume-2', 'Return exactly openp-live-resume-second-ok') + '\n');
-  const secondResult = parseJsonLines(second).find((event) => event.type === 'result');
-  assertEqual(secondResult?.result, 'openp-live-resume-second-ok', 'resume smoke second result');
-  assertEqual(secondResult?.session_id, sessionId, 'resume smoke second session id');
+  const secondResult = findOpenPResult(parseJsonLines(second), 'resume smoke second result');
+  assertEqual(openPResultText(secondResult.openp), 'openp-live-resume-second-ok', 'resume smoke second result');
+  assertEqual(secondResult.openp.sessionId, sessionId, 'resume smoke second session id');
 }
 
-async function smokeSafePassThroughFlags() {
+async function smokePublicOptions() {
   const stdout = await runOpenP([
     '--timeout',
     '60',
-    '--permission-mode',
-    'bypassPermissions',
-    '--brief',
+    '--dangerously-skip-permissions',
     '--verbose',
-    '--allowed-tools',
-    'Read',
-    '--disallowed-tools',
-    'Bash',
-    '--add-dir',
-    rootDir,
     '--effort',
     'low',
-    '--mcp-config',
-    mcpConfigPath,
-    '--settings',
-    settingsPath,
-    '--setting-sources',
-    'user,project,local',
     '--output-format',
     'json',
-    'Return exactly openp-live-pass-flags-ok',
+    'Return exactly openp-live-public-options-ok',
   ]);
   const result = JSON.parse(stdout);
-  assertEqual(result.result, 'openp-live-pass-flags-ok', 'safe pass-through flags result');
-}
-
-async function smokeEmptyToolsFlag() {
-  const stdout = await runOpenP([
-    '--timeout',
-    '60',
-    '--tools',
-    '',
-    '--output-format',
-    'json',
-    'Return exactly openp-live-empty-tools-ok',
-  ]);
-  const result = JSON.parse(stdout);
-  assertEqual(result.result, 'openp-live-empty-tools-ok', 'empty tools flag result');
+  assertOpenPRecord(result, 'public options result record');
+  assertEqual(openPResultText(result.openp), 'openp-live-public-options-ok', 'public options result');
 }
 
 function userEvent(turnId, text) {
@@ -175,6 +146,56 @@ function parseJsonLines(text) {
     .split(/\r?\n/)
     .filter((line) => line.trim())
     .map((line) => JSON.parse(line));
+}
+
+function findOpenPResult(events, label) {
+  for (const event of events) {
+    assertOpenPRecord(event, `${label} event`);
+  }
+  const results = events.filter((event) => event.openp.form === 'result');
+  assertEqual(results.length, 1, `${label} result count`);
+  if (events.at(-1) !== results[0]) {
+    throw new Error(`${label}: result record is not terminal`);
+  }
+  return results[0];
+}
+
+function assertOpenPRecord(event, label) {
+  if (!event || typeof event !== 'object' || Array.isArray(event)) {
+    throw new Error(`${label}: expected object`);
+  }
+  const keys = Object.keys(event);
+  if (keys.length !== 1 || keys[0] !== 'openp') {
+    throw new Error(`${label}: expected only top-level openp, got ${JSON.stringify(keys)}`);
+  }
+  const openp = event.openp;
+  if (!openp || typeof openp !== 'object' || Array.isArray(openp)) {
+    throw new Error(`${label}: missing openp object`);
+  }
+  if (openp.form !== 'streaming' && openp.form !== 'result') {
+    throw new Error(`${label}: invalid openp.form ${JSON.stringify(openp.form)}`);
+  }
+  if (openp.form === 'result') {
+    const output = openp.output;
+    const keys = output && typeof output === 'object' && !Array.isArray(output)
+      ? Object.keys(output).sort()
+      : [];
+    assertEqual(JSON.stringify(keys), JSON.stringify(['answer', 'reasoning', 'toolCall', 'toolResult'].sort()), `${label} result output keys`);
+  }
+}
+
+function openPResultText(openp) {
+  const answers = Array.isArray(openp?.output?.answer) ? openp.output.answer : [];
+  return answers.filter((answer) => typeof answer === 'string').join('\n\n');
+}
+
+function readArg(name) {
+  const index = args.indexOf(name);
+  if (index < 0) {
+    return null;
+  }
+  const value = args[index + 1];
+  return value && !value.startsWith('--') ? value : null;
 }
 
 function runOpenP(args, input = '') {

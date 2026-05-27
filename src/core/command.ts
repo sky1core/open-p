@@ -9,12 +9,18 @@ export interface CommandResult {
 export function execFileText(
   command: string,
   args: readonly string[],
-  options: { input?: string; env?: Readonly<Record<string, string>>; isolateAnthropicEnv?: boolean } = {},
+  options: {
+    readonly input?: string;
+    readonly env?: Readonly<Record<string, string>>;
+    readonly isolateAnthropicEnv?: boolean;
+    readonly cwd?: string;
+  } = {},
 ): Promise<CommandResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, [...args], {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: options.env || options.isolateAnthropicEnv ? buildChildEnv(options.env ?? {}, options.isolateAnthropicEnv ?? false) : undefined,
+      cwd: options.cwd,
     });
     let stdout = '';
     let stderr = '';

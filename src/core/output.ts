@@ -7,6 +7,7 @@ export type OutputFormat = 'text' | 'json' | 'stream-json';
 export interface OutputOptions {
   readonly outputFormat: OutputFormat;
   readonly backendSessionId: string;
+  readonly backend?: string | null;
   readonly includeSystemInit?: boolean;
   readonly model?: string | null;
   readonly cwd?: string | null;
@@ -17,10 +18,19 @@ export interface OutputOptions {
   readonly suppressAssistantTexts?: readonly string[];
   readonly suppressAssistantReasoningTexts?: readonly string[];
   readonly suppressAssistantSnapshots?: readonly AssistantEventSnapshot[];
+  readonly previouslyEmittedAssistantEvents?: readonly Record<string, unknown>[];
   readonly suppressFallbackAssistantText?: boolean;
+  readonly warnings?: readonly OutputWarning[];
+  readonly verbose?: boolean;
 }
 
-export interface PartialMessageStreamState {
+export interface OutputWarning {
+  readonly severity: 'warning' | 'error';
+  readonly code: string;
+  readonly message: string;
+}
+
+export interface StreamingMessageState {
   started: boolean;
   blockOpen: boolean;
   previousText: string;
@@ -30,47 +40,44 @@ export interface PartialMessageStreamState {
   previousReasoningText: string;
 }
 
+const OPENP_NATIVE_VERSION = 1;
+
 export function formatTurnResult(result: TurnResult, options: OutputOptions): string {
   if (options.outputFormat === 'text') {
-    return result.text.endsWith('\n') ? result.text : `${result.text}\n`;
+    const textOutput = resultAnswerTextForTextOutput(result, options);
+    const text = textOutput.endsWith('\n') ? textOutput : `${textOutput}\n`;
+    return `${text}${formatVerboseTextMarker(options.verbose)}${formatTextWarnings(options.warnings)}`;
   }
   const stopReason = result.diagnostics.stopReason ?? 'end_turn';
-
-  if (options.outputFormat === 'json') {
-    return `${JSON.stringify(buildResultEvent({
-      turnId: result.turnId,
-      sessionId: options.backendSessionId,
-      text: result.text,
-      structuredOutput: result.structuredOutput,
-      durationMs: result.diagnostics.durationMs,
-      numTurns: 1,
-      totalCostUsd: null,
-      stopReason,
-      usage: {
-        inputTokens: result.diagnostics.usage.inputTokens,
-        outputTokens: result.diagnostics.usage.outputTokens,
-        cacheReadInputTokens: result.diagnostics.usage.cacheReadInputTokens,
-      },
-      rawUsage: result.diagnostics.rawUsage ?? null,
-      contextWindow: options.contextWindow ?? resolveKnownContextWindow(options.model),
-      model: options.model ?? null,
-    }))}\n`;
-  }
-
-  const events = [
-    ...(options.includeSystemInit === false ? [] : [buildSystemInitEvent(options.backendSessionId, options)]),
-  ];
-  const snapshotStructuredOutputToolUseId = findStructuredOutputToolUseId(result.assistantEvents);
+  const effectiveModel = result.diagnostics.model ?? options.model ?? null;
+  const resultUsage = result.diagnostics.usage;
+  const lastSubturnUsage = result.diagnostics.lastSubturnUsage ?? null;
+  const assistantUsage = lastSubturnUsage ?? resultUsage;
+  const lastSubturnContextTokens =
+    result.diagnostics.lastSubturnContextTokens ??
+    (lastSubturnUsage ? contextTokensFromUsage(lastSubturnUsage) : null);
+  const effectiveContextWindow =
+    result.diagnostics.contextWindow ?? options.contextWindow ?? null;
   const structuredOutputToolUseId = resolveStructuredOutputToolUseId({
     structuredOutput: result.structuredOutput,
     assistantEvents: result.assistantEvents,
     preferredToolUseId: options.structuredOutputToolUseId,
   });
-  const filteredSnapshots = filterStructuredFallbackTextSnapshots(
+  const normalizedSnapshots = normalizeStructuredOutputFallbackSnapshots(
     result.assistantEvents,
     result.structuredOutput,
-    snapshotStructuredOutputToolUseId !== null,
+    structuredOutputToolUseId,
   );
+  const normalizedSuppressedSnapshots = normalizeStructuredOutputFallbackSnapshots(
+    options.suppressAssistantSnapshots,
+    result.structuredOutput,
+    structuredOutputToolUseId,
+  );
+  const suppressedResultSnapshots = intersectSuppressedResultSnapshots(
+    normalizedSnapshots,
+    normalizedSuppressedSnapshots,
+  );
+  const snapshotStructuredOutputToolUseId = findStructuredOutputToolUseId(normalizedSnapshots);
   const suppressedAssistantTexts = (options.suppressAssistantTexts ?? [])
     .filter((text) => text.length > 0);
   const suppressedAssistantReasoningTexts = (options.suppressAssistantReasoningTexts ?? [])
@@ -86,105 +93,149 @@ export function formatTurnResult(result: TurnResult, options: OutputOptions): st
   const fallbackStructuredOutput = snapshotStructuredOutputToolUseId === null
     ? result.structuredOutput
     : undefined;
-  const assistantSnapshots = filterAssistantSnapshots(filteredSnapshots, {
+  const assistantSnapshots = filterAssistantSnapshots(normalizedSnapshots, {
     text: suppressedAssistantTexts,
     reasoning: suppressedAssistantReasoningTexts,
-    snapshots: options.suppressAssistantSnapshots ?? [],
+    snapshots: normalizedSuppressedSnapshots ?? [],
   });
+  const semanticSnapshotsContainResultText = snapshotsContainSemanticAssistantText(normalizedSnapshots, result.text);
+  const suppressedSnapshotsContainResultText = nonSemanticSnapshotsContainAssistantText(
+    normalizedSuppressedSnapshots,
+    result.text,
+  );
+  const blankResultTextFallback = shouldBlankResultTextFallback(
+    result.text,
+    latestSuppressedAssistantText,
+    options.suppressFallbackAssistantText,
+    semanticSnapshotsContainResultText,
+  );
   const assistantEvents = buildAssistantEventsFromSnapshots(
     assistantSnapshots,
     options.backendSessionId,
-    result.diagnostics.usage,
+    assistantUsage,
+    {
+      turnId: result.turnId,
+      resultAnswerText: result.text,
+      resultReasoningText: fallbackReasoningContent ?? null,
+      structuredOutput: result.structuredOutput,
+      structuredOutputToolUseId,
+      requestId: result.requestId ?? null,
+      model: effectiveModel,
+      stopReason,
+      usage: assistantUsage,
+      form: 'result',
+    },
   );
-  const assistantSnapshotsContainResultText = snapshotsContainAssistantText(assistantSnapshots, result.text);
-  if (assistantEvents.length > 0) {
-    events.push(...assistantEvents);
-    if (
-      result.structuredOutput === undefined &&
-      latestSuppressedAssistantText !== null &&
-      result.text.length > 0 &&
-      latestSuppressedAssistantText !== result.text &&
-      !assistantSnapshotsContainResultText
-    ) {
-      events.push(buildAssistantTextEvent({
-        turnId: result.turnId,
-        sessionId: options.backendSessionId,
-        text: result.text,
-        requestId: result.requestId,
-        stopReason: null,
-        model: options.model ?? null,
-        usage: {
-          inputTokens: result.diagnostics.usage.inputTokens,
-          outputTokens: result.diagnostics.usage.outputTokens,
-          cacheReadInputTokens: result.diagnostics.usage.cacheReadInputTokens,
-        },
-      }));
-    }
-    if (result.structuredOutput !== undefined && !snapshotStructuredOutputToolUseId) {
-      events.push(buildAssistantTextEvent({
-        turnId: result.turnId,
-        sessionId: options.backendSessionId,
-        text: '',
-        structuredOutput: result.structuredOutput,
-        structuredOutputToolUseId,
-        requestId: result.requestId,
-        stopReason: null,
-        model: options.model ?? null,
-        usage: {
-          inputTokens: result.diagnostics.usage.inputTokens,
-          outputTokens: result.diagnostics.usage.outputTokens,
-          cacheReadInputTokens: result.diagnostics.usage.cacheReadInputTokens,
-        },
-      }));
-    }
-  } else if (
-    Boolean(fallbackReasoningContent) ||
-    fallbackStructuredOutput !== undefined ||
-    shouldEmitResultTextFallback(result.text, latestSuppressedAssistantText, options.suppressFallbackAssistantText)
-  ) {
-    events.push(
-      buildAssistantTextEvent({
-        turnId: result.turnId,
-        sessionId: options.backendSessionId,
-        text: latestSuppressedAssistantText === result.text ? '' : result.text,
-        reasoningContent: fallbackReasoningContent,
-        structuredOutput: fallbackStructuredOutput,
-        structuredOutputToolUseId,
-        requestId: result.requestId,
-        stopReason: null,
-        model: options.model ?? null,
-        usage: {
-          inputTokens: result.diagnostics.usage.inputTokens,
-          outputTokens: result.diagnostics.usage.outputTokens,
-          cacheReadInputTokens: result.diagnostics.usage.cacheReadInputTokens,
-        },
-      }),
-    );
-  }
-  if (structuredOutputToolUseId) {
-    events.push(buildStructuredOutputToolResultEvent({
-      sessionId: options.backendSessionId,
-      toolUseId: structuredOutputToolUseId,
-    }));
-  }
-  events.push(
-    buildResultEvent({
+  const assistantSnapshotsContainResultText =
+    snapshotsContainAssistantText(assistantSnapshots, result.text) ||
+    openPAnswerEventsContainResultText(assistantEvents, result.text) ||
+    openPAnswerEventsAggregateResultText(assistantEvents, result.text) ||
+    suppressedSnapshotsContainResultText;
+  const shouldEmitTextFallback = shouldEmitResultTextFallback(
+    result.text,
+    latestSuppressedAssistantText,
+    options.suppressFallbackAssistantText,
+    semanticSnapshotsContainResultText,
+  ) && !suppressedSnapshotsContainResultText;
+  const terminalAssistantEvents = buildTerminalAssistantEventRecords({
+    existingAssistantEvents: assistantEvents,
+    assistantSnapshotsContainResultText,
+    text: result.text,
+    fallbackReasoningContent,
+    structuredOutput: result.structuredOutput,
+    fallbackStructuredOutput,
+    snapshotStructuredOutputToolUseId,
+    structuredOutputToolUseId,
+    shouldEmitTextFallback,
+    blankResultTextFallback,
+    turnId: result.turnId,
+    sessionId: options.backendSessionId,
+    requestId: result.requestId,
+    model: effectiveModel,
+    stopReason,
+    usage: {
+      inputTokens: assistantUsage.inputTokens,
+      outputTokens: assistantUsage.outputTokens,
+      cacheReadInputTokens: assistantUsage.cacheReadInputTokens,
+    },
+  });
+  const nestedAssistantOpenPEvents = buildNestedAssistantOpenPEvents({
+    previouslyEmittedSnapshots: suppressedResultSnapshots,
+    previouslyEmittedAssistantEvents: options.previouslyEmittedAssistantEvents,
+    emittedAssistantEvents: terminalAssistantEvents,
+    sessionId: options.backendSessionId,
+    turnId: result.turnId,
+    resultAnswerText: result.text,
+    resultReasoningText: result.reasoningContent ?? null,
+    structuredOutput: result.structuredOutput,
+    structuredOutputToolUseId,
+    requestId: result.requestId ?? null,
+    model: effectiveModel,
+    stopReason,
+    usage: assistantUsage,
+  });
+
+  if (options.outputFormat === 'json') {
+    return `${JSON.stringify(buildResultEvent({
       turnId: result.turnId,
       sessionId: options.backendSessionId,
+      backend: options.backend ?? null,
       text: result.text,
+      reasoningText: result.reasoningContent ?? null,
+      requestId: result.requestId ?? null,
       structuredOutput: result.structuredOutput,
+      structuredOutputToolUseId,
+      assistantEvents: assistantSnapshots ?? [],
+      assistantOpenPEvents: nestedAssistantOpenPEvents,
+      assistantEventUsage: assistantUsage,
+      lastSubturnUsage,
       durationMs: result.diagnostics.durationMs,
       numTurns: 1,
       totalCostUsd: null,
       stopReason,
       usage: {
-        inputTokens: result.diagnostics.usage.inputTokens,
-        outputTokens: result.diagnostics.usage.outputTokens,
-        cacheReadInputTokens: result.diagnostics.usage.cacheReadInputTokens,
+        inputTokens: resultUsage.inputTokens,
+        outputTokens: resultUsage.outputTokens,
+        cacheReadInputTokens: resultUsage.cacheReadInputTokens,
       },
       rawUsage: result.diagnostics.rawUsage ?? null,
-      contextWindow: options.contextWindow ?? resolveKnownContextWindow(options.model),
-      model: options.model ?? null,
+      contextWindow: effectiveContextWindow,
+      lastSubturnContextTokens,
+      model: effectiveModel,
+      warnings: options.warnings ?? [],
+    }))}\n`;
+  }
+
+  void options.includeSystemInit;
+  const events: Record<string, unknown>[] = [];
+  events.push(
+    buildResultEvent({
+      turnId: result.turnId,
+      sessionId: options.backendSessionId,
+      backend: options.backend ?? null,
+      text: result.text,
+      reasoningText: result.reasoningContent ?? null,
+      requestId: result.requestId ?? null,
+      structuredOutput: result.structuredOutput,
+      structuredOutputToolUseId,
+      assistantEvents: assistantSnapshots ?? [],
+      assistantOpenPEvents: nestedAssistantOpenPEvents,
+      assistantEventUsage: assistantUsage,
+      lastSubturnUsage,
+      durationMs: result.diagnostics.durationMs,
+      numTurns: 1,
+      totalCostUsd: null,
+      stopReason,
+      usage: {
+        inputTokens: resultUsage.inputTokens,
+        outputTokens: resultUsage.outputTokens,
+        cacheReadInputTokens: resultUsage.cacheReadInputTokens,
+      },
+      rawUsage: result.diagnostics.rawUsage ?? null,
+      contextWindow: effectiveContextWindow,
+      lastSubturnContextTokens,
+      model: effectiveModel,
+      warnings: options.warnings ?? [],
     }),
   );
   return events.map((event) => `${JSON.stringify(event)}\n`).join('');
@@ -203,6 +254,14 @@ export function formatIntermediateTextEvent(event: {
     messageId: buildStableMessageId(`intermediate:${event.turnId}`),
     stopReason: null,
     model: event.model,
+    openp: buildOpenPAssistantMessage({
+      kind: 'answer',
+      form: 'streaming',
+      turnId: event.turnId,
+      sessionId: event.sessionId,
+      messageId: buildStableMessageId(`intermediate:${event.turnId}`),
+      text: event.text,
+    }),
   }))}\n`;
 }
 
@@ -222,14 +281,36 @@ export function formatIntermediateReasoningEvent(event: {
     messageId: buildStableMessageId(`intermediate-reasoning:${event.turnId}`),
     stopReason: null,
     model: event.model,
+    openp: buildOpenPAssistantMessage({
+      kind: 'reasoning',
+      form: 'streaming',
+      turnId: event.turnId,
+      sessionId: event.sessionId,
+      messageId: buildStableMessageId(`intermediate-reasoning:${event.turnId}`),
+      text: event.text,
+    }),
   }))}\n`;
+}
+
+export function buildIntermediateAssistantSnapshotEvents(event: {
+  readonly snapshot: AssistantEventSnapshot;
+  readonly sessionId?: string | null;
+  readonly turnId?: string | null;
+}): Record<string, unknown>[] {
+  return buildAssistantEventsFromSnapshots([event.snapshot], event.sessionId, undefined, {
+    turnId: event.turnId ?? null,
+    form: 'streaming',
+  });
 }
 
 export function formatIntermediateAssistantSnapshotEvent(event: {
   readonly snapshot: AssistantEventSnapshot;
-  readonly sessionId: string;
+  readonly sessionId?: string | null;
+  readonly turnId?: string | null;
 }): string {
-  return `${JSON.stringify(buildAssistantEventsFromSnapshots([event.snapshot], event.sessionId)[0])}\n`;
+  return buildIntermediateAssistantSnapshotEvents(event)
+    .map((snapshotEvent) => `${JSON.stringify(snapshotEvent)}\n`)
+    .join('');
 }
 
 export function extractAssistantSnapshotText(snapshot: AssistantEventSnapshot): string | null {
@@ -264,50 +345,66 @@ export function formatBackgroundAssistantTextEvent(event: {
   readonly sessionId?: string | null;
 }): string {
   return [
-    {
-      type: 'user',
-      ...(event.sessionId ? { session_id: event.sessionId } : {}),
-      uuid: randomUUID(),
-      origin: { kind: 'task-notification' },
-      message: {
-        role: 'user',
-        content: 'background task notification',
-      },
-    },
     buildAssistantTextEvent({
       turnId: event.turnId,
       sessionId: event.sessionId,
       text: event.text,
       stopReason: 'end_turn',
+      openp: buildOpenPAssistantMessage({
+        kind: 'answer',
+        form: 'streaming',
+        scope: 'background',
+        turnId: event.turnId,
+        sessionId: event.sessionId,
+        text: event.text,
+      }),
     }),
   ].map((line) => `${JSON.stringify(line)}\n`).join('');
 }
 
 export function formatWorkerTurnResult(result: WorkerTurnResult, event: {
   readonly turnId: string;
+  readonly backend?: string | null;
   readonly model?: string | null;
   readonly structuredOutputToolUseId?: string | null;
   readonly suppressAssistantTexts?: readonly string[];
   readonly suppressAssistantReasoningTexts?: readonly string[];
   readonly suppressAssistantSnapshots?: readonly AssistantEventSnapshot[];
+  readonly previouslyEmittedAssistantEvents?: readonly Record<string, unknown>[];
   readonly suppressFallbackAssistantText?: boolean;
+  readonly warnings?: readonly OutputWarning[];
 }): string {
   const usage = {
     inputTokens: result.diagnostics.inputTokens,
     outputTokens: result.diagnostics.outputTokens,
     cacheReadInputTokens: result.diagnostics.cacheReadInputTokens,
   };
-  const snapshotStructuredOutputToolUseId = findStructuredOutputToolUseId(result.assistantEvents);
+  const effectiveModel = result.diagnostics.model ?? event.model ?? null;
+  const lastSubturnUsage = result.diagnostics.lastSubturnUsage ?? null;
+  const assistantUsage = lastSubturnUsage ?? usage;
+  const lastSubturnContextTokens =
+    result.diagnostics.lastSubturnContextTokens ??
+    (lastSubturnUsage ? contextTokensFromUsage(lastSubturnUsage) : null);
   const structuredOutputToolUseId = resolveStructuredOutputToolUseId({
     structuredOutput: result.structuredOutput,
     assistantEvents: result.assistantEvents,
     preferredToolUseId: event.structuredOutputToolUseId,
   });
-  const filteredSnapshots = filterStructuredFallbackTextSnapshots(
+  const normalizedSnapshots = normalizeStructuredOutputFallbackSnapshots(
     result.assistantEvents,
     result.structuredOutput,
-    snapshotStructuredOutputToolUseId !== null,
+    structuredOutputToolUseId,
   );
+  const normalizedSuppressedSnapshots = normalizeStructuredOutputFallbackSnapshots(
+    event.suppressAssistantSnapshots,
+    result.structuredOutput,
+    structuredOutputToolUseId,
+  );
+  const suppressedResultSnapshots = intersectSuppressedResultSnapshots(
+    normalizedSnapshots,
+    normalizedSuppressedSnapshots,
+  );
+  const snapshotStructuredOutputToolUseId = findStructuredOutputToolUseId(normalizedSnapshots);
   const suppressedAssistantTexts = (event.suppressAssistantTexts ?? [])
     .filter((text) => text.length > 0);
   const suppressedAssistantReasoningTexts = (event.suppressAssistantReasoningTexts ?? [])
@@ -323,80 +420,165 @@ export function formatWorkerTurnResult(result: WorkerTurnResult, event: {
   const fallbackStructuredOutput = snapshotStructuredOutputToolUseId === null
     ? result.structuredOutput
     : undefined;
-  const assistantSnapshots = filterAssistantSnapshots(filteredSnapshots, {
+  const assistantSnapshots = filterAssistantSnapshots(normalizedSnapshots, {
     text: suppressedAssistantTexts,
     reasoning: suppressedAssistantReasoningTexts,
-    snapshots: event.suppressAssistantSnapshots ?? [],
+    snapshots: normalizedSuppressedSnapshots ?? [],
   });
+  const semanticSnapshotsContainResultText = snapshotsContainSemanticAssistantText(normalizedSnapshots, result.content);
+  const suppressedSnapshotsContainResultText = nonSemanticSnapshotsContainAssistantText(
+    normalizedSuppressedSnapshots,
+    result.content,
+  );
+  const blankResultTextFallback = shouldBlankResultTextFallback(
+    result.content,
+    latestSuppressedAssistantText,
+    event.suppressFallbackAssistantText,
+    semanticSnapshotsContainResultText,
+  );
   const assistantEvents = buildAssistantEventsFromSnapshots(
     assistantSnapshots,
     result.sessionId,
-    usage,
-  );
-  const assistantSnapshotsContainResultText = snapshotsContainAssistantText(assistantSnapshots, result.content);
-  const shouldEmitFallbackAssistant = Boolean(fallbackReasoningContent)
-    || fallbackStructuredOutput !== undefined
-    || shouldEmitResultTextFallback(result.content, latestSuppressedAssistantText, event.suppressFallbackAssistantText);
+    assistantUsage,
+      {
+        turnId: event.turnId,
+        resultAnswerText: result.content,
+        resultReasoningText: fallbackReasoningContent ?? null,
+        structuredOutput: result.structuredOutput,
+        structuredOutputToolUseId,
+        requestId: result.requestId ?? null,
+        model: effectiveModel,
+        stopReason: result.diagnostics.stopReason,
+        usage: assistantUsage,
+        form: 'result',
+      },
+    );
+  const assistantSnapshotsContainResultText =
+    snapshotsContainAssistantText(assistantSnapshots, result.content) ||
+    openPAnswerEventsContainResultText(assistantEvents, result.content) ||
+    openPAnswerEventsAggregateResultText(assistantEvents, result.content) ||
+    suppressedSnapshotsContainResultText;
+  const missingFallbackReasoningContent = openPEventsContainReasoningText(assistantEvents, fallbackReasoningContent)
+    ? null
+    : fallbackReasoningContent;
+  const shouldEmitFallbackAssistant = result.structuredOutput !== undefined && fallbackStructuredOutput === undefined
+    ? false
+    : Boolean(fallbackReasoningContent)
+      || fallbackStructuredOutput !== undefined
+      || shouldEmitResultTextFallback(
+        result.content,
+        latestSuppressedAssistantText,
+        event.suppressFallbackAssistantText,
+        semanticSnapshotsContainResultText,
+      ) && !suppressedSnapshotsContainResultText;
   const textFallbackAfterSnapshots = result.structuredOutput === undefined &&
     assistantEvents.length > 0 &&
-    latestSuppressedAssistantText !== null &&
-    result.content.length > 0 &&
-    latestSuppressedAssistantText !== result.content &&
-    !assistantSnapshotsContainResultText
-    ? [buildAssistantTextEvent({
+    !assistantSnapshotsContainResultText &&
+    shouldEmitResultTextFallback(
+      result.content,
+      latestSuppressedAssistantText,
+      event.suppressFallbackAssistantText,
+      semanticSnapshotsContainResultText,
+    ) && !suppressedSnapshotsContainResultText
+    ? buildResultTextAssistantEventRecords({
         turnId: event.turnId,
         sessionId: result.sessionId,
-        text: result.content,
+        answerText: result.content,
+        reasoningText: missingFallbackReasoningContent,
+        emitAnswer: true,
         requestId: result.requestId,
-        stopReason: null,
-        model: event.model ?? null,
-        usage,
-      })]
+        stopReason: result.diagnostics.stopReason,
+        model: effectiveModel,
+        usage: assistantUsage,
+      })
     : [];
   const fallbackAssistantEvents = assistantEvents.length > 0
     ? [
         ...assistantEvents,
         ...textFallbackAfterSnapshots,
         ...(result.structuredOutput !== undefined && !snapshotStructuredOutputToolUseId
-          ? [buildAssistantTextEvent({
-              turnId: event.turnId,
-              sessionId: result.sessionId,
-              text: '',
-              structuredOutput: result.structuredOutput,
-              structuredOutputToolUseId,
-              requestId: result.requestId,
-              stopReason: null,
-              model: event.model ?? null,
-              usage,
-            })]
+          ? [
+              ...buildResultTextAssistantEventRecords({
+                turnId: event.turnId,
+                sessionId: result.sessionId,
+                answerText: '',
+                reasoningText: missingFallbackReasoningContent,
+                emitAnswer: false,
+                requestId: result.requestId,
+                stopReason: result.diagnostics.stopReason,
+                model: effectiveModel,
+                usage: assistantUsage,
+              }),
+              buildStructuredOutputAssistantEventRecord({
+                turnId: event.turnId,
+                sessionId: result.sessionId,
+                structuredOutput: result.structuredOutput,
+                structuredOutputToolUseId,
+                requestId: result.requestId,
+                stopReason: result.diagnostics.stopReason,
+                model: effectiveModel,
+                usage: assistantUsage,
+              }),
+            ]
           : []),
       ]
     : (shouldEmitFallbackAssistant
-        ? [buildAssistantTextEvent({
-            turnId: event.turnId,
-            sessionId: result.sessionId,
-            text: latestSuppressedAssistantText === result.content ? '' : result.content,
-            reasoningContent: fallbackReasoningContent,
-            structuredOutput: fallbackStructuredOutput,
-            structuredOutputToolUseId,
-            requestId: result.requestId,
-            stopReason: null,
-            model: event.model ?? null,
-            usage,
-          })]
+        ? [
+            ...buildResultTextAssistantEventRecords({
+              turnId: event.turnId,
+              sessionId: result.sessionId,
+              answerText: result.content,
+              reasoningText: fallbackReasoningContent,
+              emitAnswer: fallbackStructuredOutput === undefined && !blankResultTextFallback,
+              requestId: result.requestId,
+              stopReason: result.diagnostics.stopReason,
+              model: effectiveModel,
+              usage: assistantUsage,
+            }),
+            ...(fallbackStructuredOutput !== undefined
+              ? [buildStructuredOutputAssistantEventRecord({
+                  turnId: event.turnId,
+                  sessionId: result.sessionId,
+                  structuredOutput: fallbackStructuredOutput,
+                  structuredOutputToolUseId,
+                  requestId: result.requestId,
+                  stopReason: result.diagnostics.stopReason,
+                  model: effectiveModel,
+                  usage: assistantUsage,
+                })]
+              : []),
+          ]
         : []);
 
+  const emittedAssistantOpenPEvents = buildNestedAssistantOpenPEvents({
+    previouslyEmittedSnapshots: suppressedResultSnapshots,
+    previouslyEmittedAssistantEvents: event.previouslyEmittedAssistantEvents,
+    emittedAssistantEvents: fallbackAssistantEvents,
+    sessionId: result.sessionId,
+    turnId: event.turnId,
+    resultAnswerText: result.content,
+    resultReasoningText: result.reasoningContent,
+    structuredOutput: result.structuredOutput,
+    structuredOutputToolUseId,
+    requestId: result.requestId ?? null,
+    model: effectiveModel,
+    stopReason: result.diagnostics.stopReason,
+    usage: assistantUsage,
+  });
   const events = [
-    ...fallbackAssistantEvents,
-    ...(structuredOutputToolUseId ? [buildStructuredOutputToolResultEvent({
-      sessionId: result.sessionId,
-      toolUseId: structuredOutputToolUseId,
-    })] : []),
     buildResultEvent({
       turnId: event.turnId,
       sessionId: result.sessionId,
+      backend: event.backend ?? null,
       text: result.content,
+      reasoningText: result.reasoningContent,
+      requestId: result.requestId ?? null,
       structuredOutput: result.structuredOutput,
+      structuredOutputToolUseId,
+      assistantEvents: assistantSnapshots ?? [],
+      assistantOpenPEvents: emittedAssistantOpenPEvents,
+      assistantEventUsage: assistantUsage,
+      lastSubturnUsage,
       durationMs: result.diagnostics.durationMs,
       numTurns: result.diagnostics.numTurns,
       totalCostUsd: result.diagnostics.totalCostUsd,
@@ -404,45 +586,1657 @@ export function formatWorkerTurnResult(result: WorkerTurnResult, event: {
       usage,
       rawUsage: result.diagnostics.rawUsage ?? null,
       contextWindow: result.diagnostics.contextWindow,
-      model: event.model ?? null,
+      lastSubturnContextTokens,
+      model: effectiveModel,
+      warnings: event.warnings ?? [],
     }),
   ];
   return events.map((line) => `${JSON.stringify(line)}\n`).join('');
+}
+
+function formatTextWarnings(warnings: readonly OutputWarning[] | undefined): string {
+  if (!warnings || warnings.length === 0) {
+    return '';
+  }
+  return warnings
+    .map((warning) => `[openp ${warning.severity}] ${warning.code}: ${warning.message}\n`)
+    .join('');
+}
+
+function formatVerboseTextMarker(verbose: boolean | undefined): string {
+  return verbose ? '[openp verbose] enabled\n' : '';
+}
+
+function resultAnswerTextForTextOutput(result: TurnResult, options: OutputOptions): string {
+  const structuredOutputToolUseId = resolveStructuredOutputToolUseId({
+    structuredOutput: result.structuredOutput,
+    assistantEvents: result.assistantEvents,
+    preferredToolUseId: options.structuredOutputToolUseId,
+  });
+  const normalizedSnapshots = normalizeStructuredOutputFallbackSnapshots(
+    result.assistantEvents,
+    result.structuredOutput,
+    structuredOutputToolUseId,
+  );
+  const normalizedSuppressedSnapshots = normalizeStructuredOutputFallbackSnapshots(
+    options.suppressAssistantSnapshots,
+    result.structuredOutput,
+    structuredOutputToolUseId,
+  );
+  const suppressedAssistantTexts = options.suppressAssistantTexts ?? [];
+  const suppressedAssistantReasoningTexts = options.suppressAssistantReasoningTexts ?? [];
+  const assistantSnapshots = filterAssistantSnapshots(normalizedSnapshots, {
+    text: suppressedAssistantTexts,
+    reasoning: suppressedAssistantReasoningTexts,
+    snapshots: normalizedSuppressedSnapshots ?? [],
+  });
+  const resultUsage = result.diagnostics.usage;
+  const assistantUsage = result.diagnostics.lastSubturnUsage ?? resultUsage;
+  const assistantEvents = buildAssistantEventsFromSnapshots(
+    assistantSnapshots,
+    options.backendSessionId,
+    assistantUsage,
+    {
+      turnId: result.turnId,
+      resultAnswerText: result.text,
+      resultReasoningText: result.reasoningContent ?? null,
+      structuredOutput: result.structuredOutput,
+      structuredOutputToolUseId,
+      requestId: result.requestId ?? null,
+      model: result.diagnostics.model ?? options.model ?? null,
+      stopReason: result.diagnostics.stopReason ?? 'end_turn',
+      usage: assistantUsage,
+      form: 'result',
+    },
+  );
+  const answers = collectOpenPAnswersFromAssistantEvents(extractEmittedAssistantOpenPEvents(assistantEvents));
+  return answers.length > 0 ? answers.join('\n\n') : result.text;
 }
 
 function shouldEmitResultTextFallback(
   text: string,
   latestSuppressedText: string | null,
   suppressFallback: boolean | undefined,
+  semanticSnapshotMatchesResult = false,
 ): boolean {
+  if (text.length === 0) {
+    return false;
+  }
+  if (semanticSnapshotMatchesResult) {
+    return true;
+  }
   if (!suppressFallback) {
     return true;
   }
-  return text.length > 0 && latestSuppressedText !== text;
+  return latestSuppressedText !== text;
+}
+
+function shouldBlankResultTextFallback(
+  text: string,
+  latestSuppressedText: string | null,
+  suppressFallback: boolean | undefined,
+  semanticSnapshotMatchesResult: boolean,
+): boolean {
+  return Boolean(suppressFallback) &&
+    !semanticSnapshotMatchesResult &&
+    text.length > 0 &&
+    latestSuppressedText === text;
+}
+
+type OpenPEventKind = 'answer' | 'reasoning' | 'tool_call' | 'tool_result' | 'structured_output' | 'metadata';
+type OpenPAssistantEventKind = Exclude<OpenPEventKind, 'answer' | 'reasoning'>;
+type OpenPForm = 'streaming' | 'result';
+type OpenPScope = 'active' | 'background';
+type OpenPOutputKey = 'answer' | 'reasoning' | 'toolCall' | 'toolResult';
+type OpenPResultOutput = {
+  answer: string[];
+  reasoning: string[];
+  toolCall: Record<string, unknown>[];
+  toolResult: Record<string, unknown>[];
+};
+
+function openPScopeFromSemanticKind(semanticKind: AssistantEventSnapshot['semanticKind']): OpenPScope {
+  return semanticKind === 'background' ? 'background' : 'active';
+}
+
+function nativePhaseMetadataFromSemanticKind(
+  semanticKind: AssistantEventSnapshot['semanticKind'],
+): Record<string, unknown> | null {
+  if (semanticKind === 'commentary' || semanticKind === 'progress') {
+    return { nativePhase: semanticKind };
+  }
+  return null;
+}
+
+function buildOpenPOutputRecord(event: {
+  readonly form: OpenPForm;
+  readonly scope: OpenPScope;
+  readonly turnId?: string | null;
+  readonly sessionId?: string | null;
+  readonly output: Record<string, unknown>;
+  readonly structuredOutput?: unknown;
+  readonly metadata?: Record<string, unknown> | null;
+}): Record<string, unknown> {
+  const metadata = compactRecord(event.metadata ?? {});
+  const record = compactRecord({
+    version: OPENP_NATIVE_VERSION,
+    form: event.form,
+    scope: event.scope,
+    turnId: event.turnId ?? null,
+    sessionId: event.sessionId ?? null,
+    output: event.output,
+    structuredOutput: event.structuredOutput ?? null,
+    metadata: Object.keys(metadata).length > 0 ? metadata : {},
+  });
+  return assertOpenPOutputRecord(record);
+}
+
+function buildOpenPResultOutput(input: Partial<Record<OpenPOutputKey, unknown>> = {}): OpenPResultOutput {
+  return {
+    answer: stringArray(input.answer),
+    reasoning: stringArray(input.reasoning),
+    toolCall: recordArray(input.toolCall),
+    toolResult: recordArray(input.toolResult),
+  };
+}
+
+function openPOutputFromAssistantEvent(event: {
+  readonly form: OpenPForm;
+  readonly kind: OpenPAssistantEventKind;
+  readonly structuredOutput?: unknown;
+  readonly toolCalls: readonly Record<string, unknown>[];
+  readonly toolResults: readonly Record<string, unknown>[];
+}): Record<string, unknown> {
+  const toolCall = event.toolCalls[0] ??
+    (event.kind === 'structured_output' && event.structuredOutput !== undefined
+      ? buildOpenPStructuredOutputToolCall(buildToolUseId(), event.structuredOutput)
+      : undefined);
+  const toolResult = event.toolResults[0];
+  if (event.form === 'streaming') {
+    if (toolCall) return { toolCall };
+    if (toolResult) return { toolResult };
+    throw new Error('streaming tool output must carry toolCall or toolResult payload');
+  }
+  return buildOpenPResultOutput({
+    toolCall: toolCall ? [toolCall] : [],
+    toolResult: toolResult ? [toolResult] : [],
+  });
+}
+
+function assertOpenPOutputRecord(openp: Record<string, unknown>): Record<string, unknown> {
+  if (openp.form !== 'streaming' && openp.form !== 'result') {
+    throw new Error('openp record must declare form as streaming or result');
+  }
+  if (openp.scope !== 'active' && openp.scope !== 'background') {
+    throw new Error('openp record must declare scope as active or background');
+  }
+  const output = openp.output;
+  if (!output || typeof output !== 'object' || Array.isArray(output)) {
+    throw new Error('openp record must carry output object');
+  }
+  const keys = Object.keys(output as Record<string, unknown>);
+  if (openp.form === 'streaming') {
+    if (openp.structuredOutput !== null && openp.structuredOutput !== undefined) {
+      throw new Error('streaming openp record must not carry structuredOutput');
+    }
+    const present = keys.filter((key) => ['answer', 'reasoning', 'toolCall', 'toolResult'].includes(key));
+    if (present.length !== 1 || present.length !== keys.length) {
+      throw new Error('streaming openp.output must contain exactly one payload key');
+    }
+    return openp;
+  }
+  const expected = ['answer', 'reasoning', 'toolCall', 'toolResult'];
+  if (keys.length !== expected.length || keys.some((key) => !expected.includes(key))) {
+    throw new Error('result openp.output must contain exactly answer/reasoning/toolCall/toolResult arrays');
+  }
+  if (expected.some((key) => !Array.isArray((output as Record<string, unknown>)[key]))) {
+    throw new Error('result openp.output must aggregate answer/reasoning/toolCall/toolResult arrays');
+  }
+  return openp;
+}
+
+function stringArray(value: unknown): string[] {
+  if (typeof value === 'string') {
+    return value.length > 0 ? [value] : [];
+  }
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((item): item is string => typeof item === 'string' && item.length > 0);
+}
+
+function recordArray(value: unknown): Record<string, unknown>[] {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    return [value as Record<string, unknown>];
+  }
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((item): item is Record<string, unknown> =>
+    Boolean(item) && typeof item === 'object' && !Array.isArray(item)
+  );
+}
+
+function buildOpenPAssistantMessage(event: {
+  readonly kind: 'answer' | 'reasoning';
+  readonly form: OpenPForm;
+  readonly scope?: OpenPScope;
+  readonly turnId?: string | null;
+  readonly sessionId?: string | null;
+  readonly messageId?: string | null;
+  readonly requestId?: string | null;
+  readonly text: string;
+  readonly metadata?: Record<string, unknown> | null;
+}): Record<string, unknown> {
+  return buildOpenPOutputRecord({
+    form: event.form,
+    scope: event.scope ?? 'active',
+    turnId: event.turnId ?? null,
+    sessionId: event.sessionId ?? null,
+    output: event.form === 'streaming'
+      ? { [event.kind]: event.text }
+      : buildOpenPResultOutput({
+          [event.kind]: event.text.length > 0 ? [event.text] : [],
+        }),
+    structuredOutput: null,
+    metadata: compactRecord({
+      ...(event.metadata ?? {}),
+      messageId: event.messageId ?? event.metadata?.messageId ?? undefined,
+      requestId: event.requestId ?? event.metadata?.requestId ?? undefined,
+    }),
+  });
+}
+
+function buildOpenPResultMessage(event: {
+  readonly turnId?: string | null;
+  readonly sessionId?: string | null;
+  readonly answerText: string;
+  readonly metadata?: Record<string, unknown> | null;
+}): Record<string, unknown> {
+  return buildOpenPAssistantMessage({
+    kind: 'answer',
+    form: 'result',
+    scope: 'active',
+    turnId: event.turnId ?? null,
+    sessionId: event.sessionId ?? null,
+    text: event.answerText,
+    metadata: event.metadata ?? null,
+  });
+}
+
+function buildOpenPAssistantEvent(event: {
+  readonly kind: OpenPAssistantEventKind;
+  readonly form?: OpenPForm;
+  readonly scope?: OpenPScope;
+  readonly turnId?: string | null;
+  readonly sessionId?: string | null;
+  readonly requestId?: string | null;
+  readonly structuredOutput?: unknown;
+  readonly toolCalls?: readonly Record<string, unknown>[];
+  readonly toolResults?: readonly Record<string, unknown>[];
+  readonly messageBlocks?: readonly unknown[];
+  readonly metadata?: Record<string, unknown> | null;
+}): Record<string, unknown> {
+  const form = event.form ?? 'streaming';
+  const output = openPOutputFromAssistantEvent({
+    form,
+    kind: event.kind,
+    ...(event.structuredOutput !== undefined ? { structuredOutput: event.structuredOutput } : {}),
+    toolCalls: event.toolCalls ?? [],
+    toolResults: event.toolResults ?? [],
+  });
+  return buildOpenPOutputRecord({
+    form,
+    scope: event.scope ?? 'active',
+    turnId: event.turnId ?? null,
+    sessionId: event.sessionId ?? null,
+    output,
+    structuredOutput: event.structuredOutput ?? null,
+    metadata: compactRecord({
+      ...(event.metadata ?? {}),
+      requestId: event.requestId ?? undefined,
+      ...(event.messageBlocks && metadataMessageBlocks(event.messageBlocks).length > 0
+        ? { messageBlocks: metadataMessageBlocks(event.messageBlocks) }
+        : {}),
+    }),
+  });
+}
+
+function buildOpenPStructuredOutputAssistantEvent(event: {
+  readonly turnId?: string | null;
+  readonly sessionId?: string | null;
+  readonly metadata?: Record<string, unknown> | null;
+}): Record<string, unknown> {
+  return buildOpenPAssistantEvent({
+    kind: 'structured_output',
+    form: 'result',
+    scope: 'active',
+    turnId: event.turnId ?? null,
+    sessionId: event.sessionId ?? null,
+    metadata: event.metadata ?? null,
+  });
+}
+
+function buildOpenPAssistantEventsFromSnapshot(
+  snapshot: AssistantEventSnapshot,
+  context: {
+    readonly turnId?: string | null;
+    readonly sessionId?: string | null;
+    readonly resultAnswerText?: string | null;
+    readonly resultReasoningText?: string | null;
+    readonly structuredOutput?: unknown;
+    readonly structuredOutputToolUseId?: string | null;
+    readonly requestId?: string | null;
+    readonly model?: string | null;
+    readonly stopReason?: string | null;
+    readonly usage?: BackendUsage | null;
+    readonly form?: OpenPForm;
+  },
+): Record<string, unknown>[] {
+  const text = snapshotAssistantText(snapshot);
+  const reasoningText = extractAssistantSnapshotReasoningText(snapshot);
+  const toolCalls = extractOpenPToolCalls(snapshot.message);
+  const toolResults = extractOpenPToolResults(snapshot.message);
+  const messageBlocks = extractOpenPMessageBlocks(snapshot.message);
+  const metadata = buildOpenPMessageMetadata(snapshot.message, snapshot.requestId ?? null);
+  const nativePhaseMetadata = nativePhaseMetadataFromSemanticKind(snapshot.semanticKind);
+  const contextMetadata = mergeOpenPContextMetadata(metadata, {
+    requestId: context.requestId ?? null,
+    model: context.model ?? null,
+    stopReason: context.stopReason ?? null,
+    usage: context.usage ?? null,
+  });
+  const eventMetadata = nativePhaseMetadata
+    ? {
+        ...(contextMetadata ?? {}),
+        ...nativePhaseMetadata,
+      }
+    : contextMetadata;
+  const scope = openPScopeFromSemanticKind(snapshot.semanticKind);
+  if (scope === 'background') {
+    return text && text.length > 0
+      ? [buildOpenPAssistantMessage({
+          kind: 'answer',
+          form: context.form ?? 'streaming',
+          scope,
+          turnId: context.turnId ?? null,
+          sessionId: context.sessionId ?? null,
+          requestId: snapshot.requestId ?? null,
+          text,
+          metadata: eventMetadata,
+        })]
+      : [];
+  }
+  const resultReasoningText = reasoningText ??
+    (context.structuredOutput !== undefined
+      ? context.resultReasoningText ?? null
+      : text !== null && text.length > 0 && text === (context.resultAnswerText ?? null)
+      ? context.resultReasoningText ?? null
+      : null);
+  const hasStructuredToolCall = hasStructuredOutputToolCall(toolCalls);
+  const isStructuredOutputFallbackSnapshot = context.structuredOutput !== undefined &&
+    snapshotTextEqualsStructuredOutput(snapshot, context.structuredOutput);
+  const structuredOutputToolUseId = context.structuredOutputToolUseId ?? null;
+  const structuredToolCalls = !hasStructuredToolCall &&
+    isStructuredOutputFallbackSnapshot &&
+    structuredOutputToolUseId
+    ? [buildOpenPStructuredOutputToolCall(structuredOutputToolUseId, context.structuredOutput)]
+    : toolCalls;
+  const structuredMessageBlocks = !hasStructuredToolCall &&
+    isStructuredOutputFallbackSnapshot &&
+    structuredOutputToolUseId
+    ? [buildStructuredOutputToolUseMessageBlock(structuredOutputToolUseId, context.structuredOutput)]
+    : messageBlocks;
+  if (
+    !snapshot.semanticKind &&
+    context.structuredOutput !== undefined &&
+    (hasStructuredToolCall || isStructuredOutputFallbackSnapshot)
+  ) {
+    const structuredEvents: Record<string, unknown>[] = [
+      ...buildOpenPTextAssistantMessages({
+        text: null,
+        reasoningText: resultReasoningText,
+        form: context.form ?? 'streaming',
+        scope: 'active',
+        turnId: context.turnId ?? null,
+        sessionId: context.sessionId ?? null,
+        requestId: snapshot.requestId ?? null,
+        metadata: contextMetadata,
+      }),
+	      ...structuredToolCalls.map((toolCall) => buildOpenPAssistantEvent({
+	        kind: 'structured_output',
+	        form: context.form ?? 'streaming',
+	        scope: 'active',
+	        turnId: context.turnId ?? null,
+	        sessionId: context.sessionId ?? null,
+	        requestId: snapshot.requestId ?? null,
+	        structuredOutput: context.structuredOutput,
+	        toolCalls: [toolCall],
+	        messageBlocks: filterOpenPMessageBlocksForKind(structuredMessageBlocks, 'structured_output'),
+	        metadata: contextMetadata,
+	      })),
+	      ...toolResults.map((toolResult) => buildOpenPAssistantEvent({
+	        kind: 'tool_result',
+	        form: context.form ?? 'streaming',
+	        scope: 'active',
+	        turnId: context.turnId ?? null,
+	        sessionId: context.sessionId ?? null,
+	        requestId: snapshot.requestId ?? null,
+	        toolResults: [toolResult],
+	        messageBlocks: filterOpenPMessageBlocksForKind(messageBlocks, 'tool_result'),
+	        metadata: contextMetadata,
+	      })),
+	    ];
+	    const metadataBlocks = filterOpenPMessageBlocksForKind(messageBlocks, 'metadata');
+	    if (metadataBlocks.length > 0 && (context.form ?? 'streaming') === 'result') {
+      structuredEvents.push(buildOpenPAssistantEvent({
+        kind: 'metadata',
+        form: context.form ?? 'streaming',
+        scope: 'active',
+        turnId: context.turnId ?? null,
+        sessionId: context.sessionId ?? null,
+        requestId: snapshot.requestId ?? null,
+        messageBlocks: metadataBlocks,
+        metadata: contextMetadata,
+      }));
+    }
+    return structuredEvents;
+  }
+  const hasToolPayload = toolCalls.length > 0 || toolResults.length > 0;
+  if (!hasToolPayload && !snapshot.semanticKind && isResultAssistantSnapshot({
+    text,
+    reasoningText,
+    hasTerminalStop: snapshotHasTerminalStop(snapshot),
+    resultAnswerText: context.resultAnswerText ?? null,
+    resultReasoningText: context.resultReasoningText ?? null,
+  })) {
+    const resultEvents = buildOpenPTextAssistantMessages({
+      text,
+      reasoningText: resultReasoningText,
+      form: 'result',
+      scope: 'active',
+      turnId: context.turnId ?? null,
+      sessionId: context.sessionId ?? null,
+      requestId: snapshot.requestId ?? null,
+      metadata: contextMetadata,
+    });
+    const metadataBlocks = filterOpenPMessageBlocksForKind(messageBlocks, 'metadata');
+	    if (metadataBlocks.length > 0 && (context.form ?? 'streaming') === 'result') {
+      resultEvents.push(buildOpenPAssistantEvent({
+        kind: 'metadata',
+        form: 'result',
+        scope: 'active',
+        turnId: context.turnId ?? null,
+        sessionId: context.sessionId ?? null,
+        requestId: snapshot.requestId ?? null,
+        messageBlocks: metadataBlocks,
+        metadata: contextMetadata,
+      }));
+    }
+    return resultEvents;
+  }
+  const events = buildOpenPTextAssistantMessages({
+    text,
+    reasoningText,
+    form: context.form ?? 'streaming',
+    scope,
+    turnId: context.turnId ?? null,
+    sessionId: context.sessionId ?? null,
+    requestId: snapshot.requestId ?? null,
+    metadata: eventMetadata,
+  });
+	  if (toolCalls.length > 0) {
+	    events.push(...toolCalls.map((toolCall) => buildOpenPAssistantEvent({
+	      kind: 'tool_call',
+	      form: context.form ?? 'streaming',
+	      scope,
+	      turnId: context.turnId ?? null,
+	      sessionId: context.sessionId ?? null,
+	      requestId: snapshot.requestId ?? null,
+	      toolCalls: [toolCall],
+	      messageBlocks: filterOpenPMessageBlocksForKind(messageBlocks, 'tool_call'),
+	      metadata: eventMetadata,
+	    })));
+	  }
+	  if (toolResults.length > 0) {
+	    events.push(...toolResults.map((toolResult) => buildOpenPAssistantEvent({
+	      kind: 'tool_result',
+	      form: context.form ?? 'streaming',
+	      scope,
+	      turnId: context.turnId ?? null,
+	      sessionId: context.sessionId ?? null,
+	      requestId: snapshot.requestId ?? null,
+	      toolResults: [toolResult],
+	      messageBlocks: filterOpenPMessageBlocksForKind(messageBlocks, 'tool_result'),
+	      metadata: eventMetadata,
+	    })));
+	  }
+	  const metadataBlocks = filterOpenPMessageBlocksForKind(messageBlocks, 'metadata');
+	  if (metadataBlocks.length > 0 && (context.form ?? 'streaming') === 'result') {
+    events.push(buildOpenPAssistantEvent({
+      kind: 'metadata',
+      form: context.form ?? 'streaming',
+      scope,
+      turnId: context.turnId ?? null,
+      sessionId: context.sessionId ?? null,
+      requestId: snapshot.requestId ?? null,
+      messageBlocks: metadataBlocks,
+      metadata: eventMetadata,
+    }));
+  }
+	  if (events.length === 0 && eventMetadata && (context.form ?? 'streaming') === 'result') {
+    events.push(buildOpenPAssistantEvent({
+      kind: 'metadata',
+      form: context.form ?? 'streaming',
+      scope,
+      turnId: context.turnId ?? null,
+      sessionId: context.sessionId ?? null,
+      requestId: snapshot.requestId ?? null,
+      metadata: eventMetadata,
+    }));
+  }
+  return events;
+}
+
+function isResultAssistantSnapshot(event: {
+  readonly text: string | null;
+  readonly reasoningText: string | null;
+  readonly hasTerminalStop: boolean;
+  readonly resultAnswerText: string | null;
+  readonly resultReasoningText: string | null;
+}): boolean {
+  if (!event.hasTerminalStop) {
+    return false;
+  }
+  if (event.text !== null && event.text.length > 0 && event.text === event.resultAnswerText) {
+    return event.reasoningText === null || event.reasoningText === event.resultReasoningText;
+  }
+  return (event.resultAnswerText === null || event.resultAnswerText.length === 0) &&
+    event.text === null &&
+    event.reasoningText !== null &&
+    event.reasoningText.length > 0 &&
+    event.reasoningText === event.resultReasoningText;
+}
+
+function buildOpenPTextAssistantMessages(event: {
+  readonly text: string | null;
+  readonly reasoningText: string | null;
+  readonly form: OpenPForm;
+  readonly scope: OpenPScope;
+  readonly turnId?: string | null;
+  readonly sessionId?: string | null;
+  readonly requestId?: string | null;
+  readonly metadata?: Record<string, unknown> | null;
+}): Record<string, unknown>[] {
+  const output: Record<string, unknown>[] = [];
+  if (event.reasoningText && event.reasoningText.length > 0) {
+    output.push(buildOpenPAssistantMessage({
+      kind: 'reasoning',
+      form: event.form,
+      scope: event.scope,
+      turnId: event.turnId ?? null,
+      sessionId: event.sessionId ?? null,
+      requestId: event.requestId ?? null,
+      text: event.reasoningText,
+      metadata: event.metadata ?? null,
+    }));
+  }
+  if (event.text && event.text.length > 0) {
+    output.push(buildOpenPAssistantMessage({
+      kind: 'answer',
+      form: event.form,
+      scope: event.scope,
+      turnId: event.turnId ?? null,
+      sessionId: event.sessionId ?? null,
+      requestId: event.requestId ?? null,
+      text: event.text,
+      metadata: event.metadata ?? null,
+    }));
+  }
+  return output;
+}
+
+function filterOpenPMessageBlocksForKind(blocks: readonly unknown[], kind: Exclude<OpenPEventKind, 'answer' | 'reasoning'>): unknown[] {
+  return blocks.filter((block) => {
+    if (!block || typeof block !== 'object' || Array.isArray(block)) {
+      return false;
+    }
+    const type = (block as Record<string, unknown>).type;
+    if (kind === 'tool_call' || kind === 'structured_output') {
+      return type === 'tool_use' || type === 'server_tool_use';
+    }
+    if (kind === 'tool_result') {
+      return type === 'tool_result';
+    }
+    return isNeutralOpenPMetadataBlock(block as Record<string, unknown>);
+  });
+}
+
+function isNeutralOpenPMetadataBlock(block: Record<string, unknown>): boolean {
+  const type = block.type;
+  if (typeof type !== 'string') {
+    return false;
+  }
+  if (isForbiddenOpenPMetadataTypeValue(type)) {
+    return false;
+  }
+  return !hasOpenPMetadataForbiddenField(block);
+}
+
+function isForbiddenOpenPMetadataTypeValue(value: string): boolean {
+  return new Set([
+    'answer',
+    'toolCall',
+    'toolResult',
+    'output',
+    'kind',
+    'text',
+    'textDelta',
+    'answerText',
+    'answers',
+    'reasoningText',
+    'thinking',
+    'reasoning',
+    'toolCalls',
+    'toolResults',
+    'assistantEvents',
+    'assistant.message',
+    'assistant.event',
+    'tool_use',
+    'server_tool_use',
+    'tool_result',
+    'output_text',
+    'message.partial',
+    'message.final',
+  ]).has(value);
+}
+
+function hasOpenPMetadataForbiddenField(value: unknown): boolean {
+  const forbiddenFields = new Set([
+    'answer',
+    'toolCall',
+    'toolResult',
+    'output',
+    'kind',
+    'text',
+    'textDelta',
+    'answerText',
+    'answers',
+    'reasoningText',
+    'thinking',
+    'reasoning',
+    'toolCalls',
+    'toolResults',
+    'assistantEvents',
+    'assistant.message',
+    'assistant.event',
+    'input',
+    'content',
+    'tool_use_id',
+    'is_error',
+  ]);
+  const visit = (item: unknown, nestedDepth: number): boolean => {
+    if (Array.isArray(item)) {
+      return item.some((nested) => visit(nested, nestedDepth + 1));
+    }
+    if (!item || typeof item !== 'object') {
+      return false;
+    }
+    for (const [key, nested] of Object.entries(item as Record<string, unknown>)) {
+      if (forbiddenFields.has(key)) {
+        return true;
+      }
+      if (
+        key === 'type' &&
+        typeof nested === 'string' &&
+        isForbiddenOpenPMetadataTypeValue(nested)
+      ) {
+        return true;
+      }
+      if (visit(nested, nestedDepth + 1)) {
+        return true;
+      }
+    }
+    return false;
+  };
+  return visit(value, 0);
+}
+
+function extractOpenPMessageBlocks(message: Record<string, unknown>): unknown[] {
+  const content = message.content;
+  if (!Array.isArray(content)) {
+    return [];
+  }
+  return content.map(normalizePublicContentBlock);
+}
+
+function extractOpenPToolCalls(message: Record<string, unknown>): Record<string, unknown>[] {
+  const content = message.content;
+  if (!Array.isArray(content)) {
+    return [];
+  }
+  const toolCalls: Record<string, unknown>[] = [];
+  for (const block of content) {
+    if (!block || typeof block !== 'object' || Array.isArray(block)) {
+      continue;
+    }
+    const item = block as Record<string, unknown>;
+    if (item.type !== 'tool_use' && item.type !== 'server_tool_use') {
+      continue;
+    }
+    toolCalls.push(compactRecord({
+      type: item.type,
+      id: typeof item.id === 'string' ? item.id : undefined,
+      name: typeof item.name === 'string' ? item.name : undefined,
+      input: Object.prototype.hasOwnProperty.call(item, 'input') ? item.input : undefined,
+      caller: Object.prototype.hasOwnProperty.call(item, 'caller') ? item.caller : undefined,
+    }));
+  }
+  return toolCalls;
+}
+
+function extractOpenPToolResults(message: Record<string, unknown>): Record<string, unknown>[] {
+  const content = message.content;
+  if (!Array.isArray(content)) {
+    return [];
+  }
+  const toolResults: Record<string, unknown>[] = [];
+  for (const block of content) {
+    if (!block || typeof block !== 'object' || Array.isArray(block)) {
+      continue;
+    }
+    const item = block as Record<string, unknown>;
+    if (item.type !== 'tool_result') {
+      continue;
+    }
+    toolResults.push(compactRecord({
+      type: 'tool_result',
+      toolUseId: typeof item.tool_use_id === 'string' ? item.tool_use_id : undefined,
+      content: Object.prototype.hasOwnProperty.call(item, 'content') ? item.content : undefined,
+      isError: typeof item.is_error === 'boolean' ? item.is_error : undefined,
+    }));
+  }
+  return toolResults;
+}
+
+function hasStructuredOutputToolCall(toolCalls: readonly Record<string, unknown>[]): boolean {
+  return toolCalls.some((toolCall) => toolCall.name === 'StructuredOutput');
+}
+
+function collectOpenPToolCallsFromAssistantEvents(events: readonly Record<string, unknown>[]): Record<string, unknown>[] {
+  return events.flatMap((event) => {
+    if (event.scope === 'background' || event.form !== 'result') {
+      return [];
+    }
+    const output = asOpenPOutput(event);
+    return recordArray(output?.toolCall);
+  });
+}
+
+function collectOpenPAnswersFromAssistantEvents(events: readonly Record<string, unknown>[]): string[] {
+  return events.flatMap((event) => {
+    if (event.scope === 'background' || event.form !== 'result') {
+      return [];
+    }
+    const output = asOpenPOutput(event);
+    return stringArray(output?.answer);
+  });
+}
+
+function openPAnswerEventsAggregateResultText(events: readonly Record<string, unknown>[], text: string): boolean {
+  if (text.length === 0) {
+    return false;
+  }
+  const extracted = extractEmittedAssistantOpenPEvents(events);
+  const answers = collectOpenPAnswersFromAssistantEvents(extracted.length > 0 ? extracted : events);
+  return answers.length > 0 && answers.join('\n\n') === text;
+}
+
+function openPAnswerEventsContainResultText(events: readonly Record<string, unknown>[], text: string): boolean {
+  if (text.length === 0) {
+    return false;
+  }
+  const extracted = extractEmittedAssistantOpenPEvents(events);
+  const answers = collectOpenPAnswersFromAssistantEvents(extracted.length > 0 ? extracted : events);
+  return answers.includes(text);
+}
+
+function collectOpenPReasoningFromAssistantEvents(events: readonly Record<string, unknown>[]): string[] {
+  return events.flatMap((event) => {
+    if (event.scope === 'background' || event.form !== 'result') {
+      return [];
+    }
+    const output = asOpenPOutput(event);
+    return stringArray(output?.reasoning);
+  });
+}
+
+function collectOpenPToolResultsFromAssistantEvents(events: readonly Record<string, unknown>[]): Record<string, unknown>[] {
+  return events.flatMap((event) => {
+    if (event.scope === 'background' || event.form !== 'result') {
+      return [];
+    }
+    const output = asOpenPOutput(event);
+    return recordArray(output?.toolResult);
+  });
+}
+
+function collectOpenPMessageBlocksFromAssistantEvents(events: readonly Record<string, unknown>[]): unknown[] {
+  return events.flatMap((event) => {
+    if (event.scope === 'background' || event.form !== 'result') return [];
+    const metadata = event.metadata && typeof event.metadata === 'object' && !Array.isArray(event.metadata)
+      ? event.metadata as Record<string, unknown>
+      : {};
+    return Array.isArray(metadata.messageBlocks) ? metadata.messageBlocks : [];
+  });
+}
+
+function asOpenPOutput(event: Record<string, unknown>): Record<string, unknown> | null {
+  return event.output && typeof event.output === 'object' && !Array.isArray(event.output)
+    ? event.output as Record<string, unknown>
+    : null;
+}
+
+function buildOpenPMessageMetadata(
+  message: Record<string, unknown>,
+  requestId: string | null,
+): Record<string, unknown> | null {
+  const metadata = compactRecord({
+    requestId: requestId ?? undefined,
+    messageId: typeof message.id === 'string' ? message.id : undefined,
+    model: typeof message.model === 'string' ? message.model : undefined,
+    stopReason: Object.prototype.hasOwnProperty.call(message, 'stop_reason') ? message.stop_reason : undefined,
+    usage: normalizeOpenPUsage(message.usage),
+  });
+  return Object.keys(metadata).length > 0 ? metadata : null;
+}
+
+function mergeOpenPContextMetadata(
+  metadata: Record<string, unknown> | null,
+  event: {
+    readonly requestId?: string | null;
+    readonly model?: string | null;
+    readonly stopReason?: string | null;
+    readonly usage?: BackendUsage | null;
+  },
+): Record<string, unknown> | null {
+  const existing = metadata ?? {};
+  const stopReason = Object.prototype.hasOwnProperty.call(existing, 'stopReason')
+    ? existing.stopReason
+    : event.stopReason ?? undefined;
+  const merged = compactRecord({
+    ...existing,
+    requestId: existing.requestId ?? event.requestId ?? undefined,
+    model: existing.model ?? event.model ?? undefined,
+    stopReason,
+    usage: existing.usage ?? (event.usage ? buildOpenPUsage(event.usage) : undefined),
+  });
+  return Object.keys(merged).length > 0 ? merged : null;
+}
+
+function addOpenPMetadata(
+  openp: Record<string, unknown>,
+  event: {
+    readonly requestId?: string | null;
+    readonly messageId?: string | null;
+    readonly model?: string | null;
+    readonly stopReason?: string | null;
+    readonly usage?: {
+      readonly inputTokens: number | null;
+      readonly outputTokens: number | null;
+      readonly cacheReadInputTokens: number | null;
+    };
+  },
+): Record<string, unknown> {
+  const existing = openp.metadata && typeof openp.metadata === 'object' && !Array.isArray(openp.metadata)
+    ? openp.metadata as Record<string, unknown>
+    : {};
+  const metadata = compactRecord({
+    ...existing,
+    requestId: event.requestId ?? existing.requestId,
+    messageId: event.messageId ?? existing.messageId,
+    model: event.model ?? existing.model,
+    stopReason: Object.prototype.hasOwnProperty.call(event, 'stopReason') ? event.stopReason : existing.stopReason,
+    usage: event.usage ? buildOpenPUsage(event.usage) : existing.usage,
+  });
+  return Object.keys(metadata).length > 0
+    ? { ...openp, metadata }
+    : openp;
+}
+
+function normalizeOpenPUsage(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined;
+  }
+  const usage = value as Record<string, unknown>;
+  const normalized = compactRecord({
+    inputTokens: numberOrNull(usage.input_tokens),
+    outputTokens: numberOrNull(usage.output_tokens),
+    cacheReadInputTokens: numberOrNull(usage.cache_read_input_tokens),
+  });
+  return Object.keys(normalized).length > 0 ? normalized : undefined;
+}
+
+function numberOrNull(value: unknown): number | null | undefined {
+  return typeof value === 'number' || value === null ? value : undefined;
+}
+
+function addOpenPStructuredOutput(
+  openp: Record<string, unknown>,
+  event: {
+    readonly id: string;
+    readonly input: unknown;
+  },
+): Record<string, unknown> {
+  const output = asOpenPOutput(openp) ?? {};
+  const structuredToolCall = buildOpenPStructuredOutputToolCall(event.id, event.input);
+  const nextOutput = openp.form === 'streaming'
+    ? { toolCall: structuredToolCall }
+    : buildOpenPResultOutput({
+        ...output,
+        toolCall: [...recordArray(output.toolCall), structuredToolCall],
+      });
+  return {
+    ...openp,
+    output: nextOutput,
+    structuredOutput: event.input,
+  };
+}
+
+function buildOpenPStructuredOutputToolCall(id: string, input: unknown): Record<string, unknown> {
+  return {
+    type: 'tool_use',
+    id,
+    name: 'StructuredOutput',
+    input,
+    caller: { type: 'direct' },
+  };
+}
+
+function addOpenPMessageBlocks(
+  openp: Record<string, unknown>,
+  blocks: readonly Record<string, unknown>[],
+): Record<string, unknown> {
+  const messageBlocks = metadataMessageBlocks(blocks);
+  if (messageBlocks.length === 0) {
+    return openp;
+  }
+  const metadata = openp.metadata && typeof openp.metadata === 'object' && !Array.isArray(openp.metadata)
+    ? openp.metadata as Record<string, unknown>
+    : {};
+  return {
+    ...openp,
+    metadata: {
+      ...metadata,
+      messageBlocks,
+    },
+  };
+}
+
+function metadataMessageBlocks(blocks: readonly unknown[]): Record<string, unknown>[] {
+  return filterOpenPMessageBlocksForKind(blocks, 'metadata')
+    .map(normalizePublicContentBlock)
+    .filter((block): block is Record<string, unknown> =>
+      Boolean(block) && typeof block === 'object' && !Array.isArray(block)
+    );
+}
+
+function buildOpenPTurnResult(event: {
+  readonly turnId: string;
+  readonly sessionId: string;
+  readonly backend?: string | null;
+  readonly answerText: string;
+  readonly reasoningText?: string | null;
+  readonly assistantEvents: readonly AssistantEventSnapshot[];
+  readonly assistantOpenPEvents?: readonly Record<string, unknown>[];
+  readonly structuredOutput?: unknown;
+  readonly structuredOutputToolUseId?: string | null;
+  readonly requestId?: string | null;
+  readonly model?: string | null;
+  readonly stopReason?: string | null;
+  readonly numTurns: number | null;
+  readonly durationMs: number | null;
+  readonly totalCostUsd: number | null;
+  readonly contextWindow: number | null;
+  readonly lastSubturnContextTokens: number | null;
+  readonly modelUsage?: Record<string, Record<string, number>>;
+  readonly rawUsage?: Record<string, unknown> | null;
+  readonly warnings?: readonly OutputWarning[];
+  readonly assistantEventUsage?: BackendUsage | null;
+  readonly lastSubturnUsage?: BackendUsage | null;
+  readonly usage: {
+    readonly inputTokens: number | null;
+    readonly outputTokens: number | null;
+    readonly cacheReadInputTokens: number | null;
+  };
+  readonly status: 'success';
+}): Record<string, unknown> {
+  const assistantEvents = event.assistantOpenPEvents ?? buildOpenPAssistantEventsFromSnapshots(
+    event.assistantEvents,
+    event.sessionId,
+    event.assistantEventUsage,
+    {
+      turnId: event.turnId,
+      resultAnswerText: event.answerText,
+      resultReasoningText: event.reasoningText ?? null,
+      structuredOutput: event.structuredOutput,
+      structuredOutputToolUseId: event.structuredOutputToolUseId ?? null,
+      requestId: event.requestId ?? null,
+      model: event.model ?? null,
+      stopReason: event.stopReason ?? null,
+      usage: event.assistantEventUsage ?? null,
+      form: 'result',
+    },
+  );
+  const collectedAnswers = collectOpenPAnswersFromAssistantEvents(assistantEvents);
+  const collectedReasoning = collectOpenPReasoningFromAssistantEvents(assistantEvents);
+  const collectedToolCalls = collectOpenPToolCallsFromAssistantEvents(assistantEvents);
+  const collectedToolResults = collectOpenPToolResultsFromAssistantEvents(assistantEvents);
+  const collectedMessageBlocks = collectOpenPMessageBlocksFromAssistantEvents(assistantEvents);
+  const answers = collectedAnswers.length > 0
+    ? collectedAnswers
+    : event.answerText.length > 0 ? [event.answerText] : [];
+  const reasoning = [
+    ...collectedReasoning,
+    ...(event.reasoningText && event.reasoningText.length > 0 && !collectedReasoning.includes(event.reasoningText)
+      ? [event.reasoningText]
+      : []),
+  ];
+  const structuredOutputToolUseId = event.structuredOutput !== undefined
+    ? event.structuredOutputToolUseId ?? null
+    : null;
+  const hasStructuredOutputToolCall = structuredOutputToolUseId !== null &&
+    collectedToolCalls.some((toolCall) => toolCall.id === structuredOutputToolUseId);
+  const toolCalls = structuredOutputToolUseId !== null && !hasStructuredOutputToolCall
+    ? [
+        ...collectedToolCalls,
+        buildOpenPStructuredOutputToolCall(structuredOutputToolUseId, event.structuredOutput),
+      ]
+    : collectedToolCalls;
+  const structuredOutputToolResult = structuredOutputToolUseId !== null
+    ? buildOpenPStructuredOutputToolResult(structuredOutputToolUseId)
+    : null;
+  const hasStructuredOutputToolResult = structuredOutputToolResult !== null &&
+    collectedToolResults.some((toolResult) => sameOpenPToolResult(toolResult, structuredOutputToolResult));
+  const toolResults = structuredOutputToolResult !== null && !hasStructuredOutputToolResult
+    ? [...collectedToolResults, structuredOutputToolResult]
+    : collectedToolResults;
+  const messageBlocks = collectedMessageBlocks;
+  const metadata = compactRecord({
+    backend: event.backend ?? undefined,
+    requestId: event.requestId ?? undefined,
+    model: event.model ?? undefined,
+    usage: buildOpenPUsage(event.usage),
+    lastSubturnUsage: event.lastSubturnUsage ? buildOpenPUsage(event.lastSubturnUsage) : undefined,
+    rawUsage: event.rawUsage ?? undefined,
+    stopReason: event.stopReason ?? undefined,
+    numTurns: event.numTurns,
+    durationMs: event.durationMs,
+    totalCostUsd: event.totalCostUsd,
+    contextWindow: event.contextWindow,
+    lastSubturnContextTokens: event.lastSubturnContextTokens,
+    modelUsage: event.modelUsage ?? undefined,
+    warnings: event.warnings && event.warnings.length > 0 ? event.warnings : undefined,
+    messageBlocks: messageBlocks.length > 0 ? messageBlocks : undefined,
+  });
+  return buildOpenPOutputRecord({
+    form: 'result',
+    scope: 'active',
+    turnId: event.turnId,
+    sessionId: event.sessionId,
+    output: buildOpenPResultOutput({
+      answer: answers,
+      reasoning,
+      toolCall: toolCalls,
+      toolResult: toolResults,
+    }),
+    structuredOutput: event.structuredOutput ?? null,
+    metadata,
+  });
+}
+
+function buildOpenPUsage(usage: {
+  readonly inputTokens: number | null;
+  readonly outputTokens: number | null;
+  readonly cacheReadInputTokens: number | null;
+}): Record<string, number | null> {
+  return {
+    inputTokens: usage.inputTokens,
+    outputTokens: usage.outputTokens,
+    cacheReadInputTokens: usage.cacheReadInputTokens,
+  };
+}
+
+function contextTokensFromUsage(usage: BackendUsage): number | null {
+  if (usage.inputTokens === null || usage.cacheReadInputTokens === null) {
+    return null;
+  }
+  return usage.inputTokens + usage.cacheReadInputTokens;
+}
+
+function compactRecord(record: Record<string, unknown>): Record<string, unknown> {
+  const compacted: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(record)) {
+    if (value !== undefined) {
+      compacted[key] = value;
+    }
+  }
+  return compacted;
 }
 
 function buildAssistantEventsFromSnapshots(
   snapshots: readonly AssistantEventSnapshot[] | undefined,
-  sessionId: string,
+  sessionId?: string | null,
   turnUsage?: BackendUsage,
+  context: {
+    readonly turnId?: string | null;
+    readonly resultAnswerText?: string | null;
+    readonly resultReasoningText?: string | null;
+    readonly structuredOutput?: unknown;
+    readonly structuredOutputToolUseId?: string | null;
+    readonly requestId?: string | null;
+    readonly model?: string | null;
+    readonly stopReason?: string | null;
+    readonly usage?: BackendUsage | null;
+    readonly form?: OpenPForm;
+  } = {},
 ): Record<string, unknown>[] {
   if (!snapshots || snapshots.length === 0) {
     return [];
   }
-  return snapshots.map((snapshot, index) => {
-    const message = normalizePublicAssistantMessage(snapshot.message);
-    if (turnUsage && index === snapshots.length - 1 && !hasUsage(snapshot.message)) {
-      message.usage = buildSnakeUsage(turnUsage);
-    }
-    return {
-      type: 'assistant',
-      session_id: sessionId,
-      parent_tool_use_id: null,
-      uuid: randomUUID(),
-      ...(snapshot.requestId ? { request_id: snapshot.requestId } : {}),
-      message,
-    };
+  return snapshots.flatMap((snapshot, index) => {
+    const shouldInjectUsage = shouldInjectSnapshotUsage(snapshots, index, turnUsage);
+    const openpSnapshot = shouldInjectUsage ? injectSnapshotUsage(snapshot, turnUsage) : snapshot;
+    return buildOpenPAssistantEventsFromSnapshot(openpSnapshot, {
+        sessionId,
+        turnId: context.turnId ?? null,
+        resultAnswerText: context.resultAnswerText ?? null,
+        resultReasoningText: context.resultReasoningText ?? null,
+        structuredOutput: context.structuredOutput,
+        structuredOutputToolUseId: context.structuredOutputToolUseId ?? null,
+        requestId: context.requestId ?? null,
+        model: context.model ?? null,
+        stopReason: context.stopReason ?? null,
+        usage: context.usage ?? null,
+        form: context.form ?? 'result',
+      }).map((openp) => ({ openp }));
   });
+}
+
+function buildOpenPAssistantEventsFromSnapshots(
+  snapshots: readonly AssistantEventSnapshot[] | undefined,
+  sessionId: string | null,
+  turnUsage: BackendUsage | null | undefined,
+  context: {
+    readonly turnId?: string | null;
+    readonly resultAnswerText?: string | null;
+    readonly resultReasoningText?: string | null;
+    readonly structuredOutput?: unknown;
+    readonly structuredOutputToolUseId?: string | null;
+    readonly requestId?: string | null;
+    readonly model?: string | null;
+    readonly stopReason?: string | null;
+    readonly usage?: BackendUsage | null;
+    readonly form?: OpenPForm;
+  },
+): Record<string, unknown>[] {
+  if (!snapshots || snapshots.length === 0) {
+    return [];
+  }
+  return snapshots.flatMap((snapshot, index) => buildOpenPAssistantEventsFromSnapshot(
+    shouldInjectSnapshotUsage(snapshots, index, turnUsage)
+      ? injectSnapshotUsage(snapshot, turnUsage)
+      : snapshot,
+    {
+      sessionId,
+      turnId: context.turnId ?? null,
+      resultAnswerText: context.resultAnswerText ?? null,
+      resultReasoningText: context.resultReasoningText ?? null,
+      structuredOutput: context.structuredOutput,
+      structuredOutputToolUseId: context.structuredOutputToolUseId ?? null,
+      requestId: context.requestId ?? null,
+      model: context.model ?? null,
+      stopReason: context.stopReason ?? null,
+      usage: context.usage ?? null,
+      form: context.form ?? 'result',
+    },
+  ));
+}
+
+function extractEmittedAssistantOpenPEvents(events: readonly Record<string, unknown>[]): Record<string, unknown>[] {
+  return events.flatMap((event) => {
+    const openp = event.openp;
+    if (!openp || typeof openp !== 'object' || Array.isArray(openp)) {
+      return [];
+    }
+    return [openp as Record<string, unknown>];
+  });
+}
+
+function extractEmittedResultAssistantOpenPEvents(events: readonly Record<string, unknown>[]): Record<string, unknown>[] {
+  return extractEmittedAssistantOpenPEvents(events).filter((event) => event.form === 'result');
+}
+
+function buildNestedAssistantOpenPEvents(event: {
+  readonly previouslyEmittedSnapshots?: readonly AssistantEventSnapshot[];
+  readonly previouslyEmittedAssistantEvents?: readonly Record<string, unknown>[];
+  readonly emittedAssistantEvents: readonly Record<string, unknown>[];
+  readonly sessionId?: string | null;
+  readonly turnId?: string | null;
+  readonly resultAnswerText?: string | null;
+  readonly resultReasoningText?: string | null;
+  readonly structuredOutput?: unknown;
+  readonly structuredOutputToolUseId?: string | null;
+  readonly requestId?: string | null;
+  readonly model?: string | null;
+  readonly stopReason?: string | null;
+  readonly usage?: BackendUsage | null;
+}): Record<string, unknown>[] {
+  const previouslyEmittedSnapshotOpenPEvents = buildPreviouslyEmittedAssistantOpenPEvents(
+    event.previouslyEmittedSnapshots,
+    event.sessionId ?? null,
+    event.turnId ?? null,
+    event.resultAnswerText ?? null,
+    event.resultReasoningText ?? null,
+    event.structuredOutput,
+    event.structuredOutputToolUseId ?? null,
+    event.requestId ?? null,
+    event.model ?? null,
+    event.stopReason ?? null,
+    event.usage ?? null,
+    'result',
+  );
+  const previouslyEmittedResultOpenPEvents = event.previouslyEmittedAssistantEvents
+    ? extractEmittedResultAssistantOpenPEvents(event.previouslyEmittedAssistantEvents)
+    : [];
+  return dedupeOpenPAssistantResultEvents([
+    ...previouslyEmittedSnapshotOpenPEvents,
+    ...previouslyEmittedResultOpenPEvents,
+    ...extractEmittedAssistantOpenPEvents(event.emittedAssistantEvents),
+  ]);
+}
+
+function dedupeOpenPAssistantResultEvents(events: readonly Record<string, unknown>[]): Record<string, unknown>[] {
+  const seen = new Map<string, number>();
+  const output: Record<string, unknown>[] = [];
+  for (const event of events) {
+    const key = openPResultDeduplicationKey(event);
+    if (!key) {
+      output.push(event);
+      continue;
+    }
+    const existingIndex = seen.get(key);
+    if (existingIndex !== undefined) {
+      output[existingIndex] = mergeOpenPAssistantResultEvents(output[existingIndex]!, event);
+      continue;
+    }
+    seen.set(key, output.length);
+    output.push(event);
+  }
+  return output;
+}
+
+function openPResultDeduplicationKey(event: Record<string, unknown>): string | null {
+  if (event.form !== 'result') {
+    return null;
+  }
+  const metadata = event.metadata && typeof event.metadata === 'object' && !Array.isArray(event.metadata)
+    ? event.metadata as Record<string, unknown>
+    : {};
+  return JSON.stringify({
+    form: event.form,
+    output: event.output,
+    structuredOutput: event.structuredOutput,
+    messageId: metadata.messageId,
+    requestId: metadata.requestId,
+    nativePhase: metadata.nativePhase,
+    stopReason: metadata.stopReason,
+  });
+}
+
+function mergeOpenPAssistantResultEvents(
+  first: Record<string, unknown>,
+  second: Record<string, unknown>,
+): Record<string, unknown> {
+  return compactRecord({
+    ...second,
+    ...first,
+    output: mergeOpenPResultOutput(first.output, second.output),
+    metadata: mergeOpenPMetadataField(first.metadata, second.metadata),
+  });
+}
+
+function mergeOpenPResultOutput(first: unknown, second: unknown): OpenPResultOutput {
+  const firstOutput = first && typeof first === 'object' && !Array.isArray(first)
+    ? first as Record<string, unknown>
+    : {};
+  const secondOutput = second && typeof second === 'object' && !Array.isArray(second)
+    ? second as Record<string, unknown>
+    : {};
+  return buildOpenPResultOutput({
+    answer: mergeOpenPStringField(firstOutput.answer, secondOutput.answer),
+    reasoning: mergeOpenPStringField(firstOutput.reasoning, secondOutput.reasoning),
+    toolCall: mergeOpenPArrayField(firstOutput.toolCall, secondOutput.toolCall),
+    toolResult: mergeOpenPArrayField(firstOutput.toolResult, secondOutput.toolResult),
+  });
+}
+
+function mergeOpenPStringField(first: unknown, second: unknown): string[] | undefined {
+  const output: string[] = [];
+  const seen = new Set<string>();
+  for (const value of [
+    ...stringArray(first),
+    ...stringArray(second),
+  ]) {
+    if (seen.has(value)) {
+      continue;
+    }
+    seen.add(value);
+    output.push(value);
+  }
+  return output.length > 0 ? output : undefined;
+}
+
+function mergeOpenPArrayField(first: unknown, second: unknown): unknown[] | undefined {
+  const output: unknown[] = [];
+  const seen = new Set<string>();
+  for (const value of [
+    ...(Array.isArray(first) ? first : []),
+    ...(Array.isArray(second) ? second : []),
+  ]) {
+    const key = JSON.stringify(value);
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    output.push(value);
+  }
+  return output.length > 0 ? output : undefined;
+}
+
+function sameOpenPToolResult(left: Record<string, unknown>, right: Record<string, unknown>): boolean {
+  return left.type === right.type &&
+    left.toolUseId === right.toolUseId &&
+    JSON.stringify(left.content) === JSON.stringify(right.content) &&
+    left.isError === right.isError;
+}
+
+function mergeOpenPMetadataField(first: unknown, second: unknown): Record<string, unknown> | undefined {
+  const firstMetadata = first && typeof first === 'object' && !Array.isArray(first)
+    ? first as Record<string, unknown>
+    : {};
+  const secondMetadata = second && typeof second === 'object' && !Array.isArray(second)
+    ? second as Record<string, unknown>
+    : {};
+  const output: Record<string, unknown> = { ...secondMetadata };
+  for (const [key, value] of Object.entries(firstMetadata)) {
+    if (value !== undefined && value !== null) {
+      output[key] = value;
+    } else if (!Object.prototype.hasOwnProperty.call(output, key)) {
+      output[key] = value;
+    }
+  }
+  return Object.keys(output).length > 0 ? output : undefined;
+}
+
+function buildPreviouslyEmittedAssistantOpenPEvents(
+  snapshots: readonly AssistantEventSnapshot[] | undefined,
+  sessionId: string | null,
+  turnId: string | null,
+  resultAnswerText: string | null,
+  resultReasoningText: string | null,
+  structuredOutput: unknown,
+  structuredOutputToolUseId: string | null,
+  requestId: string | null,
+  model: string | null,
+  stopReason: string | null,
+  usage: BackendUsage | null,
+  form: OpenPForm,
+): Record<string, unknown>[] {
+  if (!snapshots || snapshots.length === 0) {
+    return [];
+  }
+  return snapshots.flatMap((snapshot) => buildOpenPAssistantEventsFromSnapshot(snapshot, {
+    sessionId,
+    turnId,
+    resultAnswerText,
+    resultReasoningText,
+    structuredOutput,
+    structuredOutputToolUseId,
+    requestId,
+    model,
+    stopReason,
+    usage,
+    form,
+  }));
+}
+
+function buildResultTextAssistantEventRecords(event: {
+  readonly turnId: string;
+  readonly sessionId: string;
+  readonly answerText: string;
+  readonly reasoningText?: string | null;
+  readonly emitAnswer: boolean;
+  readonly requestId?: string | null;
+  readonly model?: string | null;
+  readonly stopReason?: string | null;
+  readonly usage: {
+    readonly inputTokens: number | null;
+    readonly outputTokens: number | null;
+    readonly cacheReadInputTokens: number | null;
+  };
+}): Record<string, unknown>[] {
+  const output: Record<string, unknown>[] = [];
+  if (event.reasoningText && event.reasoningText.length > 0) {
+    output.push(buildAssistantTextEvent({
+      turnId: event.turnId,
+      sessionId: event.sessionId,
+      text: '',
+      reasoningContent: event.reasoningText,
+      openp: buildOpenPAssistantMessage({
+        kind: 'reasoning',
+        form: 'result',
+        scope: 'active',
+        turnId: event.turnId,
+        sessionId: event.sessionId,
+        text: event.reasoningText,
+      }),
+      requestId: event.requestId,
+      stopReason: null,
+      metadataStopReason: event.stopReason ?? null,
+      model: event.model,
+      usage: event.usage,
+    }));
+  }
+  if (event.emitAnswer && event.answerText.length > 0) {
+    output.push(buildAssistantTextEvent({
+      turnId: event.turnId,
+      sessionId: event.sessionId,
+      text: event.answerText,
+      openp: buildOpenPResultMessage({
+        turnId: event.turnId,
+        sessionId: event.sessionId,
+        answerText: event.answerText,
+      }),
+      requestId: event.requestId,
+      stopReason: null,
+      metadataStopReason: event.stopReason ?? null,
+      model: event.model,
+      usage: event.usage,
+    }));
+  }
+  return output;
+}
+
+function buildStructuredOutputAssistantEventRecord(event: {
+  readonly turnId: string;
+  readonly sessionId: string;
+  readonly structuredOutput: unknown;
+  readonly structuredOutputToolUseId: string | null;
+  readonly requestId?: string | null;
+  readonly model?: string | null;
+  readonly stopReason?: string | null;
+  readonly usage: {
+    readonly inputTokens: number | null;
+    readonly outputTokens: number | null;
+    readonly cacheReadInputTokens: number | null;
+  };
+}): Record<string, unknown> {
+  return buildAssistantTextEvent({
+    turnId: event.turnId,
+    sessionId: event.sessionId,
+    text: '',
+    structuredOutput: event.structuredOutput,
+    structuredOutputToolUseId: event.structuredOutputToolUseId,
+    openp: buildOpenPStructuredOutputAssistantEvent({
+      turnId: event.turnId,
+      sessionId: event.sessionId,
+    }),
+    requestId: event.requestId,
+    stopReason: null,
+    metadataStopReason: event.stopReason ?? null,
+    model: event.model,
+    usage: event.usage,
+  });
+}
+
+function openPEventsContainReasoningText(events: readonly Record<string, unknown>[], text: string | null | undefined): boolean {
+  if (!text) {
+    return false;
+  }
+  return events.some((event) => event.openp && typeof event.openp === 'object' && !Array.isArray(event.openp)
+    ? openPEventHasReasoningText(event.openp as Record<string, unknown>, text)
+    : openPEventHasReasoningText(event, text));
+}
+
+function openPEventHasReasoningText(event: Record<string, unknown>, text: string): boolean {
+  const output = asOpenPOutput(event);
+  return stringArray(output?.reasoning).includes(text);
+}
+
+function buildTerminalAssistantEventRecords(event: {
+  readonly existingAssistantEvents: readonly Record<string, unknown>[];
+  readonly assistantSnapshotsContainResultText: boolean;
+  readonly text: string;
+  readonly fallbackReasoningContent?: string | null;
+  readonly structuredOutput?: unknown;
+  readonly fallbackStructuredOutput?: unknown;
+  readonly snapshotStructuredOutputToolUseId: string | null;
+  readonly structuredOutputToolUseId: string | null;
+  readonly shouldEmitTextFallback: boolean;
+  readonly blankResultTextFallback: boolean;
+  readonly turnId: string;
+  readonly sessionId: string;
+  readonly requestId?: string | null;
+  readonly model?: string | null;
+  readonly stopReason?: string | null;
+  readonly usage: {
+    readonly inputTokens: number | null;
+    readonly outputTokens: number | null;
+    readonly cacheReadInputTokens: number | null;
+  };
+}): Record<string, unknown>[] {
+  if (event.existingAssistantEvents.length > 0) {
+    const output = [...event.existingAssistantEvents];
+    const fallbackReasoningText = openPEventsContainReasoningText(output, event.fallbackReasoningContent)
+      ? null
+      : event.fallbackReasoningContent;
+    if (
+      event.structuredOutput === undefined &&
+      !event.assistantSnapshotsContainResultText &&
+      event.shouldEmitTextFallback
+    ) {
+      output.push(...buildResultTextAssistantEventRecords({
+        turnId: event.turnId,
+        sessionId: event.sessionId,
+        answerText: event.text,
+        reasoningText: fallbackReasoningText,
+        emitAnswer: true,
+        requestId: event.requestId,
+        stopReason: event.stopReason ?? null,
+        model: event.model,
+        usage: event.usage,
+      }));
+    }
+    if (event.structuredOutput !== undefined && !event.snapshotStructuredOutputToolUseId) {
+      output.push(...buildResultTextAssistantEventRecords({
+        turnId: event.turnId,
+        sessionId: event.sessionId,
+        answerText: '',
+        reasoningText: fallbackReasoningText,
+        emitAnswer: false,
+        requestId: event.requestId,
+        stopReason: event.stopReason ?? null,
+        model: event.model,
+        usage: event.usage,
+      }));
+      output.push(buildStructuredOutputAssistantEventRecord({
+        turnId: event.turnId,
+        sessionId: event.sessionId,
+        structuredOutput: event.structuredOutput,
+        structuredOutputToolUseId: event.structuredOutputToolUseId,
+        requestId: event.requestId,
+        stopReason: event.stopReason ?? null,
+        model: event.model,
+        usage: event.usage,
+      }));
+    }
+    return output;
+  }
+
+  if (event.structuredOutput !== undefined && event.fallbackStructuredOutput === undefined) {
+    return [];
+  }
+
+  if (
+    !event.fallbackReasoningContent &&
+    event.fallbackStructuredOutput === undefined &&
+    !event.shouldEmitTextFallback
+  ) {
+    return [];
+  }
+  const output = buildResultTextAssistantEventRecords({
+    turnId: event.turnId,
+    sessionId: event.sessionId,
+    answerText: event.text,
+    reasoningText: event.fallbackReasoningContent,
+    emitAnswer: event.fallbackStructuredOutput === undefined && !event.blankResultTextFallback,
+    requestId: event.requestId,
+    stopReason: event.stopReason ?? null,
+    model: event.model,
+    usage: event.usage,
+  });
+  if (event.fallbackStructuredOutput !== undefined) {
+    output.push(buildStructuredOutputAssistantEventRecord({
+      turnId: event.turnId,
+      sessionId: event.sessionId,
+      structuredOutput: event.fallbackStructuredOutput,
+      structuredOutputToolUseId: event.structuredOutputToolUseId,
+      requestId: event.requestId,
+      stopReason: event.stopReason ?? null,
+      model: event.model,
+      usage: event.usage,
+    }));
+  }
+  return output;
+}
+
+function shouldInjectSnapshotUsage(
+  snapshots: readonly AssistantEventSnapshot[],
+  index: number,
+  turnUsage: BackendUsage | null | undefined,
+): turnUsage is BackendUsage {
+  return Boolean(turnUsage && index === snapshots.length - 1 && !hasUsage(snapshots[index]!.message));
+}
+
+function injectSnapshotUsage(snapshot: AssistantEventSnapshot, turnUsage: BackendUsage): AssistantEventSnapshot {
+  return {
+    ...snapshot,
+    message: {
+      ...snapshot.message,
+      usage: buildSnakeUsage(turnUsage),
+    },
+  };
 }
 
 function hasUsage(message: Record<string, unknown>): boolean {
@@ -489,15 +2283,51 @@ function normalizePublicContentBlock(block: unknown): unknown {
   };
 }
 
-function filterStructuredFallbackTextSnapshots(
+function normalizeStructuredOutputFallbackSnapshots(
   snapshots: readonly AssistantEventSnapshot[] | undefined,
   structuredOutput: unknown,
-  hasStructuredOutputToolUse: boolean,
+  structuredOutputToolUseId: string | null,
 ): readonly AssistantEventSnapshot[] | undefined {
-  if (!snapshots || structuredOutput === undefined || hasStructuredOutputToolUse) {
+  if (!snapshots || structuredOutput === undefined || !structuredOutputToolUseId) {
     return snapshots;
   }
-  return snapshots.filter((snapshot) => !snapshotTextEqualsStructuredOutput(snapshot, structuredOutput));
+  let changed = false;
+  const normalized = snapshots.map((snapshot) => {
+    if (snapshot.semanticKind) {
+      return snapshot;
+    }
+    const content = snapshot.message.content;
+    if (!Array.isArray(content) || content.length === 0) {
+      return snapshot;
+    }
+    const hasStructuredOutputToolUse = content.some((block) => isStructuredOutputToolUseBlock(block));
+    let insertedStructuredOutputToolUse = hasStructuredOutputToolUse;
+    let changedSnapshot = false;
+    const nextContent: unknown[] = [];
+    for (const block of content) {
+      if (textBlockEqualsStructuredOutput(block, structuredOutput)) {
+        changed = true;
+        changedSnapshot = true;
+        if (!insertedStructuredOutputToolUse) {
+          nextContent.push(buildStructuredOutputToolUseMessageBlock(structuredOutputToolUseId, structuredOutput));
+          insertedStructuredOutputToolUse = true;
+        }
+        continue;
+      }
+      nextContent.push(block);
+    }
+    if (!changedSnapshot) {
+      return snapshot;
+    }
+    return {
+      ...snapshot,
+      message: {
+        ...snapshot.message,
+        content: nextContent,
+      },
+    };
+  });
+  return changed ? normalized : snapshots;
 }
 
 function filterAssistantSnapshots(
@@ -549,6 +2379,11 @@ function filterAssistantSnapshots(
     if (consumeSuppressedSnapshot(snapshot, remainingSuppressedSnapshotCounts)) {
       continue;
     }
+    if (snapshot.semanticKind) {
+      flushPendingReasoning();
+      output.push(snapshot);
+      continue;
+    }
     if (isEmptyReasoningOnlySnapshot(snapshot)) {
       continue;
     }
@@ -596,6 +2431,24 @@ function filterAssistantSnapshots(
   }
   flushPendingReasoning();
   return output;
+}
+
+function intersectSuppressedResultSnapshots(
+  resultSnapshots: readonly AssistantEventSnapshot[] | undefined,
+  suppressedSnapshots: readonly AssistantEventSnapshot[] | undefined,
+): readonly AssistantEventSnapshot[] | undefined {
+  if (!resultSnapshots || resultSnapshots.length === 0 || !suppressedSnapshots || suppressedSnapshots.length === 0) {
+    return undefined;
+  }
+  const remainingResultSnapshotCounts = countTexts(resultSnapshots.map(snapshotSuppressionKey));
+  const output: AssistantEventSnapshot[] = [];
+  for (const snapshot of suppressedSnapshots) {
+    if (!consumeSuppressedSnapshot(snapshot, remainingResultSnapshotCounts)) {
+      continue;
+    }
+    output.push(snapshot);
+  }
+  return output.length > 0 ? output : undefined;
 }
 
 function consumeSuppressedSnapshot(snapshot: AssistantEventSnapshot, counts: Map<string, number>): boolean {
@@ -659,11 +2512,11 @@ function countSuppressedReasoningSegments(texts: readonly string[]): Map<string,
   const counts = new Map<string, number>();
   let previousText: string | null = null;
   for (const text of texts) {
-    const delta = previousText !== null && text.startsWith(`${previousText}\n\n`)
+    const newText = previousText !== null && text.startsWith(`${previousText}\n\n`)
       ? text.slice(previousText.length + 2)
       : text;
     previousText = text;
-    for (const segment of delta.split('\n\n')) {
+    for (const segment of newText.split('\n\n')) {
       if (segment.length > 0) {
         counts.set(segment, (counts.get(segment) ?? 0) + 1);
       }
@@ -699,7 +2552,52 @@ function snapshotsContainAssistantText(
   if (!snapshots || text.length === 0) {
     return false;
   }
-  return snapshots.some((snapshot) => snapshotAssistantText(snapshot) === text);
+  return snapshots.some((snapshot) =>
+    !snapshot.semanticKind &&
+    !snapshotHasToolPayload(snapshot) &&
+    snapshotHasTerminalStop(snapshot) &&
+    snapshotAssistantText(snapshot) === text
+  );
+}
+
+function nonSemanticSnapshotsContainAssistantText(
+  snapshots: readonly AssistantEventSnapshot[] | undefined,
+  text: string,
+): boolean {
+  if (!snapshots || text.length === 0) {
+    return false;
+  }
+  return snapshots.some((snapshot) =>
+    !snapshot.semanticKind &&
+    !snapshotHasToolPayload(snapshot) &&
+    snapshotAssistantText(snapshot) === text
+  );
+}
+
+function snapshotHasTerminalStop(snapshot: AssistantEventSnapshot): boolean {
+  const stopReason = snapshot.message.stop_reason;
+  return isTerminalAssistantStopReason(stopReason);
+}
+
+function isTerminalAssistantStopReason(stopReason: unknown): boolean {
+  return stopReason === 'end_turn' ||
+    stopReason === 'stop_sequence' ||
+    stopReason === 'max_tokens';
+}
+
+function snapshotHasToolPayload(snapshot: AssistantEventSnapshot): boolean {
+  return extractOpenPToolCalls(snapshot.message).length > 0 ||
+    extractOpenPToolResults(snapshot.message).length > 0;
+}
+
+function snapshotsContainSemanticAssistantText(
+  snapshots: readonly AssistantEventSnapshot[] | undefined,
+  text: string,
+): boolean {
+  if (!snapshots || text.length === 0) {
+    return false;
+  }
+  return snapshots.some((snapshot) => Boolean(snapshot.semanticKind) && snapshotAssistantText(snapshot) === text);
 }
 
 function snapshotAssistantText(snapshot: AssistantEventSnapshot): string | null {
@@ -927,9 +2825,35 @@ function snapshotTextEqualsStructuredOutput(snapshot: AssistantEventSnapshot, st
   }
 }
 
+function textBlockEqualsStructuredOutput(block: unknown, structuredOutput: unknown): boolean {
+  if (!block || typeof block !== 'object' || Array.isArray(block)) {
+    return false;
+  }
+  const item = block as Record<string, unknown>;
+  if (item.type !== 'text' || typeof item.text !== 'string') {
+    return false;
+  }
+  const candidate = extractJsonTextCandidate(item.text.trim());
+  try {
+    return JSON.stringify(JSON.parse(candidate)) === JSON.stringify(structuredOutput);
+  } catch {
+    return false;
+  }
+}
+
 function extractJsonTextCandidate(text: string): string {
   const fenced = /^```json[ \t]*\r?\n([\s\S]*?)\r?\n```$/i.exec(text);
   return fenced?.[1]?.trim() ?? text;
+}
+
+function isStructuredOutputToolUseBlock(block: unknown): boolean {
+  return Boolean(
+    block &&
+    typeof block === 'object' &&
+    !Array.isArray(block) &&
+    (block as Record<string, unknown>).type === 'tool_use' &&
+    (block as Record<string, unknown>).name === 'StructuredOutput',
+  );
 }
 
 function findStructuredOutputToolUseId(
@@ -959,16 +2883,7 @@ function findStructuredOutputToolUseId(
   return null;
 }
 
-export function formatSystemInitEvent(sessionId: string, options: {
-  readonly cwd?: string | null;
-  readonly model?: string | null;
-  readonly permissionMode?: string | null;
-  readonly mcpServers?: readonly unknown[];
-} = {}): string {
-  return `${JSON.stringify(buildSystemInitEvent(sessionId, options))}\n`;
-}
-
-export function createPartialMessageStreamState(): PartialMessageStreamState {
+export function createStreamingMessageState(): StreamingMessageState {
   return {
     started: false,
     blockOpen: false,
@@ -995,22 +2910,10 @@ export function resolveStructuredOutputToolUseId(event: {
   return findStructuredOutputToolUseId(event.assistantEvents) ?? event.preferredToolUseId ?? buildToolUseId();
 }
 
-export function formatSystemStatusEvent(event: {
-  readonly sessionId: string;
-  readonly status: string;
-}): string {
-  return `${JSON.stringify({
-    type: 'system',
-    subtype: 'status',
-    status: event.status,
-    session_id: event.sessionId,
-    uuid: randomUUID(),
-  })}\n`;
-}
-
-export function formatPartialTextDeltaEvents(
-  state: PartialMessageStreamState,
+export function formatStreamingAnswerSnapshotEvents(
+  state: StreamingMessageState,
   event: {
+    readonly turnId?: string | null;
     readonly sessionId?: string | null;
     readonly model?: string | null;
     readonly text: string;
@@ -1024,58 +2927,40 @@ export function formatPartialTextDeltaEvents(
   const lines: Record<string, unknown>[] = [];
   if (!state.started) {
     state.messageId = state.messageId ?? buildMessageId();
-    lines.push(buildStreamEvent({
-      sessionId: event.sessionId,
-      event: {
-        type: 'message_start',
-        message: {
-          ...(event.model ? { model: event.model } : {}),
-          id: state.messageId,
-          type: 'message',
-          role: 'assistant',
-          content: [],
-          stop_reason: null,
-          stop_sequence: null,
-          stop_details: null,
-        },
-      },
-    }));
     state.started = true;
   }
   if (!state.blockOpen) {
-    lines.push(buildStreamEvent({
-      sessionId: event.sessionId,
-      event: {
-        type: 'content_block_start',
-        index: 0,
-        content_block: { type: 'text', text: '' },
-      },
-    }));
     state.blockOpen = true;
   }
 
   if (!text.startsWith(state.previousText)) {
-    throw new Error('partial text replacement is not prefix-compatible');
+    throw new Error('streaming answer replacement is not prefix-compatible');
   }
 
-  const deltaText = text.slice(state.previousText.length);
-  if (deltaText) {
-    lines.push(buildStreamEvent({
-      sessionId: event.sessionId,
-      event: {
-        type: 'content_block_delta',
-        index: 0,
-        delta: { type: 'text_delta', text: deltaText },
-      },
-    }));
+  const addedText = text.slice(state.previousText.length);
+  if (addedText) {
+    lines.push({
+      openp: buildOpenPAssistantMessage({
+        kind: 'answer',
+        form: 'streaming',
+        turnId: event.turnId ?? null,
+        sessionId: event.sessionId,
+        messageId: state.messageId,
+        text,
+        metadata: compactRecord({
+          model: event.model ?? undefined,
+        }),
+      }),
+    });
   }
   state.previousText = text;
   return lines.map((line) => `${JSON.stringify(line)}\n`).join('');
 }
 
-export function formatPartialDeltaEvents(
-  state: PartialMessageStreamState,
+export function formatStreamingMessageSnapshotEvents(
+  state: StreamingMessageState,
   event: {
+    readonly turnId?: string | null;
     readonly sessionId?: string | null;
     readonly model?: string | null;
     readonly text: string;
@@ -1092,54 +2977,34 @@ export function formatPartialDeltaEvents(
 
   if (!state.started) {
     state.messageId = state.messageId ?? buildMessageId();
-    lines.push(buildStreamEvent({
-      sessionId: event.sessionId,
-      event: {
-        type: 'message_start',
-        message: {
-          ...(event.model ? { model: event.model } : {}),
-          id: state.messageId,
-          type: 'message',
-          role: 'assistant',
-          content: [],
-          stop_reason: null,
-          stop_sequence: null,
-          stop_details: null,
-        },
-      },
-    }));
     state.started = true;
   }
 
-  if (reasoningText && reasoningText !== state.previousReasoningText && !state.blockOpen) {
+  if (reasoningText && reasoningText !== state.previousReasoningText) {
+    if (!reasoningText.startsWith(state.previousReasoningText)) {
+      throw new Error('streaming reasoning replacement is not prefix-compatible');
+    }
     if (!state.hasReasoning) {
       state.hasReasoning = true;
     }
     if (!state.reasoningBlockOpen) {
-      lines.push(buildStreamEvent({
-        sessionId: event.sessionId,
-        event: {
-          type: 'content_block_start',
-          index: 0,
-          content_block: { type: 'thinking', thinking: '' },
-        },
-      }));
       state.reasoningBlockOpen = true;
     }
-    if (!reasoningText.startsWith(state.previousReasoningText)) {
-      throw new Error('partial reasoning replacement is not prefix-compatible');
-    } else {
-      const deltaText = reasoningText.slice(state.previousReasoningText.length);
-      if (deltaText) {
-        lines.push(buildStreamEvent({
+    const addedReasoningText = reasoningText.slice(state.previousReasoningText.length);
+    if (addedReasoningText) {
+      lines.push({
+        openp: buildOpenPAssistantMessage({
+          kind: 'reasoning',
+          form: 'streaming',
+          turnId: event.turnId ?? null,
           sessionId: event.sessionId,
-          event: {
-            type: 'content_block_delta',
-            index: 0,
-            delta: { type: 'thinking_delta', thinking: deltaText },
-          },
-        }));
-      }
+          messageId: state.messageId,
+          text: reasoningText,
+          metadata: compactRecord({
+            model: event.model ?? undefined,
+          }),
+        }),
+      });
     }
     state.previousReasoningText = reasoningText;
   }
@@ -1148,40 +3013,31 @@ export function formatPartialDeltaEvents(
     const textBlockIndex = state.hasReasoning ? 1 : 0;
     if (!state.blockOpen) {
       if (state.reasoningBlockOpen) {
-        lines.push(buildStreamEvent({
-          sessionId: event.sessionId,
-          event: {
-            type: 'content_block_stop',
-            index: 0,
-          },
-        }));
         state.reasoningBlockOpen = false;
       }
-      lines.push(buildStreamEvent({
-        sessionId: event.sessionId,
-        event: {
-          type: 'content_block_start',
-          index: textBlockIndex,
-          content_block: { type: 'text', text: '' },
-        },
-      }));
+      void textBlockIndex;
       state.blockOpen = true;
     }
 
     if (!text.startsWith(state.previousText)) {
-      throw new Error('partial text replacement is not prefix-compatible');
+      throw new Error('streaming answer replacement is not prefix-compatible');
     }
 
-    const deltaText = text.slice(state.previousText.length);
-    if (deltaText) {
-      lines.push(buildStreamEvent({
-        sessionId: event.sessionId,
-        event: {
-          type: 'content_block_delta',
-          index: textBlockIndex,
-          delta: { type: 'text_delta', text: deltaText },
-        },
-      }));
+    const addedText = text.slice(state.previousText.length);
+    if (addedText) {
+      lines.push({
+        openp: buildOpenPAssistantMessage({
+          kind: 'answer',
+          form: 'streaming',
+          turnId: event.turnId ?? null,
+          sessionId: event.sessionId,
+          messageId: state.messageId,
+          text,
+          metadata: compactRecord({
+            model: event.model ?? undefined,
+          }),
+        }),
+      });
     }
     state.previousText = text;
   }
@@ -1189,177 +3045,19 @@ export function formatPartialDeltaEvents(
   return lines.map((line) => `${JSON.stringify(line)}\n`).join('');
 }
 
-export function formatPartialMessageLifecycleEvents(
-  state: PartialMessageStreamState,
-  event: {
-    readonly sessionId?: string | null;
-    readonly model?: string | null;
-    readonly structuredOutput?: unknown;
-    readonly structuredOutputToolUseId?: string | null;
-    readonly usage?: {
-      readonly inputTokens: number | null;
-      readonly outputTokens: number | null;
-      readonly cacheReadInputTokens: number | null;
-    };
-    readonly stopReason?: string | null;
-  },
-): string {
-  const lines: Record<string, unknown>[] = [];
-  if (!state.started) {
-    state.messageId = state.messageId ?? buildMessageId();
-    lines.push(buildStreamEvent({
-      sessionId: event.sessionId,
-      event: {
-        type: 'message_start',
-        message: {
-          ...(event.model ? { model: event.model } : {}),
-          id: state.messageId,
-          type: 'message',
-          role: 'assistant',
-          content: [],
-          stop_reason: null,
-          stop_sequence: null,
-          stop_details: null,
-        },
-      },
-    }));
-    state.started = true;
-  }
-  if (event.structuredOutput !== undefined) {
-    const toolUseId = event.structuredOutputToolUseId ?? buildToolUseId();
-    lines.push(buildStreamEvent({
-      sessionId: event.sessionId,
-      event: {
-        type: 'content_block_start',
-        index: 0,
-        content_block: {
-          type: 'tool_use',
-          id: toolUseId,
-          name: 'StructuredOutput',
-          input: {},
-          caller: { type: 'direct' },
-        },
-      },
-    }));
-    const partialJson = JSON.stringify(event.structuredOutput);
-    if (typeof partialJson === 'string') {
-      lines.push(buildStreamEvent({
-        sessionId: event.sessionId,
-        event: {
-          type: 'content_block_delta',
-          index: 0,
-          delta: {
-            type: 'input_json_delta',
-            partial_json: partialJson,
-          },
-        },
-      }));
-    }
-    lines.push(buildStreamEvent({
-      sessionId: event.sessionId,
-      event: {
-        type: 'content_block_stop',
-        index: 0,
-      },
-    }));
-  }
-  return `${lines.map((line) => `${JSON.stringify(line)}\n`).join('')}${formatPartialMessageStopEvents(state, event)}`;
+export function isStreamingReasoningReplacementError(error: unknown): boolean {
+  return error instanceof Error &&
+    error.message === 'streaming reasoning replacement is not prefix-compatible';
 }
 
-export function formatPartialMessageStopEvents(
-  state: PartialMessageStreamState,
-  event: {
-    readonly sessionId?: string | null;
-    readonly usage?: {
-      readonly inputTokens: number | null;
-      readonly outputTokens: number | null;
-      readonly cacheReadInputTokens: number | null;
-    };
-    readonly stopReason?: string | null;
-  },
-): string {
-  if (!state.started) {
-    return '';
-  }
-  const lines: Record<string, unknown>[] = [];
-  if (state.reasoningBlockOpen) {
-    lines.push(buildStreamEvent({
-      sessionId: event.sessionId,
-      event: {
-        type: 'content_block_stop',
-        index: 0,
-      },
-    }));
-    state.reasoningBlockOpen = false;
-  }
-  if (state.blockOpen) {
-    lines.push(buildStreamEvent({
-      sessionId: event.sessionId,
-      event: {
-        type: 'content_block_stop',
-        index: state.hasReasoning ? 1 : 0,
-      },
-    }));
-    state.blockOpen = false;
-  }
-  lines.push(buildStreamEvent({
-    sessionId: event.sessionId,
-    event: {
-      type: 'message_delta',
-      delta: {
-        stop_reason: event.stopReason ?? 'end_turn',
-        stop_sequence: null,
-        stop_details: null,
-      },
-      ...(event.usage ? { usage: buildUsage(event.usage) } : {}),
-    },
-  }));
-  lines.push(buildStreamEvent({
-    sessionId: event.sessionId,
-    event: {
-      type: 'message_stop',
-    },
-  }));
+export function resetStreamingMessageState(state: StreamingMessageState): void {
+  state.reasoningBlockOpen = false;
+  state.blockOpen = false;
   state.started = false;
   state.previousText = '';
   state.previousReasoningText = '';
   state.hasReasoning = false;
   state.messageId = null;
-  return lines.map((line) => `${JSON.stringify(line)}\n`).join('');
-}
-
-function buildSystemInitEvent(sessionId: string, options: {
-  readonly cwd?: string | null;
-  readonly model?: string | null;
-  readonly permissionMode?: string | null;
-  readonly mcpServers?: readonly unknown[];
-} = {}): Record<string, unknown> {
-  return {
-    type: 'system',
-    subtype: 'init',
-    ...(options.cwd ? { cwd: options.cwd } : {}),
-    session_id: sessionId,
-    ...(options.mcpServers ? { mcp_servers: options.mcpServers } : {}),
-    ...(options.model ? { model: options.model } : {}),
-    ...(options.permissionMode ? { permissionMode: options.permissionMode } : {}),
-    output_style: 'default',
-    uuid: randomUUID(),
-    fast_mode_state: 'off',
-  };
-}
-
-function buildStreamEvent(event: {
-  readonly sessionId?: string | null;
-  readonly event: Record<string, unknown>;
-}): Record<string, unknown> {
-  return {
-    type: 'stream_event',
-    event: event.event,
-    ...(event.event.type === 'message_start' ? { ttft_ms: null } : {}),
-    ...(event.sessionId ? { session_id: event.sessionId } : {}),
-    parent_tool_use_id: null,
-    uuid: randomUUID(),
-  };
 }
 
 function buildAssistantTextEvent(event: {
@@ -1373,14 +3071,20 @@ function buildAssistantTextEvent(event: {
   readonly sessionId?: string | null;
   readonly messageId?: string | null;
   readonly stopReason: string | null;
+  readonly metadataStopReason?: string | null;
   readonly model?: string | null;
   readonly usage?: {
     readonly inputTokens: number | null;
     readonly outputTokens: number | null;
     readonly cacheReadInputTokens: number | null;
   };
+  readonly openp?: Record<string, unknown> | null;
 }): Record<string, unknown> {
   const content: Record<string, unknown>[] = [];
+  const resolvedMessageId = event.messageId ?? buildMessageId();
+  const resolvedStructuredOutputToolUseId = event.structuredOutput !== undefined
+    ? event.structuredOutputToolUseId ?? buildToolUseId()
+    : null;
   if (event.reasoningContent) {
     if (event.reasoningContentBlocks && event.reasoningContentBlocks.length > 0) {
       content.push(...event.reasoningContentBlocks.map(normalizePublicContentBlock) as Record<string, unknown>[]);
@@ -1391,7 +3095,7 @@ function buildAssistantTextEvent(event: {
   if (event.structuredOutput !== undefined) {
     content.push({
       type: 'tool_use',
-      id: event.structuredOutputToolUseId ?? buildToolUseId(),
+      id: resolvedStructuredOutputToolUseId,
       name: 'StructuredOutput',
       input: event.structuredOutput,
       caller: { type: 'direct' },
@@ -1400,57 +3104,73 @@ function buildAssistantTextEvent(event: {
     content.push({ type: 'text', text: event.text });
   }
 
+  const openp = event.openp && resolvedStructuredOutputToolUseId
+    ? addOpenPStructuredOutput(event.openp, {
+        id: resolvedStructuredOutputToolUseId,
+        input: event.structuredOutput,
+      })
+    : event.openp;
+  const openpWithMetadata = openp
+    ? addOpenPMetadata(openp, {
+        requestId: event.requestId ?? null,
+        messageId: resolvedMessageId,
+        model: event.model ?? null,
+        stopReason: event.metadataStopReason ?? event.stopReason,
+        usage: event.usage,
+      })
+    : openp;
+  const openpWithMessageBlocks = openpWithMetadata
+    ? shouldAttachOpenPMessageBlocks(openpWithMetadata)
+      ? addOpenPMessageBlocks(openpWithMetadata, content)
+      : openpWithMetadata
+    : openpWithMetadata;
+
   return {
-    type: 'assistant',
-    ...(event.sessionId ? { session_id: event.sessionId } : {}),
-    parent_tool_use_id: null,
-    uuid: randomUUID(),
-    ...(event.requestId ? { request_id: event.requestId } : {}),
-    message: {
-      type: 'message',
-      role: 'assistant',
-      id: event.messageId ?? buildMessageId(),
-      ...(event.model ? { model: event.model } : {}),
-      content,
-      stop_reason: event.stopReason,
-      stop_sequence: null,
-      stop_details: null,
-      usage: event.usage ? buildUsage(event.usage) : undefined,
-      diagnostics: null,
-      context_management: null,
-    },
+    openp: openpWithMessageBlocks ?? buildOpenPAssistantEvent({
+      kind: 'metadata',
+      turnId: event.turnId,
+      sessionId: event.sessionId,
+      messageBlocks: content,
+    }),
   };
 }
 
-function buildStructuredOutputToolResultEvent(event: {
-  readonly sessionId: string;
-  readonly toolUseId: string;
-}): Record<string, unknown> {
+function shouldAttachOpenPMessageBlocks(openp: Record<string, unknown>): boolean {
+  void openp;
+  return true;
+}
+
+function buildOpenPStructuredOutputToolResult(toolUseId: string): Record<string, unknown> {
   return {
-    type: 'user',
-    session_id: event.sessionId,
-    parent_tool_use_id: null,
-    uuid: randomUUID(),
-    timestamp: new Date().toISOString(),
-    tool_use_result: 'Structured output provided successfully',
-    message: {
-      role: 'user',
-      content: [
-        {
-          tool_use_id: event.toolUseId,
-          type: 'tool_result',
-          content: 'Structured output provided successfully',
-        },
-      ],
-    },
+    toolUseId,
+    type: 'tool_result',
+    content: 'Structured output provided successfully',
+  };
+}
+
+function buildStructuredOutputToolUseMessageBlock(toolUseId: string, input: unknown): Record<string, unknown> {
+  return {
+    type: 'tool_use',
+    id: toolUseId,
+    name: 'StructuredOutput',
+    input,
+    caller: { type: 'direct' },
   };
 }
 
 function buildResultEvent(event: {
   readonly turnId: string;
   readonly sessionId: string;
+  readonly backend?: string | null;
   readonly text: string;
+  readonly reasoningText?: string | null;
+  readonly requestId?: string | null;
   readonly structuredOutput?: unknown;
+  readonly structuredOutputToolUseId?: string | null;
+  readonly assistantEvents?: readonly AssistantEventSnapshot[];
+  readonly assistantOpenPEvents?: readonly Record<string, unknown>[];
+  readonly assistantEventUsage?: BackendUsage | null;
+  readonly lastSubturnUsage?: BackendUsage | null;
   readonly durationMs: number | null;
   readonly numTurns: number | null;
   readonly totalCostUsd: number | null;
@@ -1462,40 +3182,40 @@ function buildResultEvent(event: {
   };
   readonly rawUsage?: Record<string, unknown> | null;
   readonly contextWindow: number | null;
+  readonly lastSubturnContextTokens: number | null;
   readonly model: string | null;
+  readonly warnings?: readonly OutputWarning[];
 }): Record<string, unknown> {
+  const warnings = event.warnings ?? [];
+  const resultText = event.structuredOutput === undefined ? event.text : '';
+  const modelUsage = buildModelUsage(event.model, event.contextWindow, event.usage, event.totalCostUsd);
   return {
-    type: 'result',
-    subtype: 'success',
-    session_id: event.sessionId,
-    is_error: false,
-    api_error_status: null,
-    duration_api_ms: null,
-    ttft_ms: null,
-    result: event.structuredOutput === undefined ? event.text : '',
-    num_turns: event.numTurns,
-    duration_ms: event.durationMs,
-    total_cost_usd: event.totalCostUsd,
-    stop_reason: event.stopReason,
-    usage: buildPublicUsage(event.usage, event.rawUsage),
-    modelUsage: buildModelUsage(event.model, event.contextWindow, event.usage, event.totalCostUsd),
-    permission_denials: [],
-    ...(event.structuredOutput !== undefined ? { structured_output: event.structuredOutput } : {}),
-    terminal_reason: 'completed',
-    fast_mode_state: 'off',
-    uuid: randomUUID(),
-  };
-}
-
-function buildUsage(usage: {
-  readonly inputTokens: number | null;
-  readonly outputTokens: number | null;
-  readonly cacheReadInputTokens: number | null;
-}): Record<string, number | null> {
-  return {
-    input_tokens: usage.inputTokens,
-    output_tokens: usage.outputTokens,
-    cache_read_input_tokens: usage.cacheReadInputTokens,
+    openp: buildOpenPTurnResult({
+      turnId: event.turnId,
+      sessionId: event.sessionId,
+      backend: event.backend ?? null,
+      answerText: resultText,
+      reasoningText: event.reasoningText ?? null,
+      structuredOutput: event.structuredOutput,
+      structuredOutputToolUseId: event.structuredOutputToolUseId ?? null,
+      requestId: event.requestId ?? null,
+      model: event.model,
+      stopReason: event.stopReason,
+      numTurns: event.numTurns,
+      durationMs: event.durationMs,
+      totalCostUsd: event.totalCostUsd,
+      contextWindow: event.contextWindow,
+      lastSubturnContextTokens: event.lastSubturnContextTokens,
+      modelUsage,
+      rawUsage: event.rawUsage ?? null,
+      warnings,
+      assistantEvents: event.assistantEvents ?? [],
+      assistantOpenPEvents: event.assistantOpenPEvents,
+      assistantEventUsage: event.assistantEventUsage ?? null,
+      lastSubturnUsage: event.lastSubturnUsage ?? null,
+      usage: event.usage,
+      status: 'success',
+    }),
   };
 }
 
@@ -1563,20 +3283,3 @@ function buildToolUseId(): string {
   return `toolu_${randomUUID().replaceAll('-', '')}`;
 }
 
-export function resolveKnownContextWindow(model: string | null | undefined): number | null {
-  if (!model) {
-    return null;
-  }
-  if (model.includes('[1m]')) {
-    return 1_000_000;
-  }
-  if (
-    model.startsWith('claude-haiku-4-5') ||
-    model.startsWith('claude-opus-4-6') ||
-    model.startsWith('claude-sonnet-4-6') ||
-    model.startsWith('claude-opus-4-7')
-  ) {
-    return 200_000;
-  }
-  return null;
-}

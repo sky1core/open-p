@@ -37,7 +37,7 @@ test('maps current turn result to null-safe worker result diagnostics', () => {
       outputTokens: 3,
       cacheReadInputTokens: 5,
       contextWindow: 200_000,
-      lastSubturnContextTokens: 15,
+      lastSubturnContextTokens: null,
       durationMs: 123,
       totalCostUsd: null,
       stopReason: null,
@@ -46,6 +46,37 @@ test('maps current turn result to null-safe worker result diagnostics', () => {
       intermediateTextCount: 2,
     },
   });
+});
+
+test('maps last subturn context usage from explicit last subturn usage', () => {
+  const result: TurnResult = {
+    turnId: 'turn-1',
+    text: 'hello',
+    diagnostics: {
+      durationMs: 123,
+      toolsUsed: [],
+      usage: {
+        inputTokens: 100,
+        cacheReadInputTokens: 200,
+        outputTokens: 30,
+      },
+      lastSubturnUsage: {
+        inputTokens: 10,
+        cacheReadInputTokens: 5,
+        outputTokens: 3,
+      },
+      rawEventCount: 4,
+    },
+  };
+
+  const workerResult = toWorkerTurnResult(result, 'session-1');
+
+  assert.deepEqual(workerResult.diagnostics.lastSubturnUsage, {
+    inputTokens: 10,
+    cacheReadInputTokens: 5,
+    outputTokens: 3,
+  });
+  assert.equal(workerResult.diagnostics.lastSubturnContextTokens, 15);
 });
 
 test('does not fabricate context usage when token fields are missing', () => {
