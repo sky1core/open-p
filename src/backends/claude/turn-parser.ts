@@ -853,8 +853,26 @@ function parseStructuredOutputFallback(text: string, turnId: string): unknown {
 
 function extractStructuredOutputCandidate(text: string): string {
   const trimmed = text.trim();
-  const fenced = /^```json[ \t]*\r?\n([\s\S]*?)\r?\n```$/i.exec(trimmed);
-  return fenced?.[1]?.trim() ?? trimmed;
+  if (trimmed.length === 0) return '';
+
+  const fenceRegex = /```json[ \t]*\r?\n([\s\S]*?)\r?\n```/gi;
+  let lastFence: RegExpExecArray | null = null;
+  let m;
+  while ((m = fenceRegex.exec(trimmed)) !== null) lastFence = m;
+  if (lastFence?.[1]?.trim()) return lastFence[1].trim();
+
+  if (trimmed[0] === '{' || trimmed[0] === '[') return trimmed;
+
+  const lines = trimmed.split('\n');
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const ch = lines[i][0];
+    if (ch === '{' || ch === '[') {
+      const candidate = lines.slice(i).join('\n').trim();
+      try { JSON.parse(candidate); return candidate; } catch { /* try earlier line */ }
+    }
+  }
+
+  return trimmed;
 }
 
 function asObject(value: unknown): JsonObject | null {

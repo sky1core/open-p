@@ -416,7 +416,6 @@ export class ClaudeCodeStdioWorkerProcess implements ManagedBackendProcess {
       sessionId,
       diagnostics: {
         ...parsed.diagnostics,
-        contextWindow: resolveRequestContextWindow(turn.request),
         intermediateTextCount: turn.intermediateTextCount,
       },
     };

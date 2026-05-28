@@ -510,15 +510,37 @@ test('parses a single fenced json result text as structured output in schema mod
   assert.deepEqual(result?.structuredOutput, { ok: true });
 });
 
-test('rejects fenced json with surrounding prose as structured output fallback', () => {
-  assert.throws(
-    () => parseClaudeCodeJsonlTurn([
-      userLine('hello'),
-      assistantLine([{ type: 'text', text: 'Here is the result:\n```json\n{"ok":true}\n```' }], undefined, 'end_turn'),
-      durationLine(10),
-    ], TURN_ID, { structuredOutputRequested: true }),
-    (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.protocolViolation,
-  );
+test('extracts fenced json preceded by prose as structured output fallback', () => {
+  const result = parseClaudeCodeJsonlTurn([
+    userLine('hello'),
+    assistantLine([{ type: 'text', text: 'Here is the result:\n```json\n{"ok":true}\n```' }], undefined, 'end_turn'),
+    durationLine(10),
+  ], TURN_ID, { structuredOutputRequested: true });
+
+  assert.deepEqual(result?.structuredOutput, { ok: true });
+});
+
+test('extracts JSON after accumulated assistant prose in structured output fallback', () => {
+  const result = parseClaudeCodeJsonlTurn([
+    userLine('hello'),
+    assistantLine([{ type: 'text', text: 'Let me check the code...' }], undefined, undefined, 'msg-1'),
+    assistantLine([{ type: 'text', text: 'Analysis complete.\n{"ok":true}' }], undefined, 'end_turn', 'msg-2'),
+    durationLine(10),
+  ], TURN_ID, { structuredOutputRequested: true });
+
+  assert.deepEqual(result?.structuredOutput, { ok: true });
+});
+
+test('extracts JSON from last assistant text block when earlier blocks are prose', () => {
+  const result = parseClaudeCodeJsonlTurn([
+    userLine('hello'),
+    assistantLine([{ type: 'text', text: 'Exploring the codebase...' }], undefined, undefined, 'msg-1'),
+    assistantLine([{ type: 'text', text: 'Running checks...' }], undefined, undefined, 'msg-2'),
+    assistantLine([{ type: 'text', text: '{"ok":true}' }], undefined, 'end_turn', 'msg-3'),
+    durationLine(10),
+  ], TURN_ID, { structuredOutputRequested: true });
+
+  assert.deepEqual(result?.structuredOutput, { ok: true });
 });
 
 test('fails closed when schema mode result text is not valid JSON and no StructuredOutput tool event exists', () => {
