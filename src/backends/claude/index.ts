@@ -2,7 +2,7 @@ import type { BackendProvider, Backend, BackendWorkerBridge } from '../../core/b
 import type { PtyProvider } from '../../runners/types.js';
 import { CLAUDE_CODE_DESCRIPTOR } from './descriptor.js';
 import { ClaudeCodeBackend } from './adapter.js';
-import { ClaudeCodeStdioWorkerBridge } from './stdio-worker-bridge.js';
+import { ClaudeCodeWorkerBridge } from './worker-bridge.js';
 import { findClaudeCodeSessionLog } from './session-log.js';
 
 export const claudeBackendProvider: BackendProvider = {
@@ -14,7 +14,7 @@ export const claudeBackendProvider: BackendProvider = {
   },
 
   createWorkerBridge(): BackendWorkerBridge {
-    return new ClaudeCodeStdioWorkerBridge();
+    return new ClaudeCodeWorkerBridge();
   },
 
   async resolveSessionLogPath(sessionId: string, cwd: string): Promise<string | null> {

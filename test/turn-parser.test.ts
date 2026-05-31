@@ -690,9 +690,10 @@ test('does not treat tool_result, meta, or local command user events as caller t
     JSON.stringify({
       type: 'user',
       isMeta: true,
+      promptId: 'local-command-1',
       message: {
         role: 'user',
-        content: [{ type: 'text', text: 'local command caveat' }],
+        content: [{ type: 'text', text: '<local-command-caveat>generated while running local commands</local-command-caveat>' }],
       },
     }),
     JSON.stringify({
@@ -700,6 +701,35 @@ test('does not treat tool_result, meta, or local command user events as caller t
       message: {
         role: 'user',
         content: '/exit',
+      },
+    }),
+    JSON.stringify({
+      type: 'system',
+      subtype: 'compact_boundary',
+      content: 'Conversation compacted',
+    }),
+    JSON.stringify({
+      type: 'user',
+      isCompactSummary: true,
+      message: {
+        role: 'user',
+        content: 'This session is being continued from a previous conversation that ran out of context.',
+      },
+    }),
+    JSON.stringify({
+      type: 'user',
+      promptId: 'local-command-1',
+      message: {
+        role: 'user',
+        content: '<command-name>/compact</command-name>\n<command-message>compact</command-message>',
+      },
+    }),
+    JSON.stringify({
+      type: 'user',
+      promptId: 'local-command-1',
+      message: {
+        role: 'user',
+        content: '<local-command-stdout>Compacted (ctrl+o to see full summary)</local-command-stdout>',
       },
     }),
     assistantLine([{ type: 'text', text: 'result answer' }], undefined, 'end_turn'),
@@ -712,6 +742,16 @@ test('does not treat tool_result, meta, or local command user events as caller t
   assert.equal(toolResultContent[0].type, 'tool_result');
   assert.equal(toolResultContent[0].tool_use_id, 'toolu_1');
   assert.equal(toolResultContent[0].content, 'tool output');
+});
+
+test('treats local-command-looking prompt text as caller input without local-command caveat linkage', () => {
+  const result = parseClaudeCodeJsonlTurn([
+    userLine('<command-name>/compact</command-name>\n<command-message>compact</command-message>'),
+    assistantLine([{ type: 'text', text: 'literal prompt handled' }], undefined, 'end_turn'),
+    durationLine(10),
+  ], TURN_ID);
+
+  assert.equal(result?.text, 'literal prompt handled');
 });
 
 function userLine(content: string, uuid?: string, parentUuid?: string): string {

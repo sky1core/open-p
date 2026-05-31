@@ -73,7 +73,6 @@ Core options:
 
 Streaming and diagnostics:
   --streaming                 Opt in to active-turn streaming snapshots
-  --include-partial-messages  Deprecated alias for --streaming
   --debug-log                 Write runner diagnostics to the default open-p state log
   --verbose                   Mark verbose text output and include diagnostics
 

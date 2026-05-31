@@ -5,7 +5,7 @@ import { createReadStream, watch } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { EXIT_CODES, OpenPError } from '../../core/errors.js';
 import { isSafeSessionId } from '../../core/session-id.js';
-import { extractClaudeCodeIntermediateContent, parseClaudeCodeJsonlTurn } from './turn-parser.js';
+import { extractClaudeCodeIntermediateContent, isLocalCommandTranscriptText, parseClaudeCodeJsonlTurn } from './turn-parser.js';
 import { isClaudeCodeTaskNotificationLine } from './background-parser.js';
 import type {
   AssistantContentBlock,
@@ -17,6 +17,36 @@ import type {
 const SESSION_LOG_DISCOVERY_POLL_INTERVAL_MS = 250;
 const ACTIVE_TURN_LOG_POLL_INTERVAL_MS = 25;
 const MAX_ASSISTANT_REPLAY_DELAY_MS = 100;
+const MISSING_CALLER_LOG_IDLE_GRACE_MS = 1_000;
+const SESSION_LOG_IDLE_DIAGNOSTIC_INTERVAL_MS = 30_000;
+
+export interface ClaudeCodeSessionLogIdleDiagnostic {
+  readonly turnId: string;
+  readonly stage: 'discovering_log' | 'waiting_for_caller_user_turn' | 'waiting_for_completion';
+  readonly logPath: string | null;
+  readonly offset: number;
+  readonly idleMs: number;
+  readonly observedLogFile: boolean;
+  readonly sawCallerUserTurn: boolean;
+}
+
+export class MissingCallerAfterLocalCommandError extends OpenPError {
+  constructor(
+    readonly turnId: string,
+    readonly logPath: string | null = null,
+    readonly nextOffset: number = 0,
+  ) {
+    super(
+      `Claude Code session log became idle after local command output before logging caller user turn for turn ${turnId}`,
+      EXIT_CODES.protocolViolation,
+    );
+    this.name = 'MissingCallerAfterLocalCommandError';
+  }
+}
+
+export function isMissingCallerAfterLocalCommandError(error: unknown): error is MissingCallerAfterLocalCommandError {
+  return error instanceof MissingCallerAfterLocalCommandError;
+}
 
 export function resolveClaudeCodeSessionLogPath(sessionId: string, cwd: string): string {
   assertValidSessionId(sessionId);
@@ -84,6 +114,31 @@ export async function findRecentClaudeCodeSessionLog(
   return candidates[0]!.path;
 }
 
+async function findRecentClaudeCodePreCallerIdleLog(
+  cwd: string,
+  changedAfterMs: number,
+  excludedLogPaths: ReadonlySet<string> = new Set(),
+): Promise<string | null> {
+  const validCwds = await cwdCandidates(cwd);
+  const candidates: LogCandidate[] = [];
+  for (const logDir of await projectLogDirsForCwd(cwd)) {
+    candidates.push(...await findRecentJsonlLogs(
+      logDir,
+      changedAfterMs,
+      validCwds,
+      excludedLogPaths,
+      'pre-caller-terminal-local-command',
+    ));
+  }
+  if (candidates.length === 0) {
+    return null;
+  }
+  if (candidates.length > 1) {
+    throw new OpenPError('ambiguous Claude Code pre-caller local-command session log discovery for backend-generated first-turn session id', EXIT_CODES.protocolViolation);
+  }
+  return candidates[0]!.path;
+}
+
 export async function waitForClaudeCodeTurnResult(options: {
   readonly sessionId: string | null;
   readonly turnId: string;
@@ -98,6 +153,7 @@ export async function waitForClaudeCodeTurnResult(options: {
   readonly structuredOutputRequested?: boolean;
   readonly structuredOutputJsonSchema?: unknown;
   readonly isBackendAlive?: () => Promise<boolean>;
+  readonly sessionLogIdleDiagnosticIntervalMs?: number;
   readonly onIntermediateText?: (text: string, source: IntermediateTextSource) => void;
   readonly onIntermediateReasoning?: (
     text: string,
@@ -109,6 +165,7 @@ export async function waitForClaudeCodeTurnResult(options: {
     source: IntermediateTextSource,
   ) => void;
   readonly onTimeout?: () => Promise<void> | void;
+  readonly onSessionLogIdle?: (diagnostic: ClaudeCodeSessionLogIdleDiagnostic) => Promise<void> | void;
 }): Promise<TurnResult> {
   const deadline = options.timeoutMs === 0 ? null : Date.now() + options.timeoutMs;
   let logPath = options.knownLogPath;
@@ -121,8 +178,15 @@ export async function waitForClaudeCodeTurnResult(options: {
   let lastPublishedSnapshot: string | null = null;
   let lastAssistantEventTimestampMs: number | null = null;
   let lastAssistantEventProcessedAtMs: number | null = null;
+  let sawCallerUserTurn = false;
+  let preCallerTerminalLocalCommandObservedAtMs: number | null = null;
+  const activeTurnLocalCommandPromptIds = new Set<string>();
   let nextFallbackDiscoveryAtMs = options.knownLogPath ? Date.now() + SESSION_LOG_DISCOVERY_POLL_INTERVAL_MS : Date.now();
   let timeoutNotified = false;
+  let lastSessionLogProgressAtMs = Date.now();
+  let lastSessionLogIdleDiagnosticAtMs = Date.now();
+  const sessionLogIdleDiagnosticIntervalMs =
+    options.sessionLogIdleDiagnosticIntervalMs ?? SESSION_LOG_IDLE_DIAGNOSTIC_INTERVAL_MS;
   const notifyTimeout = async (): Promise<void> => {
     if (timeoutNotified) {
       return;
@@ -170,6 +234,37 @@ export async function waitForClaudeCodeTurnResult(options: {
       }
     }
   };
+  const assertCallerUserTurnDidNotDisappear = (): void => {
+    if (sawCallerUserTurn || preCallerTerminalLocalCommandObservedAtMs === null) {
+      return;
+    }
+    if (Date.now() - preCallerTerminalLocalCommandObservedAtMs >= MISSING_CALLER_LOG_IDLE_GRACE_MS) {
+      throw new MissingCallerAfterLocalCommandError(options.turnId, logPath, offset);
+    }
+  };
+  const reportSessionLogIdleIfNeeded = async (): Promise<void> => {
+    if (sessionLogIdleDiagnosticIntervalMs <= 0) {
+      return;
+    }
+    const now = Date.now();
+    const idleMs = now - lastSessionLogProgressAtMs;
+    if (idleMs < sessionLogIdleDiagnosticIntervalMs) {
+      return;
+    }
+    if (now - lastSessionLogIdleDiagnosticAtMs < sessionLogIdleDiagnosticIntervalMs) {
+      return;
+    }
+    lastSessionLogIdleDiagnosticAtMs = now;
+    await options.onSessionLogIdle?.({
+      turnId: options.turnId,
+      stage: resolveSessionLogWaitStage(logPath, sawCallerUserTurn),
+      logPath,
+      offset,
+      idleMs,
+      observedLogFile,
+      sawCallerUserTurn,
+    });
+  };
 
   while (deadline === null || Date.now() < deadline) {
     if (!logPath) {
@@ -179,9 +274,18 @@ export async function waitForClaudeCodeTurnResult(options: {
           logPath = options.expectedLogPath;
           offset = 0;
         } else {
+          const preCallerLogPath = await discoverClaudeCodePreCallerIdleLog(options);
+          if (preCallerLogPath) {
+            logPath = preCallerLogPath;
+            observedLogFile = true;
+            offset = 0;
+            continue;
+          }
           if (await backendExited(options.isBackendAlive)) {
             throw new OpenPError(`backend exited while waiting for session log for turn ${options.turnId}`, EXIT_CODES.backendExited);
           }
+          assertCallerUserTurnDidNotDisappear();
+          await reportSessionLogIdleIfNeeded();
           await sleep(SESSION_LOG_DISCOVERY_POLL_INTERVAL_MS);
           continue;
         }
@@ -206,10 +310,26 @@ export async function waitForClaudeCodeTurnResult(options: {
     const chunk = await readNewText(logPath, offset);
     offset = chunk.nextOffset;
     if (chunk.text) {
+      lastSessionLogProgressAtMs = Date.now();
+      lastSessionLogIdleDiagnosticAtMs = lastSessionLogProgressAtMs;
       const combined = remainder + chunk.text;
       const parts = combined.split('\n');
       remainder = parts.pop() ?? '';
       for (const line of parts) {
+        const event = parseLineObject(line);
+        if (event) {
+          rememberLocalCommandTranscriptPromptId(activeTurnLocalCommandPromptIds, event);
+          if (isCallerUserTurn(event, line, activeTurnLocalCommandPromptIds)) {
+            sawCallerUserTurn = true;
+            preCallerTerminalLocalCommandObservedAtMs = null;
+          } else if (!sawCallerUserTurn) {
+            if (isPreCallerTerminalLocalCommandEvent(event, activeTurnLocalCommandPromptIds)) {
+              preCallerTerminalLocalCommandObservedAtMs = Date.now();
+            } else if (preCallerTerminalLocalCommandObservedAtMs !== null) {
+              preCallerTerminalLocalCommandObservedAtMs = Date.now();
+            }
+          }
+        }
         const assistantTimestampMs = assistantContentTimestampMs(line);
         if (
           options.paceIntermediateEvents === true &&
@@ -248,6 +368,8 @@ export async function waitForClaudeCodeTurnResult(options: {
     if (await backendExited(options.isBackendAlive)) {
       throw new OpenPError(`backend exited during active turn ${options.turnId}`, EXIT_CODES.backendExited);
     }
+    assertCallerUserTurnDidNotDisappear();
+    await reportSessionLogIdleIfNeeded();
     await waitForLogChange(logPath, ACTIVE_TURN_LOG_POLL_INTERVAL_MS);
   }
 
@@ -257,6 +379,16 @@ export async function waitForClaudeCodeTurnResult(options: {
   }
   await notifyTimeout();
   throw new OpenPError(`timed out waiting for turn ${options.turnId}`, EXIT_CODES.timeout);
+}
+
+function resolveSessionLogWaitStage(
+  logPath: string | null,
+  sawCallerUserTurn: boolean,
+): ClaudeCodeSessionLogIdleDiagnostic['stage'] {
+  if (!logPath) {
+    return 'discovering_log';
+  }
+  return sawCallerUserTurn ? 'waiting_for_completion' : 'waiting_for_caller_user_turn';
 }
 
 async function discoverClaudeCodeSessionLog(options: {
@@ -272,6 +404,22 @@ async function discoverClaudeCodeSessionLog(options: {
     return null;
   }
   return findRecentClaudeCodeSessionLog(
+    options.cwd,
+    options.discoveryStartedAtMs,
+    options.excludedLogPaths,
+  );
+}
+
+async function discoverClaudeCodePreCallerIdleLog(options: {
+  readonly sessionId: string | null;
+  readonly cwd?: string | null;
+  readonly discoveryStartedAtMs?: number | null;
+  readonly excludedLogPaths?: ReadonlySet<string>;
+}): Promise<string | null> {
+  if (options.sessionId || !options.cwd || options.discoveryStartedAtMs === null || options.discoveryStartedAtMs === undefined) {
+    return null;
+  }
+  return findRecentClaudeCodePreCallerIdleLog(
     options.cwd,
     options.discoveryStartedAtMs,
     options.excludedLogPaths,
@@ -339,6 +487,7 @@ async function findRecentJsonlLogs(
   changedAfterMs: number,
   validCwds: ReadonlySet<string>,
   excludedLogPaths: ReadonlySet<string>,
+  mode: 'completed-caller-turn' | 'pre-caller-terminal-local-command' = 'completed-caller-turn',
 ): Promise<LogCandidate[]> {
   let entries;
   try {
@@ -367,8 +516,21 @@ async function findRecentJsonlLogs(
       if (!candidate.hasWorkspaceCwd) {
         continue;
       }
+      if (mode === 'pre-caller-terminal-local-command') {
+        if (
+          candidate.callerUserTurnCount === 0 &&
+          candidate.otherWorkspaceCallerUserTurnCount === 0 &&
+          candidate.hasPreCallerTerminalLocalCommand
+        ) {
+          candidates.push({ path, mtimeMs: pathStat.mtimeMs });
+        }
+        continue;
+      }
       if (candidate.callerUserTurnCount === 0) {
-        throw new OpenPError('Claude Code session log is missing a caller user turn for one open-p turn', EXIT_CODES.protocolViolation);
+        if (candidate.otherWorkspaceCallerUserTurnCount > 0) {
+          throw new OpenPError('Claude Code session log caller user turn does not match the requested workspace', EXIT_CODES.protocolViolation);
+        }
+        continue;
       }
       if (candidate.callerUserTurnCount > 1) {
         throw new OpenPError('Claude Code session log contains multiple caller user turns for one open-p turn', EXIT_CODES.protocolViolation);
@@ -420,23 +582,49 @@ async function projectLogDirsForCwd(cwd: string): Promise<ReadonlySet<string>> {
 async function analyzeLogDiscoveryCandidate(
   path: string,
   validCwds: ReadonlySet<string>,
-): Promise<{ hasWorkspaceCwd: boolean; callerUserTurnCount: number }> {
+): Promise<{
+  hasWorkspaceCwd: boolean;
+  callerUserTurnCount: number;
+  otherWorkspaceCallerUserTurnCount: number;
+  hasPreCallerTerminalLocalCommand: boolean;
+}> {
   let hasWorkspaceCwd = false;
   let callerUserTurnCount = 0;
+  let otherWorkspaceCallerUserTurnCount = 0;
+  let hasPreCallerTerminalLocalCommand = false;
+  const localCommandTranscriptPromptIds = new Set<string>();
   const lines = createInterface({
     input: createReadStream(path, { encoding: 'utf8' }),
     crlfDelay: Infinity,
   });
   for await (const line of lines) {
     const event = parseLineObject(line);
+    rememberLocalCommandTranscriptPromptId(localCommandTranscriptPromptIds, event);
     if (typeof event.cwd === 'string' && validCwds.has(event.cwd)) {
       hasWorkspaceCwd = true;
     }
-    if (isCallerUserTurn(event, line) && typeof event.cwd === 'string' && validCwds.has(event.cwd)) {
-      callerUserTurnCount += 1;
+    if (isCallerUserTurn(event, line, localCommandTranscriptPromptIds)) {
+      if (typeof event.cwd === 'string' && validCwds.has(event.cwd)) {
+        callerUserTurnCount += 1;
+      } else {
+        otherWorkspaceCallerUserTurnCount += 1;
+      }
+      continue;
+    }
+    if (
+      callerUserTurnCount === 0 &&
+      otherWorkspaceCallerUserTurnCount === 0 &&
+      isPreCallerTerminalLocalCommandEvent(event, localCommandTranscriptPromptIds)
+    ) {
+      hasPreCallerTerminalLocalCommand = true;
     }
   }
-  return { hasWorkspaceCwd, callerUserTurnCount };
+  return {
+    hasWorkspaceCwd,
+    callerUserTurnCount,
+    otherWorkspaceCallerUserTurnCount,
+    hasPreCallerTerminalLocalCommand,
+  };
 }
 
 async function assertDiscoveredLogStillUnambiguous(
@@ -481,7 +669,11 @@ async function logFileHasCwd(path: string, validCwds: ReadonlySet<string>): Prom
   return false;
 }
 
-function isCallerUserTurn(event: Record<string, unknown>, rawLine: string): boolean {
+function isCallerUserTurn(
+  event: Record<string, unknown>,
+  rawLine: string,
+  localCommandTranscriptPromptIds: ReadonlySet<string>,
+): boolean {
   if (event.type !== 'user') {
     return false;
   }
@@ -491,10 +683,13 @@ function isCallerUserTurn(event: Record<string, unknown>, rawLine: string): bool
   if (event.isMeta === true) {
     return false;
   }
+  if (event.isCompactSummary === true) {
+    return false; // context-compaction continuation message, not a caller prompt (see turn-parser.ts)
+  }
   if (userEventHasToolResult(event)) {
     return false;
   }
-  if (isLocalCommandTranscriptEvent(event)) {
+  if (isLocalCommandTranscriptEvent(event, localCommandTranscriptPromptIds)) {
     return false;
   }
   return true;
@@ -546,9 +741,70 @@ function userEventHasToolResult(event: Record<string, unknown>): boolean {
   });
 }
 
-function isLocalCommandTranscriptEvent(event: Record<string, unknown>): boolean {
+function isLocalCommandTranscriptEvent(
+  event: Record<string, unknown>,
+  localCommandTranscriptPromptIds: ReadonlySet<string>,
+): boolean {
   const texts = collectUserText(event).map((text) => text.trim()).filter(Boolean);
-  return texts.length === 1 && texts[0] === '/exit';
+  if (texts.length !== 1) {
+    return false;
+  }
+  if (texts[0] === '/exit') {
+    return true;
+  }
+  const promptId = stringOrNull(event.promptId);
+  return promptId !== null &&
+    localCommandTranscriptPromptIds.has(promptId) &&
+    isLocalCommandTranscriptText(texts[0]!);
+}
+
+function isPreCallerTerminalLocalCommandEvent(
+  event: Record<string, unknown>,
+  localCommandTranscriptPromptIds: ReadonlySet<string>,
+): boolean {
+  const texts = collectTranscriptText(event);
+  if (texts.length !== 1 || !isTerminalLocalCommandTranscriptText(texts[0]!)) {
+    return false;
+  }
+  if (event.type === 'system' && event.subtype === 'local_command') {
+    return true;
+  }
+  const promptId = stringOrNull(event.promptId);
+  return promptId !== null && localCommandTranscriptPromptIds.has(promptId);
+}
+
+function collectTranscriptText(event: Record<string, unknown>): string[] {
+  const texts = collectUserText(event).map((text) => text.trim()).filter(Boolean);
+  const content = event.content;
+  if (typeof content === 'string' && content.trim().length > 0) {
+    texts.push(content.trim());
+  }
+  return texts;
+}
+
+function isTerminalLocalCommandTranscriptText(text: string): boolean {
+  return text.startsWith('<local-command-stdout>') || text.startsWith('<local-command-stderr>');
+}
+
+function rememberLocalCommandTranscriptPromptId(
+  promptIds: Set<string>,
+  event: Record<string, unknown>,
+): void {
+  if (event.type !== 'user' || event.isMeta !== true) {
+    return;
+  }
+  const promptId = stringOrNull(event.promptId);
+  if (promptId === null) {
+    return;
+  }
+  const texts = collectUserText(event).map((text) => text.trim()).filter(Boolean);
+  if (texts.length === 1 && texts[0]!.startsWith('<local-command-caveat>')) {
+    promptIds.add(promptId);
+  }
+}
+
+function stringOrNull(value: unknown): string | null {
+  return typeof value === 'string' && value.length > 0 ? value : null;
 }
 
 export async function readNewText(path: string, offset: number): Promise<{ text: string; nextOffset: number }> {

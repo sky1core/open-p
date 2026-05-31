@@ -117,10 +117,11 @@ test('worker bridge creates a backend session and sends first turn as raw messag
   assert.equal(result.diagnostics.contextWindow, 200_000);
   assert.equal(result.diagnostics.intermediateTextCount, 1);
   assert.deepEqual(streamed, ['final']);
-  assert.deepEqual(background, ['background']);
+  assert.deepEqual(background, []);
   assert.equal(processes[0]?.prompts[0], 'continue');
   assert.equal(processes[0]?.turnTimeouts[0], 0);
   assert.equal(starts[0]?.launchSignature.env.ANTHROPIC_BASE_URL, 'http://127.0.0.1:9999');
+  assert.equal(starts[0]?.launchSignature.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS, '1');
 });
 
 test('worker bridge keeps result when JSONL streaming differs from result', async () => {

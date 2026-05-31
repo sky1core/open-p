@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { appendFile, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -10,6 +10,7 @@ import {
   snapshotClaudeCodeSessionLogPaths,
   waitForClaudeCodeTurnResult,
 } from '../src/backends/claude/session-log.js';
+import { createClaudeSessionLogIdleDebugLogger } from '../src/backends/claude/diagnostics.js';
 import { EXIT_CODES, OpenPError } from '../src/core/errors.js';
 import { formatTurnResult } from '../src/core/output.js';
 
@@ -221,6 +222,534 @@ test('discovers backend-generated first-turn session log without reusing preexis
   });
 });
 
+test('first-turn session log discovery ignores compaction and local-command transcript user events', async () => {
+  await withClaudeProjectsRoot(async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'openp-session-log-cwd-'));
+  const logDir = resolveClaudeCodeProjectLogDir(cwd);
+  const sessionId = randomUUID();
+  const logPath = join(logDir, `${sessionId}.jsonl`);
+  await mkdir(logDir, { recursive: true });
+
+  try {
+    const pendingResult = waitForClaudeCodeTurnResult({
+      sessionId: null,
+      turnId: 'turn-1',
+      timeoutMs: 10_000,
+      initialOffset: 0,
+      knownLogPath: null,
+      cwd,
+      discoveryStartedAtMs: Date.now() - 1000,
+      isBackendAlive: async () => true,
+    });
+    await sleep(50);
+    await writeFile(logPath, [
+      line({
+        type: 'user',
+        cwd,
+        sessionId,
+        message: { content: 'new prompt' },
+      }),
+      line({ type: 'system', subtype: 'compact_boundary', cwd, sessionId, content: 'Conversation compacted' }),
+      line({
+        type: 'user',
+        cwd,
+        sessionId,
+        isCompactSummary: true,
+        message: { content: 'This session is being continued from a previous conversation that ran out of context.' },
+      }),
+      line({
+        type: 'user',
+        cwd,
+        sessionId,
+        promptId: 'local-command-1',
+        isMeta: true,
+        message: { content: '<local-command-caveat>generated while running local commands</local-command-caveat>' },
+      }),
+      line({
+        type: 'user',
+        cwd,
+        sessionId,
+        promptId: 'local-command-1',
+        message: { content: '<command-name>/compact</command-name>\n<command-message>compact</command-message>' },
+      }),
+      line({
+        type: 'user',
+        cwd,
+        sessionId,
+        promptId: 'local-command-1',
+        message: { content: '<local-command-stdout>Compacted (ctrl+o to see full summary)</local-command-stdout>' },
+      }),
+      line({
+        type: 'assistant',
+        cwd,
+        sessionId,
+        message: {
+          content: [{ type: 'text', text: 'new final' }],
+          stop_reason: 'end_turn',
+        },
+      }),
+      line({ type: 'system', subtype: 'turn_duration', cwd, sessionId, durationMs: 3 }),
+    ].join(''));
+
+    const result = await pendingResult;
+
+    assert.equal(result.sessionId, sessionId);
+    assert.equal(result.text, 'new final');
+  } finally {
+    await rm(logDir, { recursive: true, force: true });
+  }
+  });
+});
+
+test('first-turn session log discovery waits through pre-caller local-command transcript', async () => {
+  await withClaudeProjectsRoot(async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'openp-session-log-cwd-'));
+    const logDir = resolveClaudeCodeProjectLogDir(cwd);
+    const sessionId = randomUUID();
+    const logPath = join(logDir, `${sessionId}.jsonl`);
+    await mkdir(logDir, { recursive: true });
+
+    try {
+      await writeFile(logPath, [
+        line({
+          type: 'user',
+          cwd,
+          sessionId,
+          promptId: 'local-command-1',
+          isMeta: true,
+          message: { content: '<local-command-caveat>generated while running local commands</local-command-caveat>' },
+        }),
+        line({
+          type: 'user',
+          cwd,
+          sessionId,
+          promptId: 'local-command-1',
+          message: { content: '<command-name>/compact</command-name>\n<command-message>compact</command-message>' },
+        }),
+        line({
+          type: 'system',
+          subtype: 'local_command',
+          cwd,
+          sessionId,
+          content: '<local-command-stderr>Error: No messages to compact</local-command-stderr>',
+        }),
+      ].join(''));
+      const pendingResult = waitForClaudeCodeTurnResult({
+        sessionId: null,
+        turnId: 'turn-1',
+        timeoutMs: 10_000,
+        initialOffset: 0,
+        knownLogPath: null,
+        cwd,
+        discoveryStartedAtMs: Date.now() - 1000,
+        isBackendAlive: async () => true,
+      });
+      const observedResult = pendingResult.then(
+        (result) => ({ result, error: null }),
+        (error: unknown) => ({ result: null, error }),
+      );
+      let settled = false;
+      void observedResult.then(() => {
+        settled = true;
+      });
+      await sleep(350);
+      assert.equal(settled, false);
+      await appendFile(logPath, [
+        line({
+          type: 'user',
+          cwd,
+          sessionId,
+          message: { content: 'caller prompt after pre-caller local command' },
+        }),
+        line({
+          type: 'assistant',
+          cwd,
+          sessionId,
+          message: {
+            content: [{ type: 'text', text: 'result after pre-caller local command' }],
+            stop_reason: 'end_turn',
+          },
+        }),
+        line({ type: 'system', subtype: 'turn_duration', cwd, sessionId, durationMs: 3 }),
+      ].join(''));
+
+      const observed = await observedResult;
+      if (observed.error) {
+        throw observed.error;
+      }
+      assert.equal(observed.result?.sessionId, sessionId);
+      assert.equal(observed.result?.text, 'result after pre-caller local command');
+    } finally {
+      await rm(logDir, { recursive: true, force: true });
+    }
+  });
+});
+
+test('active turn waits through pre-caller compact transcript until caller prompt is logged', async () => {
+  await withClaudeProjectsRoot(async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'openp-session-log-cwd-'));
+    const logDir = resolveClaudeCodeProjectLogDir(cwd);
+    const sessionId = randomUUID();
+    const logPath = join(logDir, `${sessionId}.jsonl`);
+    await mkdir(logDir, { recursive: true });
+
+    try {
+      const pendingResult = waitForClaudeCodeTurnResult({
+        sessionId,
+        turnId: 'turn-1',
+        timeoutMs: 10_000,
+        initialOffset: 0,
+        knownLogPath: logPath,
+        cwd,
+        isBackendAlive: async () => true,
+      });
+      const observedResult = pendingResult.then(
+        (result) => ({ result, error: null }),
+        (error: unknown) => ({ result: null, error }),
+      );
+      await sleep(50);
+      await writeFile(logPath, [
+        line({
+          type: 'system',
+          subtype: 'compact_boundary',
+          cwd,
+          sessionId,
+          content: 'Conversation compacted',
+        }),
+        line({
+          type: 'user',
+          cwd,
+          sessionId,
+          promptId: 'local-command-1',
+          isMeta: true,
+          message: { content: '<local-command-caveat>generated while running local commands</local-command-caveat>' },
+        }),
+        line({
+          type: 'user',
+          cwd,
+          sessionId,
+          promptId: 'local-command-1',
+          message: { content: '<command-name>/compact</command-name>\n<command-message>compact</command-message>' },
+        }),
+        line({
+          type: 'user',
+          cwd,
+          sessionId,
+          promptId: 'local-command-1',
+          message: { content: '<local-command-stdout>Compacted (ctrl+o to see full summary)</local-command-stdout>' },
+        }),
+      ].join(''));
+      await sleep(50);
+      await appendFile(logPath, [
+        line({
+          type: 'user',
+          cwd,
+          sessionId,
+          message: { content: 'caller prompt after compact' },
+        }),
+        line({
+          type: 'assistant',
+          cwd,
+          sessionId,
+          message: {
+            content: [{ type: 'text', text: 'result after compact' }],
+            stop_reason: 'end_turn',
+          },
+        }),
+        line({ type: 'system', subtype: 'turn_duration', cwd, sessionId, durationMs: 3 }),
+      ].join(''));
+
+      const observed = await observedResult;
+      if (observed.error) {
+        throw observed.error;
+      }
+      assert.equal(observed.result?.text, 'result after compact');
+    } finally {
+      await rm(logDir, { recursive: true, force: true });
+    }
+  });
+});
+
+test('active turn ignores synthetic no-response and pre-caller compact transcript until caller prompt', async () => {
+  await withClaudeProjectsRoot(async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'openp-session-log-cwd-'));
+    const logDir = resolveClaudeCodeProjectLogDir(cwd);
+    const sessionId = randomUUID();
+    const logPath = join(logDir, `${sessionId}.jsonl`);
+    await mkdir(logDir, { recursive: true });
+
+    try {
+      const pendingResult = waitForClaudeCodeTurnResult({
+        sessionId,
+        turnId: 'turn-1',
+        timeoutMs: 10_000,
+        initialOffset: 0,
+        knownLogPath: logPath,
+        cwd,
+        isBackendAlive: async () => true,
+      });
+      const observedResult = pendingResult.then(
+        (result) => ({ result, error: null }),
+        (error: unknown) => ({ result: null, error }),
+      );
+      await sleep(50);
+      await writeFile(logPath, [
+        line({
+          type: 'assistant',
+          cwd,
+          sessionId,
+          message: {
+            model: '<synthetic>',
+            role: 'assistant',
+            stop_reason: 'stop_sequence',
+            stop_sequence: '',
+            content: [{ type: 'text', text: 'No response requested.' }],
+          },
+        }),
+        line({
+          type: 'user',
+          cwd,
+          sessionId,
+          promptId: 'compact-command',
+          isMeta: true,
+          message: { content: '<local-command-caveat>generated while running local commands</local-command-caveat>' },
+        }),
+        line({
+          type: 'user',
+          cwd,
+          sessionId,
+          promptId: 'compact-command',
+          message: { content: '<command-name>/compact</command-name>\n<command-message>compact</command-message>' },
+        }),
+        line({
+          type: 'user',
+          cwd,
+          sessionId,
+          promptId: 'compact-command',
+          message: { content: '<local-command-stdout>Compacted (ctrl+o to see full summary)</local-command-stdout>' },
+        }),
+        line({
+          type: 'user',
+          cwd,
+          sessionId,
+          promptId: 'compact-command',
+          isCompactSummary: true,
+          message: { content: 'This session is being continued from a previous conversation.' },
+        }),
+      ].join(''));
+      await sleep(50);
+      await appendFile(logPath, [
+        line({
+          type: 'user',
+          cwd,
+          sessionId,
+          message: { content: 'caller prompt after synthetic compact prelude' },
+        }),
+        line({
+          type: 'assistant',
+          cwd,
+          sessionId,
+          message: {
+            content: [{ type: 'text', text: 'result after synthetic compact prelude' }],
+            stop_reason: 'end_turn',
+          },
+        }),
+        line({ type: 'system', subtype: 'turn_duration', cwd, sessionId, durationMs: 4 }),
+      ].join(''));
+
+      const observed = await observedResult;
+      if (observed.error) {
+        throw observed.error;
+      }
+      assert.equal(observed.result?.text, 'result after synthetic compact prelude');
+    } finally {
+      await rm(logDir, { recursive: true, force: true });
+    }
+  });
+});
+
+test('active turn fails instead of waiting forever when local command output is logged without caller turn', async () => {
+  await withClaudeProjectsRoot(async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'openp-session-log-cwd-'));
+    const logDir = resolveClaudeCodeProjectLogDir(cwd);
+    const sessionId = randomUUID();
+    const logPath = join(logDir, `${sessionId}.jsonl`);
+    await mkdir(logDir, { recursive: true });
+
+    try {
+      await writeFile(logPath, [
+        line({
+          type: 'assistant',
+          cwd,
+          sessionId,
+          message: {
+            model: '<synthetic>',
+            role: 'assistant',
+            stop_reason: 'stop_sequence',
+            stop_sequence: '',
+            content: [{ type: 'text', text: 'No response requested.' }],
+          },
+        }),
+        line({
+          type: 'user',
+          cwd,
+          sessionId,
+          promptId: 'compact-command',
+          isMeta: true,
+          message: { content: '<local-command-caveat>generated while running local commands</local-command-caveat>' },
+        }),
+        line({
+          type: 'user',
+          cwd,
+          sessionId,
+          promptId: 'compact-command',
+          message: { content: '<command-name>/compact</command-name>\n<command-message>compact</command-message>' },
+        }),
+        line({
+          type: 'user',
+          cwd,
+          sessionId,
+          promptId: 'compact-command',
+          message: { content: '<local-command-stdout>Compacted (ctrl+o to see full summary)</local-command-stdout>' },
+        }),
+      ].join(''));
+
+      await assert.rejects(
+        () => waitForClaudeCodeTurnResult({
+          sessionId,
+          turnId: 'turn-1',
+          timeoutMs: 0,
+          initialOffset: 0,
+          knownLogPath: logPath,
+          cwd,
+          isBackendAlive: async () => true,
+        }),
+        (error) => error instanceof OpenPError &&
+          error.exitCode === EXIT_CODES.protocolViolation &&
+          /session log became idle after local command output before logging caller user turn/.test(error.message),
+      );
+    } finally {
+      await rm(logDir, { recursive: true, force: true });
+    }
+  });
+});
+
+test('first-turn discovery fails instead of waiting forever when local command output is logged without caller turn', async () => {
+  await withClaudeProjectsRoot(async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'openp-session-log-cwd-'));
+    const logDir = resolveClaudeCodeProjectLogDir(cwd);
+    const sessionId = randomUUID();
+    const logPath = join(logDir, `${sessionId}.jsonl`);
+    await mkdir(logDir, { recursive: true });
+
+    try {
+      await writeFile(logPath, [
+        line({
+          type: 'assistant',
+          cwd,
+          sessionId,
+          message: {
+            model: '<synthetic>',
+            role: 'assistant',
+            stop_reason: 'stop_sequence',
+            stop_sequence: '',
+            content: [{ type: 'text', text: 'No response requested.' }],
+          },
+        }),
+        line({
+          type: 'user',
+          cwd,
+          sessionId,
+          promptId: 'compact-command',
+          isMeta: true,
+          message: { content: '<local-command-caveat>generated while running local commands</local-command-caveat>' },
+        }),
+        line({
+          type: 'user',
+          cwd,
+          sessionId,
+          promptId: 'compact-command',
+          message: { content: '<command-name>/compact</command-name>\n<command-message>compact</command-message>' },
+        }),
+        line({
+          type: 'user',
+          cwd,
+          sessionId,
+          promptId: 'compact-command',
+          message: { content: '<local-command-stdout>Compacted (ctrl+o to see full summary)</local-command-stdout>' },
+        }),
+      ].join(''));
+
+      await assert.rejects(
+        () => waitForClaudeCodeTurnResult({
+          sessionId: null,
+          turnId: 'turn-1',
+          timeoutMs: 0,
+          initialOffset: 0,
+          knownLogPath: null,
+          cwd,
+          discoveryStartedAtMs: Date.now() - 1000,
+          isBackendAlive: async () => true,
+        }),
+        (error) => error instanceof OpenPError &&
+          error.exitCode === EXIT_CODES.protocolViolation &&
+          /session log became idle after local command output before logging caller user turn/.test(error.message),
+      );
+    } finally {
+      await rm(logDir, { recursive: true, force: true });
+    }
+  });
+});
+
+test('first-turn session log discovery treats local-command-looking prompt text as caller input', async () => {
+  await withClaudeProjectsRoot(async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'openp-session-log-cwd-'));
+  const logDir = resolveClaudeCodeProjectLogDir(cwd);
+  const sessionId = randomUUID();
+  const logPath = join(logDir, `${sessionId}.jsonl`);
+  await mkdir(logDir, { recursive: true });
+
+  try {
+    const pendingResult = waitForClaudeCodeTurnResult({
+      sessionId: null,
+      turnId: 'turn-1',
+      timeoutMs: 10_000,
+      initialOffset: 0,
+      knownLogPath: null,
+      cwd,
+      discoveryStartedAtMs: Date.now() - 1000,
+      isBackendAlive: async () => true,
+    });
+    await sleep(50);
+    await writeFile(logPath, [
+      line({
+        type: 'user',
+        cwd,
+        sessionId,
+        message: { content: '<command-name>/compact</command-name>\n<command-message>compact</command-message>' },
+      }),
+      line({
+        type: 'assistant',
+        cwd,
+        sessionId,
+        message: {
+          content: [{ type: 'text', text: 'literal prompt handled' }],
+          stop_reason: 'end_turn',
+        },
+      }),
+      line({ type: 'system', subtype: 'turn_duration', cwd, sessionId, durationMs: 3 }),
+    ].join(''));
+
+    const result = await pendingResult;
+
+    assert.equal(result.sessionId, sessionId);
+    assert.equal(result.text, 'literal prompt handled');
+  } finally {
+    await rm(logDir, { recursive: true, force: true });
+  }
+  });
+});
+
 test('first-turn session log discovery excludes preexisting empty jsonl logs', async () => {
   await withClaudeProjectsRoot(async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'openp-session-log-cwd-'));
@@ -404,7 +933,9 @@ test('first-turn session log discovery requires caller user-turn cwd to match wo
         discoveryStartedAtMs: Date.now() - 1000,
         isBackendAlive: async () => true,
       }),
-      (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.protocolViolation,
+      (error) => error instanceof OpenPError &&
+        error.exitCode === EXIT_CODES.protocolViolation &&
+        /caller user turn does not match the requested workspace/.test(error.message),
     );
   } finally {
     await rm(logDir, { recursive: true, force: true });
@@ -713,6 +1244,160 @@ test('publishes active assistant intermediate text while waiting for turn result
 
   assert.equal(result.text, 'working\n\nfinal');
   assert.deepEqual(intermediate, ['working', 'working\n\nfinal']);
+});
+
+test('does not report session log idle while JSONL progress keeps arriving', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-session-log-progress-'));
+  const logPath = join(dir, 'session.jsonl');
+  await writeFile(logPath, line({
+    type: 'user',
+    message: {
+      content: 'hello',
+    },
+  }));
+  const intermediate: string[] = [];
+  const idleDiagnostics: unknown[] = [];
+
+  const pendingResult = waitForClaudeCodeTurnResult({
+    sessionId: '11111111-1111-4111-8111-111111111111',
+    turnId: 'turn-1',
+    timeoutMs: 10_000,
+    initialOffset: 0,
+    knownLogPath: logPath,
+    sessionLogIdleDiagnosticIntervalMs: 150,
+    isBackendAlive: async () => true,
+    onIntermediateText: (text) => intermediate.push(text),
+    onSessionLogIdle: (diagnostic) => {
+      idleDiagnostics.push(diagnostic);
+    },
+  });
+
+  await sleep(50);
+  await appendFile(logPath, line({
+    type: 'assistant',
+    message: {
+      content: [{ type: 'text', text: 'working 1' }],
+    },
+  }));
+  await waitUntil(() => intermediate.at(-1) === 'working 1');
+  await sleep(50);
+  await appendFile(logPath, line({
+    type: 'assistant',
+    message: {
+      content: [{ type: 'text', text: 'working 2' }],
+    },
+  }));
+  await waitUntil(() => intermediate.at(-1) === 'working 1\n\nworking 2');
+  await sleep(50);
+  await appendFile(logPath, [
+    line({
+      type: 'assistant',
+      message: {
+        content: [{ type: 'text', text: 'final' }],
+        stop_reason: 'end_turn',
+      },
+    }),
+    line({ type: 'system', subtype: 'turn_duration', durationMs: 12 }),
+  ].join(''));
+
+  const result = await pendingResult;
+
+  assert.equal(result.text, 'working 1\n\nworking 2\n\nfinal');
+  assert.deepEqual(idleDiagnostics, []);
+});
+
+test('reports session log idle as a diagnostic without failing a later result', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-session-log-idle-'));
+  const logPath = join(dir, 'session.jsonl');
+  await writeFile(logPath, line({
+    type: 'user',
+    message: {
+      content: 'hello',
+    },
+  }));
+  const idleDiagnostics: Array<{
+    readonly turnId?: unknown;
+    readonly stage?: unknown;
+    readonly logPath?: unknown;
+    readonly idleMs?: unknown;
+    readonly sawCallerUserTurn?: unknown;
+  }> = [];
+
+  const pendingResult = waitForClaudeCodeTurnResult({
+    sessionId: '11111111-1111-4111-8111-111111111111',
+    turnId: 'turn-1',
+    timeoutMs: 10_000,
+    initialOffset: 0,
+    knownLogPath: logPath,
+    sessionLogIdleDiagnosticIntervalMs: 50,
+    isBackendAlive: async () => true,
+    onSessionLogIdle: (diagnostic) => {
+      idleDiagnostics.push(diagnostic);
+    },
+  });
+
+  await waitUntil(() => idleDiagnostics.length > 0);
+  await appendFile(logPath, [
+    line({
+      type: 'assistant',
+      message: {
+        content: [{ type: 'text', text: 'final after wait' }],
+        stop_reason: 'end_turn',
+      },
+    }),
+    line({ type: 'system', subtype: 'turn_duration', durationMs: 12 }),
+  ].join(''));
+
+  const result = await pendingResult;
+  const firstDiagnostic = idleDiagnostics[0]!;
+
+  assert.equal(result.text, 'final after wait');
+  assert.equal(firstDiagnostic.turnId, 'turn-1');
+  assert.equal(firstDiagnostic.stage, 'waiting_for_completion');
+  assert.equal(firstDiagnostic.logPath, logPath);
+  assert.equal(firstDiagnostic.sawCallerUserTurn, true);
+  assert.equal(typeof firstDiagnostic.idleMs, 'number');
+  assert.equal((firstDiagnostic.idleMs as number) >= 50, true);
+});
+
+test('writes Claude session log idle diagnostics to debug log', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-session-log-debug-'));
+  const debugLogPath = join(dir, 'debug.jsonl');
+  const logger = createClaudeSessionLogIdleDebugLogger({
+    debugLog: debugLogPath,
+    backendSessionId: 'backend-session',
+    nativeSessionId: 'native-session',
+    ptySessionId: 'openp-backend-session-pty',
+  });
+
+  await logger({
+    turnId: 'turn-1',
+    stage: 'waiting_for_completion',
+    logPath: join(dir, 'session.jsonl'),
+    offset: 123,
+    idleMs: 30_000,
+    observedLogFile: true,
+    sawCallerUserTurn: true,
+  });
+
+  const entries = (await readFile(debugLogPath, 'utf8'))
+    .trim()
+    .split('\n')
+    .map((entry) => JSON.parse(entry) as Record<string, unknown>);
+  const entry = entries[0]!;
+
+  assert.equal(entry.event, 'claude_session_log_waiting');
+  assert.equal(entry.severity, 'info');
+  assert.equal(entry.backend, 'claude');
+  assert.equal(entry.backendSessionId, 'backend-session');
+  assert.equal(entry.nativeSessionId, 'native-session');
+  assert.equal(entry.ptySessionId, 'openp-backend-session-pty');
+  assert.equal(entry.turnId, 'turn-1');
+  assert.equal(entry.stage, 'waiting_for_completion');
+  assert.equal(entry.offset, 123);
+  assert.equal(entry.idleMs, 30_000);
+  assert.equal(entry.observedLogFile, true);
+  assert.equal(entry.sawCallerUserTurn, true);
 });
 
 test('publishes same-message Claude session-log snapshots as replacements, not appended answers', async () => {

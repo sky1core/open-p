@@ -16,6 +16,7 @@ export interface WorkerTurnRequest {
   readonly binArgs?: readonly string[];
   readonly local?: boolean;
   readonly timeoutMs?: number;
+  readonly debugLog?: string | null;
   readonly paceIntermediateEvents?: boolean;
   readonly env?: Readonly<Record<string, string>>;
   readonly contextWindowsByModel?: Readonly<Record<string, number>>;

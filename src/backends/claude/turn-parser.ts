@@ -44,6 +44,7 @@ interface ParserState {
   sessionId: string | null;
   assistantEvents: AssistantEventSnapshot[];
   callerUserTurnCount: number;
+  localCommandTranscriptPromptIds: Set<string>;
 }
 
 const EMPTY_USAGE: BackendUsage = {
@@ -81,6 +82,7 @@ export function parseClaudeCodeJsonlTurn(
     sessionId: null,
     assistantEvents: [],
     callerUserTurnCount: 0,
+    localCommandTranscriptPromptIds: new Set(),
   };
 
   for (const line of lines) {
@@ -154,6 +156,7 @@ export function extractClaudeCodeIntermediateContent(
 ): IntermediateContent {
   let inBackgroundTask = false;
   const backgroundParentUuids = new Set<string>();
+  const localCommandTranscriptPromptIds = new Set<string>();
   const textState: ActiveAssistantTextState = {
     activeAssistantTexts: [],
     lastActiveAssistantMessageId: null,
@@ -173,6 +176,7 @@ export function extractClaudeCodeIntermediateContent(
   for (const line of lines) {
     const event = parseJsonObject(line);
     if (!event) continue;
+    rememberLocalCommandTranscriptPromptId(localCommandTranscriptPromptIds, event);
     if (event.type === 'user' && isTaskNotification(event)) {
       clearTextState();
       pendingReasoningBlocks = [];
@@ -200,12 +204,13 @@ export function extractClaudeCodeIntermediateContent(
       }
       continue;
     }
-    if (isCallerUserTurn(event)) {
+    if (isCallerUserTurn(event, localCommandTranscriptPromptIds)) {
       inBackgroundTask = false;
       clearTextState();
       pendingReasoningBlocks = [];
       pendingReasoningContentBlocks.splice(0, pendingReasoningContentBlocks.length);
       pendingAssistantSnapshot = null;
+      localCommandTranscriptPromptIds.clear();
       continue;
     }
     if (inBackgroundTask) {
@@ -290,8 +295,9 @@ export function extractClaudeCodeIntermediateContent(
 
 function consumeEvent(state: ParserState, event: JsonObject, turnId: string): void {
   rememberSessionId(state, event, turnId);
+  rememberLocalCommandTranscriptPromptId(state.localCommandTranscriptPromptIds, event);
 
-  if (isCallerUserTurn(event)) {
+  if (isCallerUserTurn(event, state.localCommandTranscriptPromptIds)) {
     state.callerUserTurnCount += 1;
     if (state.callerUserTurnCount > 1) {
       throw new OpenPError(`multiple caller user-turn boundaries for turn ${turnId}`, EXIT_CODES.protocolViolation);
@@ -315,6 +321,7 @@ function consumeEvent(state: ParserState, event: JsonObject, turnId: string): vo
     state.activeTextSinceBackgroundStart = false;
     state.requestId = null;
     state.assistantEvents = [];
+    state.localCommandTranscriptPromptIds.clear();
     return;
   }
 
@@ -664,7 +671,7 @@ function isTaskNotification(event: JsonObject): boolean {
   return origin?.kind === 'task-notification';
 }
 
-function isCallerUserTurn(event: JsonObject): boolean {
+function isCallerUserTurn(event: JsonObject, localCommandTranscriptPromptIds: ReadonlySet<string>): boolean {
   if (event.type !== 'user') {
     return false;
   }
@@ -674,10 +681,16 @@ function isCallerUserTurn(event: JsonObject): boolean {
   if (event.isMeta === true) {
     return false;
   }
+  // The context-compaction continuation message (`isCompactSummary: true`) is a `type:user` event Claude
+  // injects after a `/compact`; it is not a caller prompt. Without this, a compaction inside a turn's scoped
+  // segment is miscounted as an extra caller user turn (exit 40 "multiple caller user-turn boundaries").
+  if (event.isCompactSummary === true) {
+    return false;
+  }
   if (userEventHasToolResult(event)) {
     return false;
   }
-  if (isLocalCommandTranscriptEvent(event)) {
+  if (isLocalCommandTranscriptEvent(event, localCommandTranscriptPromptIds)) {
     return false;
   }
   return true;
@@ -689,7 +702,40 @@ function userEventHasToolResult(event: JsonObject): boolean {
   return content.some((block) => asObject(block)?.type === 'tool_result');
 }
 
-function isLocalCommandTranscriptEvent(event: JsonObject): boolean {
+function isLocalCommandTranscriptEvent(
+  event: JsonObject,
+  localCommandTranscriptPromptIds: ReadonlySet<string>,
+): boolean {
+  const texts = collectUserText(event);
+  if (texts.length !== 1) {
+    return false;
+  }
+  if (texts[0] === '/exit') {
+    return true;
+  }
+  const promptId = stringOrNull(event.promptId);
+  return promptId !== null &&
+    localCommandTranscriptPromptIds.has(promptId) &&
+    isLocalCommandTranscriptText(texts[0]!);
+}
+
+function rememberLocalCommandTranscriptPromptId(promptIds: Set<string>, event: JsonObject): void {
+  if (event.type !== 'user' || event.isMeta !== true) {
+    return;
+  }
+  const promptId = stringOrNull(event.promptId);
+  if (promptId === null || !isLocalCommandCaveatEvent(event)) {
+    return;
+  }
+  promptIds.add(promptId);
+}
+
+function isLocalCommandCaveatEvent(event: JsonObject): boolean {
+  const texts = collectUserText(event);
+  return texts.length === 1 && texts[0]!.startsWith('<local-command-caveat>');
+}
+
+function collectUserText(event: JsonObject): string[] {
   const message = asObject(event.message);
   const content = Array.isArray(message?.content) ? message.content : [];
   const textBlocks = content
@@ -708,7 +754,16 @@ function isLocalCommandTranscriptEvent(event: JsonObject): boolean {
   if (textBlocks.length === 0 && typeof message?.content === 'string') {
     textBlocks.push(message.content.trim());
   }
-  return textBlocks.length === 1 && textBlocks[0] === '/exit';
+  return textBlocks;
+}
+
+// A Claude Code local-command transcript (e.g. `/exit`, `/compact`) is a `type:user` event written when a
+// local slash command runs; it is not a caller prompt. Bare `/exit` plus the tagged transcript forms
+// (`<command-name>…`, `<local-command-stdout>…`, `<local-command-stderr>…`) all count.
+const LOCAL_COMMAND_TRANSCRIPT_PREFIXES = ['<command-name>', '<local-command-stdout>', '<local-command-stderr>'];
+
+export function isLocalCommandTranscriptText(text: string): boolean {
+  return text === '/exit' || LOCAL_COMMAND_TRANSCRIPT_PREFIXES.some((prefix) => text.startsWith(prefix));
 }
 
 function isBackgroundTaskEnd(event: JsonObject): boolean {

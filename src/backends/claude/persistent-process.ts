@@ -15,10 +15,16 @@ import type { LaunchSignature } from '../../core/worker-types.js';
 import type { PtyProvider, PtySession } from '../../runners/types.js';
 import { rejectStructuredClaudeCodeBackendArgs } from './args-validation.js';
 import { ClaudeCodeBackgroundRouter, isClaudeCodeTaskNotificationLine } from './background-parser.js';
-import { readinessTimeoutMs, waitForClaudeCodeInputReady } from './interactive.js';
+import {
+  isClaudeCodeEmptyInputPromptLine,
+  isClaudeCodeInputPromptLine,
+  readinessTimeoutMs,
+  waitForClaudeCodeInputReady,
+} from './interactive.js';
 import {
   findClaudeCodeSessionLog,
   getFileSize,
+  isMissingCallerAfterLocalCommandError,
   readNewText,
   resolveClaudeCodeSessionLogPath,
   snapshotClaudeCodeSessionLogPaths,
@@ -28,7 +34,14 @@ import { resolveInteractivePermissionMode } from './permission-mode.js';
 import { isPublishableIntermediateText } from './screen-monitor.js';
 import { withThinkingSummariesSettings } from './settings.js';
 import { buildClaudeToolsArgs } from './tools.js';
+import {
+  appendClaudeCodePtySuppressionArgs,
+  withClaudeCodeBackgroundSuppressionEnv,
+} from './launch-safety.js';
 import { assertClaudeCodeBin } from './bin.js';
+import { createClaudeSessionLogIdleDebugLogger } from './diagnostics.js';
+
+const PRE_CALLER_LOCAL_COMMAND_PROMPT_RETRY_LIMIT = 1;
 
 export interface StartPersistentClaudeCodeProcessOptions extends ProcessStartRequest {
   readonly cwd: string;
@@ -38,6 +51,7 @@ export interface StartPersistentClaudeCodeProcessOptions extends ProcessStartReq
 
 export interface PersistentClaudeCodeTurnOptions {
   readonly timeoutMs: number;
+  readonly debugLog?: string | null;
   readonly jsonSchema?: string | null;
   readonly paceIntermediateEvents?: boolean;
   readonly signal?: AbortSignal;
@@ -147,54 +161,100 @@ export class PersistentClaudeCodeProcess implements ManagedBackendProcess {
         },
         getInterruptedDraft: () => this.lastIntermediateReasoningText ?? this.lastIntermediateText,
         operation: async () => {
-          await waitForClaudeCodeInputReady(this.pty, readinessTimeoutMs(options.timeoutMs));
-          this.sessionLogPath = this.nativeSessionId
-            ? await findClaudeCodeSessionLog(this.nativeSessionId, this.cwd) ?? this.sessionLogPath
-            : this.sessionLogPath;
-          const initialOffset = await getFileSize(this.sessionLogPath ?? this.expectedLogPath);
-          await this.pty.write(prompt);
-          await sleep(150);
-          await this.pty.submit();
-          const result = await waitForClaudeCodeTurnResult({
-            sessionId: this.nativeSessionId,
-            turnId: request.turnId,
-            timeoutMs: options.timeoutMs,
-            initialOffset,
-            knownLogPath: this.sessionLogPath,
-            expectedLogPath: this.expectedLogPath,
-            cwd: this.cwd,
-            discoveryStartedAtMs: this.discoveryStartedAtMs,
-            excludedLogPaths: this.excludedLogPaths,
-            paceIntermediateEvents: options.paceIntermediateEvents === true,
-            structuredOutputRequested: request.jsonSchema !== null && request.jsonSchema !== undefined,
-            structuredOutputJsonSchema: request.jsonSchema,
-            isBackendAlive: () => this.pty.isAlive(),
-            onIntermediateText: (text) => {
-              publishJsonlIntermediateText(text);
-            },
-            onIntermediateReasoning: (text, source, contentBlocks) => {
-              this.lastIntermediateReasoningText = text;
-              options.onIntermediateReasoning?.(text, source, contentBlocks);
-            },
-            onIntermediateAssistantSnapshot: options.onIntermediateAssistantSnapshot,
-            onTimeout: () => {
-              interrupter.requestGracefulStop();
-            },
-          });
-          if (result.sessionId) {
-            if (this.nativeSessionId && result.sessionId !== this.nativeSessionId) {
-              throw new OpenPError('Claude Code returned a different session id for resume turn', EXIT_CODES.protocolViolation);
+          const turnDeadlineMs = options.timeoutMs === 0 ? null : Date.now() + options.timeoutMs;
+          let retryLogPath: string | null = null;
+          let retryInitialOffset: number | null = null;
+          for (let attempt = 0; ; attempt += 1) {
+            const readinessAttemptTimeoutMs = remainingTurnTimeoutMs(
+              turnDeadlineMs,
+              request.turnId,
+              () => {
+                interrupter.requestGracefulStop();
+              },
+            );
+            await waitForClaudeCodeInputReady(this.pty, readinessTimeoutMs(readinessAttemptTimeoutMs));
+            if (!this.nativeSessionId && retryLogPath) {
+              this.sessionLogPath = retryLogPath;
             }
-            this.nativeSessionId = result.sessionId;
-            this.sessionId = result.sessionId;
+            this.sessionLogPath = this.nativeSessionId
+              ? await findClaudeCodeSessionLog(this.nativeSessionId, this.cwd) ?? this.sessionLogPath
+              : this.sessionLogPath;
+            const initialOffset = retryInitialOffset !== null &&
+              retryLogPath !== null &&
+              this.sessionLogPath === retryLogPath
+              ? retryInitialOffset
+              : await getFileSize(this.sessionLogPath ?? this.expectedLogPath);
+            await submitPromptForAttempt(this.pty, prompt, attempt);
+            const waitAttemptTimeoutMs = remainingTurnTimeoutMs(
+              turnDeadlineMs,
+              request.turnId,
+              () => {
+                interrupter.requestGracefulStop();
+              },
+            );
+            try {
+              const result = await waitForClaudeCodeTurnResult({
+                sessionId: this.nativeSessionId,
+                turnId: request.turnId,
+                timeoutMs: waitAttemptTimeoutMs,
+                initialOffset,
+                knownLogPath: this.sessionLogPath,
+                expectedLogPath: this.expectedLogPath,
+                cwd: this.cwd,
+                discoveryStartedAtMs: this.discoveryStartedAtMs,
+                excludedLogPaths: this.excludedLogPaths,
+                paceIntermediateEvents: options.paceIntermediateEvents === true,
+                structuredOutputRequested: request.jsonSchema !== null && request.jsonSchema !== undefined,
+                structuredOutputJsonSchema: request.jsonSchema,
+                isBackendAlive: () => this.pty.isAlive(),
+                onIntermediateText: (text) => {
+                  publishJsonlIntermediateText(text);
+                },
+                onIntermediateReasoning: (text, source, contentBlocks) => {
+                  this.lastIntermediateReasoningText = text;
+                  options.onIntermediateReasoning?.(text, source, contentBlocks);
+                },
+                onIntermediateAssistantSnapshot: options.onIntermediateAssistantSnapshot,
+                onSessionLogIdle: createClaudeSessionLogIdleDebugLogger({
+                  debugLog: options.debugLog ?? null,
+                  backendSessionId: this.sessionId,
+                  nativeSessionId: this.nativeSessionId,
+                  ptySessionId: this.pty.id,
+                }),
+                onTimeout: () => {
+                  interrupter.requestGracefulStop();
+                },
+              });
+              if (result.sessionId) {
+                if (this.nativeSessionId && result.sessionId !== this.nativeSessionId) {
+                  throw new OpenPError('Claude Code returned a different session id for resume turn', EXIT_CODES.protocolViolation);
+                }
+                this.nativeSessionId = result.sessionId;
+                this.sessionId = result.sessionId;
+              }
+              this.sessionLogPath = this.nativeSessionId
+                ? await findClaudeCodeSessionLog(this.nativeSessionId, this.cwd) ?? this.sessionLogPath
+                : this.sessionLogPath;
+              this.lastIntermediateText = null;
+              this.lastIntermediateReasoningText = null;
+              this.lastCompletedBackgroundCallback = turnBackgroundCallback;
+              return result;
+            } catch (error) {
+              if (
+                !isMissingCallerAfterLocalCommandError(error) ||
+                attempt >= PRE_CALLER_LOCAL_COMMAND_PROMPT_RETRY_LIMIT
+              ) {
+                throw error;
+              }
+              lastPublishedJsonlIntermediate = null;
+              this.lastIntermediateText = null;
+              this.lastIntermediateReasoningText = null;
+              if (!this.nativeSessionId && error.logPath) {
+                retryLogPath = error.logPath;
+                retryInitialOffset = error.nextOffset;
+              }
+            }
           }
-          this.sessionLogPath = this.nativeSessionId
-            ? await findClaudeCodeSessionLog(this.nativeSessionId, this.cwd) ?? this.sessionLogPath
-            : this.sessionLogPath;
-          this.lastIntermediateText = null;
-          this.lastIntermediateReasoningText = null;
-          this.lastCompletedBackgroundCallback = turnBackgroundCallback;
-          return result;
         },
       });
     } catch (error) {
@@ -283,8 +343,9 @@ export class PersistentClaudeCodeProcess implements ManagedBackendProcess {
 export async function startPersistentClaudeCodeProcess(
   options: StartPersistentClaudeCodeProcessOptions,
 ): Promise<PersistentClaudeCodeProcess> {
+  const env = withClaudeCodeBackgroundSuppressionEnv(options.launchSignature.env);
   await assertClaudeCodeBin(options.launchSignature.bin, {
-    env: options.launchSignature.env,
+    env,
     isolateAnthropicEnv: options.launchSignature.local,
     cwd: options.cwd,
   });
@@ -295,11 +356,11 @@ export async function startPersistentClaudeCodeProcess(
   const excludedLogPaths = nativeSessionId ? undefined : await snapshotClaudeCodeSessionLogPaths(options.cwd);
   const discoveryStartedAtMs = nativeSessionId ? null : Date.now() - 1000;
   const args = buildPersistentClaudeCodeArgs(options);
-  const sessionName = `openp-${options.sessionId.replaceAll('-', '').slice(0, 12)}-${randomUUID().replaceAll('-', '').slice(0, 8)}`;
+  const sessionName = `openp-${options.sessionId.replaceAll('-', '')}-${randomUUID().replaceAll('-', '').slice(0, 8)}`;
   const pty = await options.provider.start(options.launchSignature.bin, args, {
     cwd: options.cwd,
     sessionName,
-    env: options.launchSignature.env,
+    env,
     isolateAnthropicEnv: options.launchSignature.local,
   });
   const process = new PersistentClaudeCodeProcess(
@@ -358,6 +419,7 @@ export function buildPersistentClaudeCodeArgs(options: {
   if (options.launchSignature.jsonSchema) {
     args.push('--json-schema', options.launchSignature.jsonSchema);
   }
+  appendClaudeCodePtySuppressionArgs(args);
   args.push(...withThinkingSummariesSettings(
     [...buildClaudeToolsArgs(options.launchSignature.tools), ...binArgs, ...extraArgs],
     options.cwd,
@@ -375,6 +437,35 @@ function buildTurnRequest(prompt: string, jsonSchema: string | null): TurnReques
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function remainingTurnTimeoutMs(
+  deadlineMs: number | null,
+  turnId: string,
+  onTimeout: () => void,
+): number {
+  if (deadlineMs === null) {
+    return 0;
+  }
+  const remainingMs = deadlineMs - Date.now();
+  if (remainingMs <= 0) {
+    onTimeout();
+    throw new OpenPError(`timed out waiting for turn ${turnId}`, EXIT_CODES.timeout);
+  }
+  return remainingMs;
+}
+
+async function submitPromptForAttempt(pty: PtySession, prompt: string, attempt: number): Promise<void> {
+  const cursorLine = await pty.captureCursorLine().catch(() => null);
+  const reuseExistingDraft = attempt > 0 &&
+    cursorLine !== null &&
+    isClaudeCodeInputPromptLine(cursorLine) &&
+    !isClaudeCodeEmptyInputPromptLine(cursorLine);
+  if (!reuseExistingDraft) {
+    await pty.write(prompt);
+    await sleep(150);
+  }
+  await pty.submit();
 }
 
 async function forcePtyStopWithEscalation(

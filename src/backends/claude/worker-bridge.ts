@@ -16,6 +16,7 @@ import {
   startPersistentClaudeCodeProcess,
 } from './persistent-process.js';
 import { resolveClaudeCodeBin } from './bin.js';
+import { withClaudeCodeBackgroundSuppressionEnv } from './launch-safety.js';
 
 export interface ClaudeCodeManagedProcess extends ManagedBackendProcess {
   sendTurn(prompt: string, options: PersistentClaudeCodeTurnOptions): Promise<TurnResult>;
@@ -58,7 +59,7 @@ export class ClaudeCodeWorkerBridge implements BackendWorkerBridge {
       executionMode: request.executionMode ?? null,
       tools: request.tools ?? null,
       jsonSchema: request.jsonSchema ?? null,
-      env: request.env ?? {},
+      env: withClaudeCodeBackgroundSuppressionEnv(request.env ?? {}),
       local: request.local ?? false,
     });
 
@@ -78,6 +79,7 @@ export class ClaudeCodeWorkerBridge implements BackendWorkerBridge {
       try {
         const result = await process.sendTurn(preparedInput.prompt, {
           timeoutMs: request.timeoutMs ?? 0,
+          debugLog: request.debugLog ?? null,
           signal: request.signal,
           forceSignal: request.forceSignal,
           killSignal: request.killSignal,
@@ -95,7 +97,7 @@ export class ClaudeCodeWorkerBridge implements BackendWorkerBridge {
               }
             : undefined,
           onIntermediateAssistantSnapshot: request.onIntermediateAssistantSnapshot,
-          onBackgroundAssistantText: request.onBackgroundAssistantText,
+          onBackgroundAssistantText: undefined,
         });
         const resultSessionId = result.sessionId ?? (preparedInput.isFirstTurn ? null : backendSessionId);
         if (!resultSessionId) {

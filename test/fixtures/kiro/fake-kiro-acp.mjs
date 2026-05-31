@@ -38,6 +38,15 @@ process.on('SIGINT', () => {
 
 process.on('SIGTERM', () => {
   logSignal('SIGTERM');
+  if (behavior === 'error-after-terminate' && pendingPromptId !== null) {
+    send({
+      jsonrpc: '2.0',
+      id: pendingPromptId,
+      error: { code: -32000, message: 'terminated by fake backend' },
+    });
+    pendingPromptId = null;
+    return;
+  }
   if (behavior !== 'ignore-interrupt') {
     process.exit(143);
   }
@@ -174,7 +183,7 @@ for await (const line of input) {
       });
       continue;
     }
-    if (behavior === 'error-after-interrupt') {
+    if (behavior === 'error-after-interrupt' || behavior === 'error-after-terminate') {
       pendingPromptId = message.id;
       setInterval(() => undefined, 1000);
       continue;

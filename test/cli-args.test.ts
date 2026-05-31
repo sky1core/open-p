@@ -204,14 +204,6 @@ test('parses structured output formats explicitly', () => {
   assert.deepEqual(streamOptions.backendArgs, []);
 });
 
-test('parses deprecated include partial messages alias as streaming', () => {
-  const streamOptions = parseCliArgs(['--output-format', 'stream-json', '--include-partial-messages', 'hello']);
-
-  assert.equal(streamOptions.outputFormat, 'stream-json');
-  assert.equal(streamOptions.streaming, true);
-  assert.equal(streamOptions.promptArg, 'hello');
-});
-
 test('parses streaming together with structured output because streaming and result are separate', () => {
   const schema = '{"type":"object"}';
   const options = parseCliArgs(['--output-format', 'stream-json', '--streaming', '--json-schema', schema, 'hello']);
@@ -243,7 +235,7 @@ test('rejects malformed json schema before launching backend', () => {
   );
   assert.throws(
     () => parseCliArgs(['--include-partial-messages', 'hello']),
-    /--streaming requires --output-format stream-json/,
+    /unsupported option: --include-partial-messages/,
   );
 });
 

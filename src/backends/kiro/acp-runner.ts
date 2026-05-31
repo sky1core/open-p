@@ -3,7 +3,7 @@ import { createInterface, type Interface } from 'node:readline';
 
 import { createAbortError } from '../../core/abort.js';
 import { EXIT_CODES, OpenPError } from '../../core/errors.js';
-import { GracefulInterrupt, shouldTerminateOnAbort } from '../../core/graceful-interrupt.js';
+import { DEFAULT_TERMINATE_GRACE_MS, GracefulInterrupt, shouldTerminateOnAbort } from '../../core/graceful-interrupt.js';
 import { isSafeSessionId } from '../../core/session-id.js';
 import type { AssistantEventSnapshot } from '../../core/types.js';
 import { getOpenPVersion } from '../../core/version.js';
@@ -80,6 +80,8 @@ class KiroAcpClient {
   private fatalReject: ((error: unknown) => void) | null = null;
   private readonly fatalPromise: Promise<never>;
   private stderr = '';
+  private sentTerminationSignal = false;
+  private terminationSignalSentAtMs: number | null = null;
   private rawEventCount = 0;
   private intermediateTextCount = 0;
   private resolvedSessionId: string | null = null;
@@ -220,12 +222,14 @@ class KiroAcpClient {
         resolve();
       };
       child.once('close', done);
-      this.terminate('SIGTERM');
+      if (!this.sentTerminationSignal) {
+        this.terminate('SIGTERM');
+      }
       this.shutdownForceKillTimer = setTimeout(() => {
         if (child.exitCode === null && child.signalCode === null) {
           this.terminate('SIGKILL');
         }
-      }, 1000);
+      }, this.remainingTerminateGraceMs());
     });
   }
 
@@ -347,12 +351,28 @@ class KiroAcpClient {
     if (child.pid) {
       try {
         process.kill(-child.pid, signal);
+        if (signal !== 'SIGINT') {
+          this.sentTerminationSignal = true;
+          this.terminationSignalSentAtMs ??= Date.now();
+        }
         return;
       } catch {
         // fall through to direct child signal
       }
     }
     child.kill(signal);
+    if (signal !== 'SIGINT') {
+      this.sentTerminationSignal = true;
+      this.terminationSignalSentAtMs ??= Date.now();
+    }
+  }
+
+  private remainingTerminateGraceMs(): number {
+    const terminateGraceMs = this.options.terminateGraceMs ?? DEFAULT_TERMINATE_GRACE_MS;
+    if (this.terminationSignalSentAtMs === null) {
+      return terminateGraceMs;
+    }
+    return Math.max(0, terminateGraceMs - (Date.now() - this.terminationSignalSentAtMs));
   }
 
   private throwIfInterruptedOrTimedOut(): void {

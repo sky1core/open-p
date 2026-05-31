@@ -20,7 +20,8 @@ export async function waitForClaudeCodeInputReady(pty: PtySession, timeoutMs: nu
       }
       throw new OpenPError(`Claude Code is still waiting for workspace trust after confirmation.${formatReadinessScreen(lastScreenText)}`, EXIT_CODES.backendStartFailed);
     }
-    if (isClaudeCodeInputPromptVisible(text)) {
+    const cursorLine = await pty.captureCursorLine().catch(() => '');
+    if (isClaudeCodeInputPromptLine(cursorLine)) {
       await sleep(300);
       return;
     }
@@ -37,15 +38,23 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function isClaudeCodeInputPromptVisible(screenText: string): boolean {
-  const recentLines = screenText
+export async function isClaudeCodeInputReady(pty: Pick<PtySession, 'captureCursorLine'>): Promise<boolean> {
+  return isClaudeCodeInputPromptLine(await pty.captureCursorLine().catch(() => ''));
+}
+
+export function isClaudeCodeInputPromptLine(line: string): boolean {
+  const cleanLine = cleanClaudeCodeInputLine(line);
+  return /^❯(?:\s|$)/u.test(cleanLine);
+}
+
+export function isClaudeCodeEmptyInputPromptLine(line: string): boolean {
+  return /^❯\s*$/u.test(cleanClaudeCodeInputLine(line));
+}
+
+function cleanClaudeCodeInputLine(line: string): string {
+  return line
     .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, '')
-    .replace(/\r\n/g, '\n')
-    .split('\n')
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0)
-    .slice(-8);
-  return recentLines.some((line) => /^❯(?:\s|$)/u.test(line));
+    .trimStart();
 }
 
 function formatReadinessScreen(screenText: string): string {

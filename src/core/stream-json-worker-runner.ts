@@ -200,6 +200,7 @@ async function runStreamJsonWorkerLinesWithLock(input: {
         tools: input.options.tools,
         jsonSchema: input.options.jsonSchema,
         timeoutMs: input.options.timeoutMs,
+        debugLog: input.options.debugLog,
         paceIntermediateEvents: input.options.streaming,
         contextWindow: input.outputMetadata.contextWindow,
         signal: input.signal,

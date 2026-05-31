@@ -6,12 +6,18 @@ import { SessionLockStore } from '../../core/session-lock.js';
 import { SessionStateStore, validateSessionStateCompatibility } from '../../core/session-state.js';
 import type { Backend } from '../../core/backend.js';
 import type { BackendRunOptions, TurnRequest, TurnResult } from '../../core/types.js';
-import type { PtyProvider } from '../../runners/types.js';
-import { readinessTimeoutMs, waitForClaudeCodeInputReady } from './interactive.js';
+import type { PtyProvider, PtySession } from '../../runners/types.js';
+import {
+  isClaudeCodeEmptyInputPromptLine,
+  isClaudeCodeInputPromptLine,
+  readinessTimeoutMs,
+  waitForClaudeCodeInputReady,
+} from './interactive.js';
 import { rejectStructuredClaudeCodeBackendArgs } from './args-validation.js';
 import {
   findClaudeCodeSessionLog,
   getFileSize,
+  isMissingCallerAfterLocalCommandError,
   resolveClaudeCodeSessionLogPath,
   snapshotClaudeCodeSessionLogPaths,
   waitForClaudeCodeTurnResult,
@@ -21,6 +27,23 @@ import { resolveInteractivePermissionMode } from './permission-mode.js';
 import { isPublishableIntermediateText } from './screen-monitor.js';
 import { withThinkingSummariesSettings } from './settings.js';
 import { buildClaudeToolsArgs } from './tools.js';
+import {
+  appendClaudeCodePtySuppressionArgs,
+  CLAUDE_CODE_BACKGROUND_SUPPRESSION_ENV,
+} from './launch-safety.js';
+import { createClaudeSessionLogIdleDebugLogger } from './diagnostics.js';
+
+// The non-interactive PTY turn cannot survive tools that outlive the synchronous turn or that block on
+// interactive input. openp launches Claude with these suppressed (official contract — see
+// src/backends/claude/SPEC.md "Background Suppression"):
+// - env CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 removes `run_in_background` / auto-backgrounding.
+// - --disallowedTools removes `Monitor`/`Workflow` (background work that outlives the turn) and
+//   `AskUserQuestion` (renders a blocking multiple-choice menu the PTY cannot answer → the turn hangs;
+//   with it disallowed the model asks via plain answer text instead).
+// The disable levers are live-verified
+// (.agents/references/ad-hoc/20260530-pty-kickoff-monitor-turn-lifecycle/observations.md §11).
+
+const PRE_CALLER_LOCAL_COMMAND_PROMPT_RETRY_LIMIT = 1;
 
 export class ClaudeCodeBackend implements Backend {
   constructor(private readonly provider: PtyProvider) {}
@@ -67,10 +90,13 @@ export class ClaudeCodeBackend implements Backend {
     const excludedLogPaths = nativeSessionId ? undefined : await snapshotClaudeCodeSessionLogPaths(options.cwd);
     const discoveryStartedAtMs = nativeSessionId ? null : Date.now() - 1000;
     const args = buildClaudeCodeArgs(options);
-    const sessionName = `openp-${options.backendSessionId.replaceAll('-', '').slice(0, 12)}-${randomUUID().replaceAll('-', '').slice(0, 8)}`;
+    // Use the FULL normalized backend session id (not a 12-char prefix) so the reaper's
+    // `openp-<sessionId>-` prefix is unique per session and matches the full-id per-session lock.
+    const sessionName = `openp-${options.backendSessionId.replaceAll('-', '')}-${randomUUID().replaceAll('-', '').slice(0, 8)}`;
     const pty = await this.provider.start(claudeCodeBin, args, {
       cwd: options.cwd,
       sessionName,
+      env: CLAUDE_CODE_BACKGROUND_SUPPRESSION_ENV,
     });
 
     let primaryError: unknown = null;
@@ -114,52 +140,92 @@ export class ClaudeCodeBackend implements Backend {
           interrupter.requestGracefulStop();
         },
         operation: async () => {
-          await waitForClaudeCodeInputReady(pty, readinessTimeoutMs(options.timeoutMs));
-          const activeLogPath = nativeSessionId
-            ? await findClaudeCodeSessionLog(nativeSessionId, options.cwd) ?? existingLogPath
-            : existingLogPath;
-          const initialOffset = await getFileSize(activeLogPath ?? expectedLogPath);
-          let lastPublishedIntermediate: string | null = null;
-          const publishIntermediateText = (text: string): void => {
-            if (!shouldPublishIntermediateText(text, lastPublishedIntermediate)) {
-              return;
+          const turnDeadlineMs = options.timeoutMs === 0 ? null : Date.now() + options.timeoutMs;
+          let retryLogPath: string | null = null;
+          let retryInitialOffset: number | null = null;
+          for (let attempt = 0; ; attempt += 1) {
+            const readinessAttemptTimeoutMs = remainingTurnTimeoutMs(
+              turnDeadlineMs,
+              request.turnId,
+              () => {
+                interrupter.requestGracefulStop();
+              },
+            );
+            await waitForClaudeCodeInputReady(pty, readinessTimeoutMs(readinessAttemptTimeoutMs));
+            const activeLogPath = nativeSessionId
+              ? await findClaudeCodeSessionLog(nativeSessionId, options.cwd) ?? existingLogPath
+              : retryLogPath ?? existingLogPath;
+            const initialOffset = retryInitialOffset !== null &&
+              retryLogPath !== null &&
+              activeLogPath === retryLogPath
+              ? retryInitialOffset
+              : await getFileSize(activeLogPath ?? expectedLogPath);
+            let lastPublishedIntermediate: string | null = null;
+            const publishIntermediateText = (text: string): void => {
+              if (!shouldPublishIntermediateText(text, lastPublishedIntermediate)) {
+                return;
+              }
+              lastPublishedIntermediate = text;
+              options.onIntermediateText!(text, 'jsonl');
+            };
+            await submitPromptForAttempt(pty, request.prompt, attempt);
+            const waitAttemptTimeoutMs = remainingTurnTimeoutMs(
+              turnDeadlineMs,
+              request.turnId,
+              () => {
+                interrupter.requestGracefulStop();
+              },
+            );
+            try {
+              const result = await waitForClaudeCodeTurnResult({
+                sessionId: nativeSessionId,
+                turnId: request.turnId,
+                timeoutMs: waitAttemptTimeoutMs,
+                initialOffset,
+                knownLogPath: activeLogPath,
+                expectedLogPath,
+                cwd: options.cwd,
+                discoveryStartedAtMs,
+                excludedLogPaths,
+                paceIntermediateEvents: options.paceIntermediateEvents === true,
+                structuredOutputRequested: request.jsonSchema !== null && request.jsonSchema !== undefined,
+                structuredOutputJsonSchema: request.jsonSchema,
+                isBackendAlive: () => pty.isAlive(),
+                onIntermediateText: options.onIntermediateText
+                  ? (text) => {
+                      publishIntermediateText(text);
+                    }
+                  : undefined,
+                onIntermediateReasoning: options.onIntermediateReasoning
+                  ? (text, source, contentBlocks) => {
+                      options.onIntermediateReasoning!(text, source, contentBlocks);
+                    }
+                  : undefined,
+                onIntermediateAssistantSnapshot: options.onIntermediateAssistantSnapshot,
+                onSessionLogIdle: createClaudeSessionLogIdleDebugLogger({
+                  debugLog: options.debugLog,
+                  backendSessionId: options.backendSessionId,
+                  nativeSessionId,
+                  ptySessionId: pty.id,
+                }),
+                onTimeout: () => {
+                  interrupter.requestGracefulStop();
+                },
+              });
+              return result;
+            } catch (error) {
+              if (
+                !isMissingCallerAfterLocalCommandError(error) ||
+                attempt >= PRE_CALLER_LOCAL_COMMAND_PROMPT_RETRY_LIMIT
+              ) {
+                throw error;
+              }
+              if (nativeSessionId === null && error.logPath) {
+                retryLogPath = error.logPath;
+                retryInitialOffset = error.nextOffset;
+              }
             }
-            lastPublishedIntermediate = text;
-            options.onIntermediateText!(text, 'jsonl');
-          };
-          await pty.write(request.prompt);
-          await sleep(150);
-          await pty.submit();
-          const result = await waitForClaudeCodeTurnResult({
-            sessionId: nativeSessionId,
-            turnId: request.turnId,
-            timeoutMs: options.timeoutMs,
-            initialOffset,
-            knownLogPath: activeLogPath,
-            expectedLogPath,
-            cwd: options.cwd,
-            discoveryStartedAtMs,
-            excludedLogPaths,
-            paceIntermediateEvents: options.paceIntermediateEvents === true,
-            structuredOutputRequested: request.jsonSchema !== null && request.jsonSchema !== undefined,
-            structuredOutputJsonSchema: request.jsonSchema,
-            isBackendAlive: () => pty.isAlive(),
-            onIntermediateText: options.onIntermediateText
-              ? (text) => {
-                  publishIntermediateText(text);
-                }
-              : undefined,
-            onIntermediateReasoning: options.onIntermediateReasoning
-              ? (text, source, contentBlocks) => {
-                  options.onIntermediateReasoning!(text, source, contentBlocks);
-                }
-              : undefined,
-            onIntermediateAssistantSnapshot: options.onIntermediateAssistantSnapshot,
-            onTimeout: () => {
-              interrupter.requestGracefulStop();
-            },
-          });
-          return result;
+          }
         },
       });
       const resultSessionId = result.sessionId ?? (options.resume ? options.backendSessionId : null);
@@ -202,6 +268,35 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function remainingTurnTimeoutMs(
+  deadlineMs: number | null,
+  turnId: string,
+  onTimeout: () => void,
+): number {
+  if (deadlineMs === null) {
+    return 0;
+  }
+  const remainingMs = deadlineMs - Date.now();
+  if (remainingMs <= 0) {
+    onTimeout();
+    throw new OpenPError(`timed out waiting for turn ${turnId}`, EXIT_CODES.timeout);
+  }
+  return remainingMs;
+}
+
+async function submitPromptForAttempt(pty: PtySession, prompt: string, attempt: number): Promise<void> {
+  const cursorLine = await pty.captureCursorLine().catch(() => null);
+  const reuseExistingDraft = attempt > 0 &&
+    cursorLine !== null &&
+    isClaudeCodeInputPromptLine(cursorLine) &&
+    !isClaudeCodeEmptyInputPromptLine(cursorLine);
+  if (!reuseExistingDraft) {
+    await pty.write(prompt);
+    await sleep(150);
+  }
+  await pty.submit();
+}
+
 function shouldPublishIntermediateText(text: string, previousText: string | null): boolean {
   return isPublishableIntermediateText(text, previousText);
 }
@@ -230,6 +325,9 @@ export function buildClaudeCodeArgs(options: BackendRunOptions, extraArgs: reado
   if (options.jsonSchema) {
     args.push('--json-schema', options.jsonSchema);
   }
+  // Suppress tools that break the non-interactive PTY turn. The next emitted token is `--settings`
+  // (from withThinkingSummariesSettings), so the variadic `--disallowedTools` value list ends here.
+  appendClaudeCodePtySuppressionArgs(args);
   args.push(...withThinkingSummariesSettings(
     [...buildClaudeToolsArgs(options.tools), ...options.backendArgs, ...extraArgs],
     options.cwd,

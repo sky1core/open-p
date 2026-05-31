@@ -626,6 +626,38 @@ test('runKiroAcp treats SIGTERM abort reason as terminate phase, not graceful SI
   assert.deepEqual(await readSignalLog(signalLog), ['SIGTERM']);
 });
 
+test('runKiroAcp does not send duplicate SIGTERM when terminate abort rejects before child closes', async () => {
+  const ac = new AbortController();
+  const signalLog = await tempSignalLog();
+  const rpcLog = await tempSignalLog();
+
+  const running = runKiroAcp({
+    bin: FIXTURE,
+    args: ['acp'],
+    cwd: process.cwd(),
+    prompt: 'hello',
+    sessionId: null,
+    isFirstTurn: true,
+    timeoutMs: 30000,
+    trustAllTools: false,
+    env: {
+      ...env('error-after-terminate'),
+      OPENP_FAKE_KIRO_SIGNAL_LOG: signalLog,
+      OPENP_FAKE_KIRO_RPC_LOG: rpcLog,
+    },
+    signal: ac.signal,
+    terminateGraceMs: 50,
+  });
+
+  await waitForRpcMethod(rpcLog, 'session/prompt');
+  const startedAt = Date.now();
+  ac.abort('SIGTERM');
+
+  await assert.rejects(running, isAbortError);
+  assert.ok(Date.now() - startedAt < 500);
+  assert.deepEqual(await readSignalLog(signalLog), ['SIGTERM']);
+});
+
 test('runKiroAcp repeated abort signal escalates before interrupt grace expires', async () => {
   const ac = new AbortController();
   const force = new AbortController();

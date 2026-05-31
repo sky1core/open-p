@@ -114,9 +114,10 @@ test('stream-json worker uses open-p WorkerBridge instead of forwarding backend 
   const bridge = new FakeBridge();
   const output: string[] = [];
   const state = await stateContext('/work/open-p');
+  const debugLogPath = join(await mkdtemp(join(tmpdir(), 'openp-debug-')), 'debug.jsonl');
 
   const code = await runStreamJsonWorkerLines({
-    options: options(),
+    options: options({ debugLog: debugLogPath }),
     lines: lines([
       userEvent('turn-a', 'first prompt'),
       userEvent('turn-b', 'second prompt'),
@@ -136,6 +137,8 @@ test('stream-json worker uses open-p WorkerBridge instead of forwarding backend 
   assert.equal(bridge.requests[1]?.message, 'second prompt');
   assert.equal(bridge.requests[0]?.sessionId, null);
   assert.equal(bridge.requests[1]?.sessionId, SESSION_ID);
+  assert.equal(bridge.requests[0]?.debugLog, debugLogPath);
+  assert.equal(bridge.requests[1]?.debugLog, debugLogPath);
   assert.equal(bridge.requests[0]?.projectRoot, '/work/open-p');
   assert.equal(bridge.requests[0]?.contextWindow, 200000);
   assert.equal(bridge.requests[0]?.reasoningEffort, null);
@@ -1109,6 +1112,81 @@ test('stream-json worker emits backend-owned reasoning before answer when snapsh
   assert.deepEqual(streamingReasoningTexts(events), ['thinking']);
   assert.deepEqual(streamingAnswerTexts(events), ['answer']);
   assert.deepEqual(terminalAssistantTexts(events), ['answer']);
+});
+
+test('stream-json worker does not duplicate same-message split reasoning and answer snapshots in result', async () => {
+  const reasoningSnapshot: AssistantEventSnapshot = {
+    requestId: 'req_same_message',
+    message: {
+      type: 'message',
+      role: 'assistant',
+      id: 'msg_same_message',
+      model: 'claude-test',
+      content: [{ type: 'thinking', thinking: '지시를 검토한다.' }],
+      stop_reason: 'end_turn',
+      stop_sequence: null,
+      stop_details: null,
+      diagnostics: null,
+      context_management: null,
+    },
+  };
+  const answerSnapshot: AssistantEventSnapshot = {
+    requestId: 'req_same_message',
+    message: {
+      type: 'message',
+      role: 'assistant',
+      id: 'msg_same_message',
+      model: 'claude-test',
+      content: [{ type: 'text', text: '지시 기다린다.' }],
+      stop_reason: 'end_turn',
+      stop_sequence: null,
+      stop_details: null,
+      diagnostics: null,
+      context_management: null,
+    },
+  };
+  const bridge: StreamJsonWorkerBridge = {
+    async runTurn(request) {
+      request.onIntermediateAssistantSnapshot?.(reasoningSnapshot, 'jsonl');
+      request.onIntermediateAssistantSnapshot?.(answerSnapshot, 'jsonl');
+      return {
+        content: '지시 기다린다.',
+        reasoningContent: '지시를 검토한다.',
+        assistantEvents: [reasoningSnapshot, answerSnapshot],
+        sessionId: request.sessionId ?? SESSION_ID,
+        requestId: 'req_same_message',
+        diagnostics: {
+          numTurns: 1,
+          inputTokens: null,
+          outputTokens: null,
+          cacheReadInputTokens: null,
+          contextWindow: null,
+          lastSubturnContextTokens: null,
+          durationMs: null,
+          totalCostUsd: null,
+          stopReason: 'end_turn',
+          toolsUsed: [],
+          autoCompacted: null,
+          intermediateTextCount: 2,
+        },
+      };
+    },
+  };
+  const output: string[] = [];
+  const state = await stateContext('/work/open-p');
+
+  await runStreamJsonWorkerLines({
+    options: options({ streaming: true }),
+    lines: lines([userEvent('turn-a', 'stream prompt')]),
+    bridge,
+    ...state,
+    outputMetadata: metadata(),
+    write: (chunk) => output.push(chunk),
+  });
+
+  const terminalResult = terminalOpenP(parseEvents(output.join('')));
+  assert.deepEqual(resultAnswerTexts(terminalResult), ['지시 기다린다.']);
+  assert.deepEqual(resultReasoningTexts(terminalResult), ['지시를 검토한다.']);
 });
 
 test('stream-json worker emits backend-owned JSONL text before backend completion with streaming opt-in', async () => {

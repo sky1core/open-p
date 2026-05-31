@@ -63,7 +63,7 @@ test('help exposes public streaming and reasoning effort options', async () => {
   assert.match(result.stdout, /Backend selection is the first non-option positional argument/);
   assert.match(result.stdout, /Public options may appear before or after the backend/);
   assert.match(result.stdout, /--streaming/);
-  assert.match(result.stdout, /--include-partial-messages\s+Deprecated alias for --streaming/);
+  assert.doesNotMatch(result.stdout, /--include-partial-messages/);
   assert.match(result.stdout, /--effort <level>/);
   assert.match(result.stdout, /--tools <tools>/);
   assert.match(result.stdout, /--verbose/);

@@ -36,11 +36,13 @@ const THINKING_SUMMARIES_SETTINGS = '{"showThinkingSummaries":true}';
 test('builds Claude Code args without one-shot relay and with pass-through flags', () => {
   const args = buildClaudeCodeArgs(OPTIONS);
 
-  assert.deepEqual(args.slice(0, 10), [
+  assert.deepEqual(args.slice(0, 12), [
     '--model',
     'claude-haiku',
     '--permission-mode',
     'acceptEdits',
+    '--disallowedTools',
+    'Monitor,Workflow,AskUserQuestion',
     '--settings',
     THINKING_SUMMARIES_SETTINGS,
     '--allowedTools',
@@ -52,6 +54,15 @@ test('builds Claude Code args without one-shot relay and with pass-through flags
   assert.equal(args.includes('--print'), false);
   assert.equal(args.includes('--session-id'), false);
   assert.equal(args.includes('--append-system-prompt'), false);
+});
+
+test('builds Claude Code args with non-interactive PTY tool suppression: disallowed Monitor, Workflow, AskUserQuestion', () => {
+  const args = buildClaudeCodeArgs(OPTIONS);
+  const index = args.indexOf('--disallowedTools');
+  assert.notEqual(index, -1);
+  assert.equal(args[index + 1], 'Monitor,Workflow,AskUserQuestion');
+  // The value list ends at the next flag (--settings), so the variadic does not swallow other args.
+  assert.equal(args[index + 2], '--settings');
 });
 
 test('builds Claude Code args with public reasoning effort option', () => {
@@ -114,13 +125,15 @@ test('builds Claude Code args with json schema pass-through', () => {
     jsonSchema: schema,
   });
 
-  assert.deepEqual(args.slice(0, 8), [
+  assert.deepEqual(args.slice(0, 10), [
     '--model',
     'claude-haiku',
     '--permission-mode',
     'acceptEdits',
     '--json-schema',
     schema,
+    '--disallowedTools',
+    'Monitor,Workflow,AskUserQuestion',
     '--settings',
     THINKING_SUMMARIES_SETTINGS,
   ]);
@@ -148,9 +161,11 @@ test('maps plan permission mode with read-only tools to interactive-safe acceptE
     backendArgs: ['--tools', 'Read,Grep,Glob'],
   });
 
-  assert.deepEqual(args.slice(2, 8), [
+  assert.deepEqual(args.slice(2, 10), [
     '--permission-mode',
     'acceptEdits',
+    '--disallowedTools',
+    'Monitor,Workflow,AskUserQuestion',
     '--settings',
     THINKING_SUMMARIES_SETTINGS,
     '--tools',
@@ -165,9 +180,11 @@ test('preserves plan permission mode when write-capable tools may be available',
     backendArgs: ['--tools', 'Read,Bash'],
   });
 
-  assert.deepEqual(args.slice(2, 8), [
+  assert.deepEqual(args.slice(2, 10), [
     '--permission-mode',
     'plan',
+    '--disallowedTools',
+    'Monitor,Workflow,AskUserQuestion',
     '--settings',
     THINKING_SUMMARIES_SETTINGS,
     '--tools',
@@ -208,7 +225,7 @@ test('merges caller inline settings with thinking summaries for stream-json stre
   const settingsIndexes = args
     .map((arg, index) => arg === '--settings' ? index : -1)
     .filter((index) => index >= 0);
-  assert.deepEqual(settingsIndexes, [4]);
+  assert.deepEqual(settingsIndexes, [6]);
   assert.deepEqual(JSON.parse(args[settingsIndexes[0] + 1]!), {
     showThinkingSummaries: true,
     allowedTools: ['Read'],
@@ -228,7 +245,7 @@ test('merges caller settings file with thinking summaries', () => {
   });
 
   const settingsIndex = args.indexOf('--settings');
-  assert.equal(settingsIndex, 4);
+  assert.equal(settingsIndex, 6);
   const mergedSettingsPath = args[settingsIndex + 1]!;
   assert.equal(mergedSettingsPath.startsWith(tmpdir()), true);
   assert.equal(statSync(mergedSettingsPath).mode & 0o777, 0o600);
@@ -296,7 +313,7 @@ test('builds persistent Claude Code args from launch signature', () => {
     }),
   });
 
-  assert.deepEqual(args.slice(0, 18), [
+  assert.deepEqual(args.slice(0, 20), [
     '--resume',
     '11111111-1111-4111-8111-111111111111',
     '--verbose',
@@ -309,6 +326,8 @@ test('builds persistent Claude Code args from launch signature', () => {
     'bypassPermissions',
     '--json-schema',
     schema,
+    '--disallowedTools',
+    'Monitor,Workflow,AskUserQuestion',
     '--settings',
     THINKING_SUMMARIES_SETTINGS,
     '--tools',
@@ -375,7 +394,7 @@ test('persistent Claude Code args merge caller settings with thinking summaries'
   const settingsIndexes = args
     .map((arg, index) => arg === '--settings' ? index : -1)
     .filter((index) => index >= 0);
-  assert.deepEqual(settingsIndexes, [2]);
+  assert.deepEqual(settingsIndexes, [4]);
   assert.equal(args.includes('--session-id'), false);
   assert.deepEqual(JSON.parse(args[settingsIndexes[0] + 1]!), {
     showThinkingSummaries: true,
@@ -396,16 +415,18 @@ test('persistent Claude Code args map plan with read-only tools to interactive-s
     }),
   });
 
-  assert.deepEqual(args.slice(0, 7), [
+  assert.deepEqual(args.slice(0, 9), [
     '--verbose',
     '--brief',
     '--permission-mode',
     'acceptEdits',
+    '--disallowedTools',
+    'Monitor,Workflow,AskUserQuestion',
     '--settings',
     THINKING_SUMMARIES_SETTINGS,
     '--tools',
   ]);
-  assert.equal(args[7], 'Read,Grep,Glob');
+  assert.equal(args[9], 'Read,Grep,Glob');
 });
 
 test('persistent Claude Code args do not duplicate built-in compatibility flags', () => {
@@ -422,9 +443,11 @@ test('persistent Claude Code args do not duplicate built-in compatibility flags'
 
   assert.equal(args.filter((arg) => arg === '--brief').length, 1);
   assert.equal(args.filter((arg) => arg === '--verbose').length, 1);
-  assert.deepEqual(args.slice(0, 6), [
+  assert.deepEqual(args.slice(0, 8), [
     '--verbose',
     '--brief',
+    '--disallowedTools',
+    'Monitor,Workflow,AskUserQuestion',
     '--settings',
     THINKING_SUMMARIES_SETTINGS,
     '--allowedTools',

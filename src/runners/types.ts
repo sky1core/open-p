@@ -14,6 +14,7 @@ export interface PtySession {
   exit(): Promise<void>;
   isAlive(): Promise<boolean>;
   captureText(): Promise<string>;
+  captureCursorLine(): Promise<string>;
 }
 
 export interface PtyProvider {

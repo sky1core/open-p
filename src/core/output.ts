@@ -126,10 +126,32 @@ export function formatTurnResult(result: TurnResult, options: OutputOptions): st
       form: 'result',
     },
   );
+  const suppressedResultSnapshotOpenPEvents = buildPreviouslyEmittedAssistantOpenPEvents(
+    suppressedResultSnapshots,
+    options.backendSessionId,
+    result.turnId,
+    result.text,
+    fallbackReasoningContent ?? null,
+    result.structuredOutput,
+    structuredOutputToolUseId,
+    result.requestId ?? null,
+    effectiveModel,
+    stopReason,
+    assistantUsage,
+    'result',
+  );
+  const effectiveFallbackReasoningContent = openPEventsContainReasoningText(
+    [...assistantEvents, ...suppressedResultSnapshotOpenPEvents],
+    fallbackReasoningContent,
+  )
+    ? null
+    : fallbackReasoningContent;
   const assistantSnapshotsContainResultText =
     snapshotsContainAssistantText(assistantSnapshots, result.text) ||
     openPAnswerEventsContainResultText(assistantEvents, result.text) ||
+    openPAnswerEventsContainResultText(suppressedResultSnapshotOpenPEvents, result.text) ||
     openPAnswerEventsAggregateResultText(assistantEvents, result.text) ||
+    openPAnswerEventsAggregateResultText(suppressedResultSnapshotOpenPEvents, result.text) ||
     suppressedSnapshotsContainResultText;
   const shouldEmitTextFallback = shouldEmitResultTextFallback(
     result.text,
@@ -141,7 +163,7 @@ export function formatTurnResult(result: TurnResult, options: OutputOptions): st
     existingAssistantEvents: assistantEvents,
     assistantSnapshotsContainResultText,
     text: result.text,
-    fallbackReasoningContent,
+    fallbackReasoningContent: effectiveFallbackReasoningContent,
     structuredOutput: result.structuredOutput,
     fallbackStructuredOutput,
     snapshotStructuredOutputToolUseId,
@@ -453,17 +475,39 @@ export function formatWorkerTurnResult(result: WorkerTurnResult, event: {
         form: 'result',
       },
     );
+  const suppressedResultSnapshotOpenPEvents = buildPreviouslyEmittedAssistantOpenPEvents(
+    suppressedResultSnapshots,
+    result.sessionId,
+    event.turnId,
+    result.content,
+    fallbackReasoningContent ?? null,
+    result.structuredOutput,
+    structuredOutputToolUseId,
+    result.requestId ?? null,
+    effectiveModel,
+    result.diagnostics.stopReason,
+    assistantUsage,
+    'result',
+  );
+  const effectiveFallbackReasoningContent = openPEventsContainReasoningText(
+    [...assistantEvents, ...suppressedResultSnapshotOpenPEvents],
+    fallbackReasoningContent,
+  )
+    ? null
+    : fallbackReasoningContent;
   const assistantSnapshotsContainResultText =
     snapshotsContainAssistantText(assistantSnapshots, result.content) ||
     openPAnswerEventsContainResultText(assistantEvents, result.content) ||
+    openPAnswerEventsContainResultText(suppressedResultSnapshotOpenPEvents, result.content) ||
     openPAnswerEventsAggregateResultText(assistantEvents, result.content) ||
+    openPAnswerEventsAggregateResultText(suppressedResultSnapshotOpenPEvents, result.content) ||
     suppressedSnapshotsContainResultText;
-  const missingFallbackReasoningContent = openPEventsContainReasoningText(assistantEvents, fallbackReasoningContent)
+  const missingFallbackReasoningContent = openPEventsContainReasoningText(assistantEvents, effectiveFallbackReasoningContent)
     ? null
-    : fallbackReasoningContent;
+    : effectiveFallbackReasoningContent;
   const shouldEmitFallbackAssistant = result.structuredOutput !== undefined && fallbackStructuredOutput === undefined
     ? false
-    : Boolean(fallbackReasoningContent)
+    : Boolean(effectiveFallbackReasoningContent)
       || fallbackStructuredOutput !== undefined
       || shouldEmitResultTextFallback(
         result.content,
@@ -528,8 +572,15 @@ export function formatWorkerTurnResult(result: WorkerTurnResult, event: {
               turnId: event.turnId,
               sessionId: result.sessionId,
               answerText: result.content,
-              reasoningText: fallbackReasoningContent,
-              emitAnswer: fallbackStructuredOutput === undefined && !blankResultTextFallback,
+              reasoningText: effectiveFallbackReasoningContent,
+              emitAnswer: shouldEmitResultTextFallback(
+                result.content,
+                latestSuppressedAssistantText,
+                event.suppressFallbackAssistantText,
+                semanticSnapshotsContainResultText,
+              ) && !suppressedSnapshotsContainResultText &&
+                fallbackStructuredOutput === undefined &&
+                !blankResultTextFallback,
               requestId: result.requestId,
               stopReason: result.diagnostics.stopReason,
               model: effectiveModel,
@@ -969,8 +1020,6 @@ function buildOpenPAssistantEventsFromSnapshot(
   }
   const resultReasoningText = reasoningText ??
     (context.structuredOutput !== undefined
-      ? context.resultReasoningText ?? null
-      : text !== null && text.length > 0 && text === (context.resultAnswerText ?? null)
       ? context.resultReasoningText ?? null
       : null);
   const hasStructuredToolCall = hasStructuredOutputToolCall(toolCalls);
@@ -2200,7 +2249,9 @@ function buildTerminalAssistantEventRecords(event: {
     sessionId: event.sessionId,
     answerText: event.text,
     reasoningText: event.fallbackReasoningContent,
-    emitAnswer: event.fallbackStructuredOutput === undefined && !event.blankResultTextFallback,
+    emitAnswer: event.shouldEmitTextFallback &&
+      event.fallbackStructuredOutput === undefined &&
+      !event.blankResultTextFallback,
     requestId: event.requestId,
     stopReason: event.stopReason ?? null,
     model: event.model,
@@ -3282,4 +3333,3 @@ function buildStableMessageId(seed: string): string {
 function buildToolUseId(): string {
   return `toolu_${randomUUID().replaceAll('-', '')}`;
 }
-

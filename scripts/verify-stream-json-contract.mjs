@@ -57,16 +57,16 @@ const cases = [
   {
     name: 'stream-json-streaming',
     expected: `openp-contract-streaming-${randomUUID().slice(0, 8)}`,
-    claudeArgs: (prompt) => ['-p', '--output-format', 'stream-json', '--verbose', '--include-partial-messages', ...permissionArgs, '--model', model, ...reasoningArgs, prompt],
-    openpArgs: (prompt) => ['claude', '--output-format', 'stream-json', '--verbose', '--include-partial-messages', ...permissionArgs, '--model', model, ...reasoningArgs, prompt],
+    claudeArgs: null,
+    openpArgs: (prompt) => ['claude', '--output-format', 'stream-json', '--verbose', '--streaming', ...permissionArgs, '--model', model, ...reasoningArgs, prompt],
     parse: parseJsonLines,
     verify: verifyStreamingStreamJsonResult,
   },
   {
     name: 'stream-json-structured-streaming',
     expected: '{"ok":true}',
-    claudeArgs: (prompt) => ['-p', '--output-format', 'stream-json', '--verbose', '--include-partial-messages', '--json-schema', schema, ...permissionArgs, '--model', model, ...reasoningArgs, prompt],
-    openpArgs: (prompt) => ['claude', '--output-format', 'stream-json', '--verbose', '--include-partial-messages', '--json-schema', schema, ...permissionArgs, '--model', model, ...reasoningArgs, prompt],
+    claudeArgs: null,
+    openpArgs: (prompt) => ['claude', '--output-format', 'stream-json', '--verbose', '--streaming', '--json-schema', schema, ...permissionArgs, '--model', model, ...reasoningArgs, prompt],
     parse: parseJsonLines,
     verify: verifyStructuredStreamJsonResult,
   },
@@ -82,8 +82,8 @@ const cases = [
   {
     name: 'worker-stream-json-streaming',
     expected: `openp-contract-worker-streaming-${randomUUID().slice(0, 8)}`,
-    claudeArgs: () => ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--include-partial-messages', ...permissionArgs, '--model', model, ...reasoningArgs],
-    openpArgs: () => ['claude', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--include-partial-messages', ...permissionArgs, '--model', model, ...reasoningArgs],
+    claudeArgs: null,
+    openpArgs: () => ['claude', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--streaming', ...permissionArgs, '--model', model, ...reasoningArgs],
     input: (expected) => JSON.stringify({ type: 'user', message: { role: 'user', content: promptForContract(expected) } }) + '\n',
     parse: parseJsonLines,
     verify: verifyStreamingStreamJsonResult,
@@ -111,14 +111,20 @@ for (const testCase of selectedCases) {
     ? structuredPrompt()
     : promptForContract(testCase.expected);
   const input = testCase.input ? testCase.input(testCase.expected) : '';
-  const claudeRaw = await runCommand(claudeBin, testCase.claudeArgs(prompt), input);
+  const claudeRaw = testCase.claudeArgs
+    ? await runCommand(claudeBin, testCase.claudeArgs(prompt), input)
+    : null;
   const openpRaw = await runCommand(process.execPath, [cliPath, ...testCase.openpArgs(prompt)], input);
-  const claudeParsed = testCase.parse(claudeRaw.stdout);
+  const claudeParsed = claudeRaw ? testCase.parse(claudeRaw.stdout) : null;
   const openpParsed = testCase.parse(openpRaw.stdout);
 
-  testCase.verify(testCase, claudeParsed, 'claude');
+  if (claudeParsed !== null) {
+    testCase.verify(testCase, claudeParsed, 'claude');
+  }
   testCase.verify(testCase, openpParsed, 'openp');
-  verifyCrossContract(testCase, claudeParsed, openpParsed);
+  if (claudeParsed !== null) {
+    verifyCrossContract(testCase, claudeParsed, openpParsed);
+  }
 
   const requiredContractFailures = collectRequiredContractFailures(testCase, {
     claudeParsed,
@@ -131,12 +137,19 @@ for (const testCase of selectedCases) {
     ...failure,
   })));
 
-  const strictGaps = collectStrictShapeGaps(claudeParsed, openpParsed);
+  const strictGaps = claudeParsed !== null
+    ? collectStrictShapeGaps(claudeParsed, openpParsed)
+    : [];
   report.push({
     name: testCase.name,
-    claude: summarizeOutput(claudeParsed),
+    claude: claudeParsed !== null
+      ? summarizeOutput(claudeParsed)
+      : {
+          skipped: true,
+          reason: 'openp-only active streaming verification; deprecated partial-message native flag is intentionally not used',
+        },
     openp: summarizeOutput(openpParsed),
-    claudeTiming: resultTiming(claudeRaw.lineArrivals),
+    claudeTiming: claudeRaw ? resultTiming(claudeRaw.lineArrivals) : null,
     openpTiming: resultTiming(openpRaw.lineArrivals),
     requiredContractFailures,
     strictGaps,
@@ -331,7 +344,7 @@ function collectRequiredContractFailures(testCase, values) {
   if (openpText.length > 0) {
     failures.push({
       kind: 'assistant.text.default-streaming.openp',
-      reason: 'openp default stream-json emitted assistant text before result without --include-partial-messages',
+      reason: 'openp default stream-json emitted assistant text before result without --streaming',
       openp: openpIncrementalText,
     });
   }

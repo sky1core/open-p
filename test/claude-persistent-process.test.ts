@@ -4,7 +4,12 @@ import { appendFile, chmod, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { readinessTimeoutMs, waitForClaudeCodeInputReady } from '../src/backends/claude/interactive.js';
+import {
+  isClaudeCodeEmptyInputPromptLine,
+  isClaudeCodeInputPromptLine,
+  readinessTimeoutMs,
+  waitForClaudeCodeInputReady,
+} from '../src/backends/claude/interactive.js';
 import { PersistentClaudeCodeProcess, startPersistentClaudeCodeProcess } from '../src/backends/claude/persistent-process.js';
 import { buildLaunchSignature } from '../src/core/launch-signature.js';
 import { EXIT_CODES, OpenPError } from '../src/core/errors.js';
@@ -52,6 +57,10 @@ class StartupFailureSession implements PtySession {
       return 'Claude Code v\n❯';
     }
     return 'Quick safety check: trust this folder?';
+  }
+
+  async captureCursorLine(): Promise<string> {
+    return this.readyAfterTrust && this.submitCount > 0 ? '❯' : '';
   }
 }
 
@@ -127,6 +136,172 @@ class TurnLogSession implements PtySession {
   async captureText(): Promise<string> {
     return 'Claude Code v\n❯';
   }
+
+  async captureCursorLine(): Promise<string> {
+    return '❯';
+  }
+}
+
+class DuplicateCallerTurnSession implements PtySession {
+  readonly id = 'duplicate-caller-turn-session';
+  alive = true;
+  submitCount = 0;
+  private lastWrite = '';
+
+  constructor(private readonly logPath: string) {}
+
+  async write(input: string): Promise<void> {
+    this.lastWrite = input;
+  }
+
+  async submit(): Promise<void> {
+    this.submitCount += 1;
+    await appendFile(this.logPath, [
+      eventLine({
+        type: 'user',
+        uuid: 'active-user-1',
+        message: { content: this.lastWrite },
+      }),
+      eventLine({
+        type: 'user',
+        uuid: 'active-user-2',
+        message: { content: 'unexpected second caller' },
+      }),
+      eventLine({
+        type: 'assistant',
+        parentUuid: 'active-user-2',
+        message: {
+          content: [{ type: 'text', text: 'should not retry' }],
+          stop_reason: 'end_turn',
+        },
+      }),
+      eventLine({
+        type: 'system',
+        subtype: 'turn_duration',
+        durationMs: 10,
+      }),
+    ].join('\n') + '\n');
+  }
+
+  async interrupt(): Promise<void> {}
+
+  async terminate(): Promise<void> {
+    this.alive = false;
+  }
+
+  async exit(): Promise<void> {
+    this.alive = false;
+  }
+
+  async isAlive(): Promise<boolean> {
+    return this.alive;
+  }
+
+  async captureText(): Promise<string> {
+    return 'Claude Code v\n❯';
+  }
+
+  async captureCursorLine(): Promise<string> {
+    return '❯';
+  }
+}
+
+class PreCallerLocalCommandThenTurnSession implements PtySession {
+  readonly id = 'pre-caller-local-command-session';
+  alive = true;
+  submitCount = 0;
+  readonly writes: string[] = [];
+  private lastWrite = '';
+
+  constructor(
+    private readonly logPath: string,
+    private readonly draftLineAfterFirstSubmit: string | null = null,
+  ) {}
+
+  async write(input: string): Promise<void> {
+    this.lastWrite = input;
+    this.writes.push(input);
+  }
+
+  async submit(): Promise<void> {
+    this.submitCount += 1;
+    if (this.submitCount === 1) {
+      await appendFile(this.logPath, [
+        eventLine({
+          type: 'assistant',
+          message: {
+            model: '<synthetic>',
+            role: 'assistant',
+            stop_reason: 'stop_sequence',
+            stop_sequence: '',
+            content: [{ type: 'text', text: 'No response requested.' }],
+          },
+        }),
+        eventLine({
+          type: 'user',
+          promptId: 'compact-command',
+          isMeta: true,
+          message: { content: '<local-command-caveat>generated while running local commands</local-command-caveat>' },
+        }),
+        eventLine({
+          type: 'user',
+          promptId: 'compact-command',
+          message: { content: '<command-name>/compact</command-name>\n<command-message>compact</command-message>' },
+        }),
+        eventLine({
+          type: 'user',
+          promptId: 'compact-command',
+          message: { content: '<local-command-stdout>Compacted (ctrl+o to see full summary)</local-command-stdout>' },
+        }),
+      ].join('\n') + '\n');
+      return;
+    }
+    await appendFile(this.logPath, [
+      eventLine({
+        type: 'user',
+        uuid: 'active-user',
+        message: { content: this.lastWrite },
+      }),
+      eventLine({
+        type: 'assistant',
+        parentUuid: 'active-user',
+        message: {
+          content: [{ type: 'text', text: 'retry result' }],
+          stop_reason: 'end_turn',
+        },
+      }),
+      eventLine({
+        type: 'system',
+        subtype: 'turn_duration',
+        durationMs: 10,
+      }),
+    ].join('\n') + '\n');
+  }
+
+  async interrupt(): Promise<void> {}
+
+  async terminate(): Promise<void> {
+    this.alive = false;
+  }
+
+  async exit(): Promise<void> {
+    this.alive = false;
+  }
+
+  async isAlive(): Promise<boolean> {
+    return this.alive;
+  }
+
+  async captureText(): Promise<string> {
+    return 'Claude Code v\n❯';
+  }
+
+  async captureCursorLine(): Promise<string> {
+    if (this.submitCount === 1 && this.draftLineAfterFirstSubmit) {
+      return this.draftLineAfterFirstSubmit;
+    }
+    return '❯';
+  }
 }
 
 class ReadinessBoundarySession implements PtySession {
@@ -191,6 +366,10 @@ class ReadinessBoundarySession implements PtySession {
     }
     return 'Claude Code v\n❯';
   }
+
+  async captureCursorLine(): Promise<string> {
+    return '❯';
+  }
 }
 
 class ScreenBeforeJsonlSession implements PtySession {
@@ -249,12 +428,11 @@ class ScreenBeforeJsonlSession implements PtySession {
   }
 
   async captureText(): Promise<string> {
-    return [
-      'Claude Code v',
-      '❯ hello',
-      '',
-      `⏺ ${this.screenText}`,
-    ].join('\n');
+    return readyScreenWith([`⏺ ${this.screenText}`]);
+  }
+
+  async captureCursorLine(): Promise<string> {
+    return '❯';
   }
 }
 
@@ -313,12 +491,11 @@ class ScreenExtendsAfterRawJsonlSession implements PtySession {
 
   async captureText(): Promise<string> {
     this.captureCount += 1;
-    return [
-      'Claude Code v',
-      '❯ hello',
-      '',
-      `⏺ ${this.captureCount <= 1 ? 'Title' : 'Title extended'}`,
-    ].join('\n');
+    return readyScreenWith([`⏺ ${this.captureCount <= 1 ? 'Title' : 'Title extended'}`]);
+  }
+
+  async captureCursorLine(): Promise<string> {
+    return '❯';
   }
 }
 
@@ -367,12 +544,11 @@ class JsonlThenStaleScreenSession implements PtySession {
   }
 
   async captureText(): Promise<string> {
-    return [
-      'Claude Code v',
-      '❯ hello',
-      '',
-      '⏺ stale',
-    ].join('\n');
+    return readyScreenWith(['⏺ stale']);
+  }
+
+  async captureCursorLine(): Promise<string> {
+    return '❯';
   }
 }
 
@@ -426,6 +602,10 @@ class ReasoningThenAbortSession implements PtySession {
   async captureText(): Promise<string> {
     return 'Claude Code v\n❯';
   }
+
+  async captureCursorLine(): Promise<string> {
+    return '❯';
+  }
 }
 
 class TimeoutTurnSession implements PtySession {
@@ -459,6 +639,10 @@ class TimeoutTurnSession implements PtySession {
 
   async captureText(): Promise<string> {
     return 'Claude Code v\n❯';
+  }
+
+  async captureCursorLine(): Promise<string> {
+    return '❯';
   }
 }
 
@@ -554,6 +738,9 @@ test('readiness timeout includes the last captured Claude Code screen', async ()
     async captureText() {
       return 'Claude Code v\nLoading plugins...\nNo prompt yet';
     },
+    async captureCursorLine() {
+      return 'No prompt yet';
+    },
   };
 
   await assert.rejects(
@@ -581,9 +768,91 @@ test('readiness accepts a visible Claude Code prompt without the version banner'
         '❯',
       ].join('\n');
     },
+    async captureCursorLine() {
+      return '❯';
+    },
   };
 
   await waitForClaudeCodeInputReady(session, 1_000);
+});
+
+test('readiness uses the cursor line instead of Claude footer layout', async () => {
+  const session: PtySession = {
+    id: 'cursor-line-ready-session',
+    async write() {},
+    async submit() {},
+    async interrupt() {},
+    async terminate() {},
+    async exit() {},
+    async isAlive() {
+      return true;
+    },
+    async captureText() {
+      return [
+        'previous assistant text',
+        '⎿ See ya!',
+        '────────────────────────────────',
+        '❯',
+        '────────────────────────────────',
+        '⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents',
+        'tmux focus-events off · add set -g focus-events on to ~/.tmux.conf and restart tmux',
+        '                                                              82% context used',
+      ].join('\n');
+    },
+    async captureCursorLine() {
+      return '❯';
+    },
+  };
+
+  await waitForClaudeCodeInputReady(session, 1_000);
+});
+
+test('readiness rejects stale prompt text even when screen footer filtering would leave it last', async () => {
+  const session: PtySession = {
+    id: 'cursor-line-not-ready-session',
+    async write() {},
+    async submit() {},
+    async interrupt() {},
+    async terminate() {},
+    async exit() {},
+    async isAlive() {
+      return true;
+    },
+    async captureText() {
+      return [
+        '❯ previous prompt',
+        '────────────────────────────────',
+        '⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents',
+        'tmux focus-events off · add set -g focus-events on to ~/.tmux.conf and restart tmux',
+      ].join('\n');
+    },
+    async captureCursorLine() {
+      return '⏺ Working on it';
+    },
+  };
+
+  await assert.rejects(
+    () => waitForClaudeCodeInputReady(session, 1),
+    /timed out waiting for Claude Code to become ready for input/,
+  );
+});
+
+test('input prompt line detection accepts only the cursor input prompt', () => {
+  assert.equal(isClaudeCodeInputPromptLine('❯'), true);
+  assert.equal(isClaudeCodeInputPromptLine('  ❯'), true);
+  assert.equal(isClaudeCodeInputPromptLine('⏵⏵ bypass permissions on'), false);
+  assert.equal(isClaudeCodeInputPromptLine('82% context used'), false);
+});
+
+test('empty input prompt line detection rejects existing drafts', () => {
+  assert.equal(isClaudeCodeEmptyInputPromptLine('❯'), true);
+  assert.equal(isClaudeCodeEmptyInputPromptLine('  ❯   '), true);
+  assert.equal(isClaudeCodeEmptyInputPromptLine('❯ hello'), false);
+});
+
+test('input prompt line detection rejects assistant text that contains prompt glyph later', () => {
+  assert.equal(isClaudeCodeInputPromptLine('assistant says ❯ is the prompt'), false);
+  assert.equal(isClaudeCodeInputPromptLine('        82% context used'), false);
 });
 
 test('persistent Claude Code startup failure reports unsafe session when graceful exit leaves PTY alive', async () => {
@@ -765,6 +1034,92 @@ test('persistent turn starts JSONL parsing at the prompt submission boundary', a
   }
 });
 
+test('persistent turn retries prompt submission after pre-caller local command consumes the first submit', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-pre-caller-local-command-'));
+  const logPath = join(dir, 'session.jsonl');
+  await writeFile(logPath, '');
+  const sessionId = randomUUID();
+  const session = new PreCallerLocalCommandThenTurnSession(logPath);
+  const process = new PersistentClaudeCodeProcess(sessionId, signature(), dir, session, logPath, logPath, 0);
+
+  try {
+    const result = await process.sendTurn('hello after compact', {
+      timeoutMs: 5_000,
+    });
+
+    assert.equal(result.text, 'retry result');
+    assert.equal(session.submitCount, 2);
+    assert.deepEqual(session.writes, ['hello after compact', 'hello after compact']);
+  } finally {
+    await process.shutdown();
+  }
+});
+
+test('persistent retry submits an existing input draft instead of writing the prompt twice', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-pre-caller-local-command-draft-'));
+  const logPath = join(dir, 'session.jsonl');
+  await writeFile(logPath, '');
+  const sessionId = randomUUID();
+  const session = new PreCallerLocalCommandThenTurnSession(logPath, '❯ hello after compact');
+  const process = new PersistentClaudeCodeProcess(sessionId, signature(), dir, session, logPath, logPath, 0);
+
+  try {
+    const result = await process.sendTurn('hello after compact', {
+      timeoutMs: 5_000,
+    });
+
+    assert.equal(result.text, 'retry result');
+    assert.equal(session.submitCount, 2);
+    assert.deepEqual(session.writes, ['hello after compact']);
+  } finally {
+    await process.shutdown();
+  }
+});
+
+test('persistent retry keeps the original turn timeout budget', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-pre-caller-local-command-timeout-'));
+  const logPath = join(dir, 'session.jsonl');
+  await writeFile(logPath, '');
+  const sessionId = randomUUID();
+  const session = new PreCallerLocalCommandThenTurnSession(logPath);
+  const process = new PersistentClaudeCodeProcess(sessionId, signature(), dir, session, logPath, logPath, 0);
+
+  try {
+    await assert.rejects(
+      () => process.sendTurn('hello after compact', {
+        timeoutMs: 1_200,
+      }),
+      (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.timeout,
+    );
+    assert.equal(session.submitCount, 1);
+  } finally {
+    await process.shutdown();
+  }
+});
+
+test('persistent turn does not retry unrelated protocol violations', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-no-generic-protocol-retry-'));
+  const logPath = join(dir, 'session.jsonl');
+  await writeFile(logPath, '');
+  const sessionId = randomUUID();
+  const session = new DuplicateCallerTurnSession(logPath);
+  const process = new PersistentClaudeCodeProcess(sessionId, signature(), dir, session, logPath, logPath, 0);
+
+  try {
+    await assert.rejects(
+      () => process.sendTurn('hello', {
+        timeoutMs: 5_000,
+      }),
+      (error) => error instanceof OpenPError &&
+        error.exitCode === EXIT_CODES.protocolViolation &&
+        /multiple caller user-turn boundaries/.test(error.message),
+    );
+    assert.equal(session.submitCount, 1);
+  } finally {
+    await process.shutdown();
+  }
+});
+
 test('persistent turn ignores matching screen text and publishes JSONL once', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'openp-screen-jsonl-same-'));
   const logPath = join(dir, 'session.jsonl');
@@ -908,6 +1263,20 @@ function providerFor(session: PtySession): PtyProvider {
 
 function eventLine(event: unknown): string {
   return JSON.stringify(event);
+}
+
+function readyScreenWith(lines: readonly string[]): string {
+  return [
+    'Claude Code v',
+    '❯ previous prompt',
+    '',
+    ...lines,
+    '────────────────────────────────',
+    '❯',
+    '────────────────────────────────',
+    '⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents',
+    'tmux focus-events off · add set -g focus-events on to ~/.tmux.conf and restart tmux',
+  ].join('\n');
 }
 
 async function waitUntil(predicate: () => boolean): Promise<void> {

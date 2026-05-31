@@ -53,7 +53,6 @@ const VALUE_FLAGS = new Set([
 
 const BOOLEAN_FLAGS = new Set([
   '--streaming',
-  '--include-partial-messages',
   '--dangerously-skip-permissions',
 ]);
 
@@ -101,7 +100,7 @@ export function parseCliArgs(argv: readonly string[], knownBackends?: ReadonlySe
       continue;
     }
     if (BOOLEAN_FLAGS.has(arg)) {
-      if (arg === '--streaming' || arg === '--include-partial-messages') {
+      if (arg === '--streaming') {
         streaming = true;
         continue;
       }

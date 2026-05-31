@@ -3,7 +3,36 @@ import { chmod, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { buildTmuxShellCommand, TmuxSession } from '../src/runners/tmux.js';
+import { buildTmuxShellCommand, selectReapableOpenpSessions, TmuxSession } from '../src/runners/tmux.js';
+
+test('reaper selects only same-session-id orphans, excluding the session being created', () => {
+  const sessionName = 'openp-ffaee9f17b62-newrand';
+  const candidates = [
+    'openp-ffaee9f17b62-newrand', // the new session itself — must NOT be reaped
+    'openp-ffaee9f17b62-orphan1', // leaked orphan for the same session id — reap
+    'openp-ffaee9f17b62-orphan2', // another leaked orphan — reap
+    'openp-aaaaaaaaaaaa-other', // different session id — must NOT be reaped
+    'quota-12345', // unrelated tmux session — must NOT be reaped
+  ];
+  assert.deepEqual(
+    selectReapableOpenpSessions(sessionName, candidates),
+    ['openp-ffaee9f17b62-orphan1', 'openp-ffaee9f17b62-orphan2'],
+  );
+});
+
+test('reaper selects nothing when no same-session-id orphan exists', () => {
+  assert.deepEqual(
+    selectReapableOpenpSessions('openp-ffaee9f17b62-newrand', ['openp-bbbbbbbbbbbb-x', 'quota-1']),
+    [],
+  );
+});
+
+test('reaper never reaps non-open-p sessions even on a shared prefix', () => {
+  assert.deepEqual(
+    selectReapableOpenpSessions('quota-123-new', ['quota-123-old', 'openp-x-y']),
+    [],
+  );
+});
 
 test('tmux shell command can isolate Anthropic env for local backends', () => {
   assert.equal(
@@ -22,6 +51,63 @@ test('tmux shell command does not strip Anthropic env unless isolation is reques
     buildTmuxShellCommand('claude', [], {}, false),
     'env claude',
   );
+});
+
+test('tmux session captures only the visible pane for prompt readiness', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-fake-tmux-'));
+  const fakeTmux = join(dir, 'fake-tmux.js');
+  const logPath = join(dir, 'commands.log');
+  await writeFile(fakeTmux, `#!/usr/bin/env node
+const fs = require('node:fs');
+const logPath = ${JSON.stringify(logPath)};
+const args = process.argv.slice(2);
+fs.appendFileSync(logPath, JSON.stringify(args) + '\\n');
+if (args[0] === 'capture-pane') {
+  process.stdout.write('visible screen\\n');
+}
+process.exit(0);
+`);
+  await chmod(fakeTmux, 0o755);
+
+  const session = new TmuxSession(fakeTmux, 'fake-session', 10);
+  assert.equal(await session.captureText(), 'visible screen\n');
+
+  const commandLog = await readFile(logPath, 'utf8');
+  const commandLines = commandLog.trim().split('\n').map((line) => JSON.parse(line) as string[]);
+  assert.deepEqual(commandLines[0], ['capture-pane', '-pt', 'fake-session']);
+});
+
+test('tmux session captures only the cursor row for input readiness', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-fake-tmux-'));
+  const fakeTmux = join(dir, 'fake-tmux.js');
+  const logPath = join(dir, 'commands.log');
+  await writeFile(fakeTmux, `#!/usr/bin/env node
+const fs = require('node:fs');
+const logPath = ${JSON.stringify(logPath)};
+const args = process.argv.slice(2);
+fs.appendFileSync(logPath, JSON.stringify(args) + '\\n');
+if (args[0] === 'display-message' && args.includes('#{cursor_y}')) {
+  process.stdout.write('3\\n');
+  process.exit(0);
+}
+if (args[0] === 'capture-pane') {
+  if (args.includes('-S') && args.includes('-E')) {
+    process.stdout.write('❯\\n');
+  } else {
+    process.stdout.write('old output\\n❯\\nfooter\\n');
+  }
+}
+process.exit(0);
+`);
+  await chmod(fakeTmux, 0o755);
+
+  const session = new TmuxSession(fakeTmux, 'fake-session', 10);
+  assert.equal(await session.captureCursorLine(), '❯');
+
+  const commandLog = await readFile(logPath, 'utf8');
+  const commandLines = commandLog.trim().split('\n').map((line) => JSON.parse(line) as string[]);
+  assert.deepEqual(commandLines[0], ['display-message', '-p', '-t', 'fake-session', '#{cursor_y}']);
+  assert.deepEqual(commandLines[1], ['capture-pane', '-p', '-t', 'fake-session', '-S', '3', '-E', '3']);
 });
 
 test('tmux session exit retries with interrupt before a second graceful exit', async () => {
