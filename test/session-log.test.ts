@@ -100,6 +100,70 @@ test('reports backend exit during active turn instead of waiting for timeout', a
   );
 });
 
+test('fails closed on Claude Code API error assistant without publishing it as intermediate text', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-session-log-'));
+  const logPath = join(dir, 'session.jsonl');
+  const sessionId = randomUUID();
+  const intermediateTexts: string[] = [];
+  await writeFile(logPath, [
+    line({
+      type: 'user',
+      sessionId,
+      message: { role: 'user', content: 'generate image' },
+    }),
+    line({
+      type: 'assistant',
+      sessionId,
+      message: {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'starting generation' }],
+        stop_reason: 'tool_use',
+      },
+    }),
+    line({
+      type: 'assistant',
+      sessionId,
+      error: 'authentication_failed',
+      isApiErrorMessage: true,
+      apiErrorStatus: 401,
+      message: {
+        model: '<synthetic>',
+        role: 'assistant',
+        stop_reason: 'stop_sequence',
+        content: [{
+          type: 'text',
+          text: 'Please run /login · API Error: 401 The socket connection was closed unexpectedly.',
+        }],
+      },
+    }),
+    line({ type: 'system', subtype: 'turn_duration', sessionId, durationMs: 10 }),
+  ].join(''));
+
+  try {
+    await assert.rejects(
+      () => waitForClaudeCodeTurnResult({
+        sessionId,
+        turnId: 'turn-1',
+        timeoutMs: 10_000,
+        initialOffset: 0,
+        knownLogPath: logPath,
+        isBackendAlive: async () => true,
+        onIntermediateText: (text) => {
+          intermediateTexts.push(text);
+        },
+      }),
+      (error) =>
+        error instanceof OpenPError &&
+        error.exitCode === EXIT_CODES.backendExited &&
+        error.message.includes('Claude Code API error for turn turn-1') &&
+        error.message.includes('status 401'),
+    );
+    assert.deepEqual(intermediateTexts, ['starting generation']);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('notifies timeout before throwing an active turn timeout error', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'openp-session-log-'));
   const logPath = join(dir, 'session.jsonl');

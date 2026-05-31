@@ -260,6 +260,9 @@ export function extractClaudeCodeIntermediateContent(
     if (event.type !== 'assistant') {
       continue;
     }
+    if (isClaudeCodeApiErrorAssistant(event)) {
+      continue;
+    }
     if (isSyntheticNoResponseAssistant(event)) {
       continue;
     }
@@ -400,6 +403,13 @@ function consumeEvent(state: ParserState, event: JsonObject, turnId: string): vo
       }
       return;
     }
+  }
+
+  if (isClaudeCodeApiErrorAssistant(event)) {
+    throw new OpenPError(
+      `Claude Code API error for turn ${turnId}: ${claudeCodeApiErrorMessage(event)}`,
+      EXIT_CODES.backendExited,
+    );
   }
 
   if (isSyntheticNoResponseAssistant(event)) {
@@ -866,6 +876,44 @@ function isSyntheticNoResponseAssistant(event: JsonObject): boolean {
     .map((block) => (block.text as string).trim())
     .filter((text) => text.length > 0);
   return textBlocks.length === 1 && textBlocks[0] === 'No response requested.';
+}
+
+function isClaudeCodeApiErrorAssistant(event: JsonObject): boolean {
+  if (event.type !== 'assistant') {
+    return false;
+  }
+  if (event.isApiErrorMessage === true) {
+    return true;
+  }
+  if (typeof event.apiErrorStatus === 'number') {
+    return true;
+  }
+  return typeof event.error === 'string' && event.error.trim().length > 0;
+}
+
+function claudeCodeApiErrorMessage(event: JsonObject): string {
+  const parts: string[] = [];
+  if (typeof event.apiErrorStatus === 'number') {
+    parts.push(`status ${event.apiErrorStatus}`);
+  }
+  if (typeof event.error === 'string' && event.error.trim()) {
+    parts.push(event.error.trim());
+  }
+  const text = assistantTextBlocks(event).join('\n\n');
+  if (text) {
+    parts.push(text);
+  }
+  return parts.length > 0 ? parts.join(': ') : 'unknown API error';
+}
+
+function assistantTextBlocks(event: JsonObject): string[] {
+  const message = asObject(event.message);
+  const content = Array.isArray(message?.content) ? message.content : [];
+  return content
+    .map((block) => asObject(block))
+    .filter((block): block is JsonObject => block?.type === 'text' && typeof block.text === 'string')
+    .map((block) => (block.text as string).trim())
+    .filter((text) => text.length > 0);
 }
 
 function serializeStructuredOutput(value: unknown, turnId: string): string {

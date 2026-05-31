@@ -174,6 +174,33 @@ test('does not strip marker-looking assistant text', () => {
   assert.equal(result?.text, markerText);
 });
 
+test('fails closed on Claude Code synthetic API error assistant events', () => {
+  const lines = [
+    userLine('generate image'),
+    assistantLine([{ type: 'text', text: 'starting generation' }], undefined, 'tool_use'),
+    claudeApiErrorAssistantLine(
+      'Please run /login · API Error: 401 The socket connection was closed unexpectedly.',
+      401,
+      'authentication_failed',
+    ),
+    durationLine(10),
+  ];
+
+  assert.throws(
+    () => parseClaudeCodeJsonlTurn(lines, TURN_ID),
+    (error) =>
+      error instanceof OpenPError &&
+      error.exitCode === EXIT_CODES.backendExited &&
+      error.message.includes('Claude Code API error for turn turn-1') &&
+      error.message.includes('status 401') &&
+      error.message.includes('authentication_failed'),
+  );
+  assert.equal(
+    extractClaudeCodeIntermediateContent(lines, { includeTerminalAssistant: true }).text,
+    'starting generation',
+  );
+});
+
 test('returns null until completion metadata is present', () => {
   assert.equal(parseClaudeCodeJsonlTurn([
     userLine('hello'),
@@ -894,6 +921,26 @@ function assistantLine(
       ...(usage ? { usage } : {}),
       ...(stopReason ? { stop_reason: stopReason } : {}),
       content,
+    },
+  });
+}
+
+function claudeApiErrorAssistantLine(text: string, status: number, error: string): string {
+  return JSON.stringify({
+    type: 'assistant',
+    error,
+    isApiErrorMessage: true,
+    apiErrorStatus: status,
+    message: {
+      model: '<synthetic>',
+      role: 'assistant',
+      stop_reason: 'stop_sequence',
+      content: [{ type: 'text', text }],
+      usage: {
+        input_tokens: 0,
+        cache_read_input_tokens: 0,
+        output_tokens: 0,
+      },
     },
   });
 }
