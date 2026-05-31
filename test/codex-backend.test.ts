@@ -329,6 +329,30 @@ test('CodexBackend.runTurn keeps Codex session log out of streaming and uses it 
   assert.equal(result.diagnostics.lastSubturnContextTokens, 377);
 }));
 
+test('CodexBackend.runTurn falls back to stdout aggregate usage when session log only has token count', withFakeBin('fake-codex-session-log-no-usage.mjs', async () => {
+  const backend = new CodexBackend();
+
+  const result = await backend.runTurn(
+    { turnId: 'turn-1', prompt: 'hello' },
+    BASE_OPTIONS,
+  );
+
+  assert.equal(result.text, 'session log final answer');
+  assert.equal(result.diagnostics.model, 'codex-log-model');
+  assert.deepEqual(result.diagnostics.usage, {
+    inputTokens: 999,
+    outputTokens: 11,
+    cacheReadInputTokens: 222,
+  });
+  assert.deepEqual(result.diagnostics.lastSubturnUsage, {
+    inputTokens: 333,
+    outputTokens: 5,
+    cacheReadInputTokens: 44,
+  });
+  assert.equal(result.diagnostics.contextWindow, 258400);
+  assert.equal(result.diagnostics.lastSubturnContextTokens, 377);
+}));
+
 test('CodexBackend.runTurn streams stdout only when the session log mirrors stdout items', withFakeBin('fake-codex-stdout-session-log-mirror.mjs', async () => {
   const backend = new CodexBackend();
   const intermediateTexts: string[] = [];

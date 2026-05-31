@@ -448,6 +448,31 @@ test('CodexWorkerBridge.runTurn reads resumed turn result after the previous log
   assert.equal(result.diagnostics.model, 'codex-current-model');
 }));
 
+test('CodexWorkerBridge.runTurn falls back to stdout aggregate usage when session log only has token count', withFakeBin('fake-codex-session-log-no-usage.mjs', async () => {
+  const bridge = new CodexWorkerBridge();
+
+  const result = await bridge.runTurn({
+    sessionId: null,
+    isFirstTurn: true,
+    projectRoot: process.cwd(),
+    message: 'hello',
+    timeoutMs: 10000,
+  });
+
+  assert.equal(result.content, 'session log final answer');
+  assert.equal(result.diagnostics.model, 'codex-log-model');
+  assert.equal(result.diagnostics.inputTokens, 999);
+  assert.equal(result.diagnostics.outputTokens, 11);
+  assert.equal(result.diagnostics.cacheReadInputTokens, 222);
+  assert.deepEqual(result.diagnostics.lastSubturnUsage, {
+    inputTokens: 333,
+    outputTokens: 5,
+    cacheReadInputTokens: 44,
+  });
+  assert.equal(result.diagnostics.contextWindow, 258400);
+  assert.equal(result.diagnostics.lastSubturnContextTokens, 377);
+}));
+
 test('CodexWorkerBridge.runTurn parses json-schema resume result text as structured output', withFakeBin('fake-codex-resume-structured-output.mjs', async () => {
   await writeCodexPreviousTurnLog();
 

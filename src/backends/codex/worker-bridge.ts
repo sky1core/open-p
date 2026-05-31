@@ -250,7 +250,7 @@ function selectCodexResultSource(
       content: sessionLog.content ?? '',
       reasoningContent: sessionLog.reasoningContent,
       assistantEvents: sessionLog.commentaryEvents,
-      usage: sessionLog.usage,
+      usage: hasCodexUsageSnapshot(sessionLog.usage) ? sessionLog.usage : stdoutParsed.usage,
       model: sessionLog.model,
       contextWindow: sessionLog.contextWindow,
       lastSubturnUsage: sessionLog.lastSubturnUsage,
@@ -272,6 +272,16 @@ function addNullable(left: number | null, right: number | null): number | null {
     return null;
   }
   return left + right;
+}
+
+function hasCodexUsageSnapshot(usage: {
+  readonly inputTokens: number | null;
+  readonly outputTokens: number | null;
+  readonly cacheReadInputTokens: number | null;
+}): boolean {
+  return usage.inputTokens !== null ||
+    usage.outputTokens !== null ||
+    usage.cacheReadInputTokens !== null;
 }
 
 function hasCodexResultArtifacts(events: readonly AssistantEventSnapshot[]): boolean {
