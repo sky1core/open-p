@@ -46,7 +46,7 @@ test('uses result event as result content and does not treat assistant text as r
     outputTokens: 5,
     cacheReadInputTokens: 2,
     contextWindow: 200_000,
-    lastSubturnContextTokens: 12,
+    lastSubturnContextTokens: null,
     durationMs: 1234,
     totalCostUsd: 0.01,
     stopReason: 'end_turn',
@@ -426,6 +426,9 @@ test('formats redacted Claude long-answer stdout fixture as one complete result 
   assert.equal(openp.output.reasoning.length, 1);
   assert.equal(openp.output.toolCall.length, 0);
   assert.equal(openp.output.toolResult.length, 0);
+  assert.equal(openp.metadata.usage.outputTokens, 2298);
+  assert.equal(openp.metadata.lastSubturnUsage.outputTokens, 2298);
+  assert.equal(openp.metadata.lastSubturnContextTokens, 3);
 });
 
 test('formats redacted Claude structured-output stdout fixture without dropping tool metadata', () => {
@@ -472,6 +475,17 @@ test('formats redacted Claude complex tool-use stdout fixture with all answers a
     'toolu_redacted_01',
     'toolu_redacted_02',
   ]);
+  assert.deepEqual(openp.metadata.usage, {
+    inputTokens: 5,
+    outputTokens: 1029,
+    cacheReadInputTokens: 69972,
+  });
+  assert.deepEqual(openp.metadata.lastSubturnUsage, {
+    inputTokens: 1,
+    outputTokens: 657,
+    cacheReadInputTokens: 28295,
+  });
+  assert.equal(openp.metadata.lastSubturnContextTokens, 28296);
 });
 
 test('preserves structured output from result events', () => {
@@ -721,7 +735,7 @@ test('replaces cumulative reasoning assistant snapshots without duplicating prio
   assert.equal(result?.reasoningContent, 'think A\n\nthink B');
 });
 
-test('takes context usage from the last assistant subturn, not result aggregate usage', () => {
+test('does not treat ordinary assistant usage as last subturn usage', () => {
   const result = parseStreamJsonLines([
     line({
       type: 'assistant',
@@ -737,10 +751,46 @@ test('takes context usage from the last assistant subturn, not result aggregate 
     }),
   ]);
 
-  assert.equal(result?.diagnostics.inputTokens, 7);
-  assert.equal(result?.diagnostics.cacheReadInputTokens, 3);
-  assert.equal(result?.diagnostics.outputTokens, 2);
-  assert.equal(result?.diagnostics.lastSubturnContextTokens, 10);
+  assert.equal(result?.diagnostics.inputTokens, 1000);
+  assert.equal(result?.diagnostics.cacheReadInputTokens, 1000);
+  assert.equal(result?.diagnostics.outputTokens, 1000);
+  assert.equal(Object.prototype.hasOwnProperty.call(result?.diagnostics ?? {}, 'lastSubturnUsage'), false);
+  assert.equal(result?.diagnostics.lastSubturnContextTokens, null);
+});
+
+test('does not treat assistant usage iterations as last subturn usage without result iteration', () => {
+  const result = parseStreamJsonLines([
+    line({
+      type: 'assistant',
+      message: {
+        usage: {
+          input_tokens: 7,
+          cache_read_input_tokens: 3,
+          output_tokens: 2,
+          iterations: [
+            {
+              type: 'message',
+              input_tokens: 1,
+              cache_read_input_tokens: 2,
+              output_tokens: 3,
+            },
+          ],
+        },
+        content: [{ type: 'text', text: 'progress' }],
+      },
+    }),
+    line({
+      type: 'result',
+      result: 'final',
+      usage: { input_tokens: 1000, cache_read_input_tokens: 1000, output_tokens: 1000 },
+    }),
+  ]);
+
+  assert.equal(result?.diagnostics.inputTokens, 1000);
+  assert.equal(result?.diagnostics.cacheReadInputTokens, 1000);
+  assert.equal(result?.diagnostics.outputTokens, 1000);
+  assert.equal(Object.prototype.hasOwnProperty.call(result?.diagnostics ?? {}, 'lastSubturnUsage'), false);
+  assert.equal(result?.diagnostics.lastSubturnContextTokens, null);
 });
 
 test('uses result usage when no assistant usage snapshot is present', () => {
@@ -762,8 +812,214 @@ test('uses result usage when no assistant usage snapshot is present', () => {
   assert.equal(result?.diagnostics.inputTokens, 7);
   assert.equal(result?.diagnostics.cacheReadInputTokens, 3);
   assert.equal(result?.diagnostics.outputTokens, 2);
-  assert.equal(result?.diagnostics.lastSubturnContextTokens, 10);
+  assert.equal(Object.prototype.hasOwnProperty.call(result?.diagnostics ?? {}, 'lastSubturnUsage'), false);
+  assert.equal(result?.diagnostics.lastSubturnContextTokens, null);
   assert.equal(result?.diagnostics.stopReason, 'end_turn');
+});
+
+test('uses final result usage iteration for last subturn context usage', () => {
+  const result = parseStreamJsonLines([
+    line({
+      type: 'result',
+      result: 'final',
+      usage: {
+        input_tokens: 100,
+        cache_read_input_tokens: 200,
+        output_tokens: 30,
+        iterations: [
+          {
+            type: 'message',
+            input_tokens: 7,
+            cache_read_input_tokens: 3,
+            output_tokens: 2,
+          },
+        ],
+      },
+    }),
+  ]);
+
+  assert.equal(result?.diagnostics.inputTokens, 100);
+  assert.equal(result?.diagnostics.cacheReadInputTokens, 200);
+  assert.equal(result?.diagnostics.outputTokens, 30);
+  assert.deepEqual(result?.diagnostics.lastSubturnUsage, {
+    inputTokens: 7,
+    cacheReadInputTokens: 3,
+    outputTokens: 2,
+  });
+  assert.equal(result?.diagnostics.lastSubturnContextTokens, 10);
+});
+
+test('uses result aggregate and final iteration when assistant usage arrives first', () => {
+  const result = parseStreamJsonLines([
+    line({
+      type: 'assistant',
+      message: {
+        usage: { input_tokens: 1, cache_read_input_tokens: 2, output_tokens: 1 },
+        content: [{ type: 'text', text: 'progress' }],
+      },
+    }),
+    line({
+      type: 'result',
+      result: 'final',
+      usage: {
+        input_tokens: 100,
+        cache_read_input_tokens: 200,
+        output_tokens: 30,
+        iterations: [
+          {
+            type: 'message',
+            input_tokens: 7,
+            cache_read_input_tokens: 3,
+            output_tokens: 2,
+          },
+        ],
+      },
+    }),
+  ]);
+
+  assert.equal(result?.diagnostics.inputTokens, 100);
+  assert.equal(result?.diagnostics.cacheReadInputTokens, 200);
+  assert.equal(result?.diagnostics.outputTokens, 30);
+  assert.deepEqual(result?.diagnostics.lastSubturnUsage, {
+    inputTokens: 7,
+    cacheReadInputTokens: 3,
+    outputTokens: 2,
+  });
+  assert.equal(result?.diagnostics.lastSubturnContextTokens, 10);
+});
+
+test('parses openp result metadata last subturn usage separately from aggregate usage', () => {
+  const result = parseStreamJsonLines([
+    line({
+      openp: {
+        version: 1,
+        form: 'result',
+        scope: 'active',
+        turnId: 'turn-openp-usage',
+        sessionId: 'session-openp-usage',
+        output: {
+          answer: ['final'],
+          reasoning: [],
+          toolCall: [],
+          toolResult: [],
+        },
+        structuredOutput: null,
+        metadata: {
+          numTurns: 1,
+          durationMs: 1,
+          stopReason: 'end_turn',
+          usage: {
+            inputTokens: 100,
+            cacheReadInputTokens: 200,
+            outputTokens: 30,
+          },
+          lastSubturnUsage: {
+            inputTokens: 7,
+            cacheReadInputTokens: 3,
+            outputTokens: 2,
+          },
+          lastSubturnContextTokens: 10,
+        },
+      },
+    }),
+  ]);
+
+  assert.equal(result?.content, 'final');
+  assert.equal(result?.sessionId, 'session-openp-usage');
+  assert.equal(result?.diagnostics.inputTokens, 100);
+  assert.equal(result?.diagnostics.cacheReadInputTokens, 200);
+  assert.equal(result?.diagnostics.outputTokens, 30);
+  assert.deepEqual(result?.diagnostics.lastSubturnUsage, {
+    inputTokens: 7,
+    cacheReadInputTokens: 3,
+    outputTokens: 2,
+  });
+  assert.equal(result?.diagnostics.lastSubturnContextTokens, 10);
+});
+
+test('parses direct camelCase lastSubturnUsage on result events', () => {
+  const result = parseStreamJsonLines([
+    line({
+      type: 'result',
+      result: 'final',
+      usage: {
+        input_tokens: 100,
+        cache_read_input_tokens: 200,
+        output_tokens: 30,
+      },
+      lastSubturnUsage: {
+        inputTokens: 7,
+        cacheReadInputTokens: 3,
+        outputTokens: 2,
+      },
+      lastSubturnContextTokens: 10,
+    }),
+  ]);
+
+  assert.equal(result?.diagnostics.inputTokens, 100);
+  assert.equal(result?.diagnostics.cacheReadInputTokens, 200);
+  assert.equal(result?.diagnostics.outputTokens, 30);
+  assert.deepEqual(result?.diagnostics.lastSubturnUsage, {
+    inputTokens: 7,
+    cacheReadInputTokens: 3,
+    outputTokens: 2,
+  });
+  assert.equal(result?.diagnostics.lastSubturnContextTokens, 10);
+});
+
+test('does not derive openp last subturn context usage from aggregate streaming usage', () => {
+  const result = parseStreamJsonLines([
+    line({
+      openp: {
+        version: 1,
+        form: 'streaming',
+        scope: 'active',
+        turnId: 'turn-openp-stream-usage',
+        sessionId: 'session-openp-stream-usage',
+        output: { answer: 'progress' },
+        structuredOutput: null,
+        metadata: {
+          usage: {
+            inputTokens: 100,
+            cacheReadInputTokens: 200,
+            outputTokens: 30,
+          },
+        },
+      },
+    }),
+    line({
+      openp: {
+        version: 1,
+        form: 'result',
+        scope: 'active',
+        turnId: 'turn-openp-stream-usage',
+        sessionId: 'session-openp-stream-usage',
+        output: {
+          answer: ['final'],
+          reasoning: [],
+          toolCall: [],
+          toolResult: [],
+        },
+        structuredOutput: null,
+        metadata: {
+          numTurns: 1,
+          durationMs: 1,
+          stopReason: 'end_turn',
+          usage: {
+            inputTokens: 100,
+            cacheReadInputTokens: 200,
+            outputTokens: 30,
+          },
+        },
+      },
+    }),
+  ]);
+
+  assert.equal(result?.diagnostics.inputTokens, 100);
+  assert.equal(result?.diagnostics.cacheReadInputTokens, 200);
+  assert.equal(result?.diagnostics.outputTokens, 30);
+  assert.equal(Object.prototype.hasOwnProperty.call(result?.diagnostics ?? {}, 'lastSubturnUsage'), false);
+  assert.equal(result?.diagnostics.lastSubturnContextTokens, null);
 });
 
 test('preserves raw result usage when no assistant usage snapshot is present', () => {
@@ -804,7 +1060,7 @@ test('preserves raw result usage when no assistant usage snapshot is present', (
   });
 });
 
-test('keeps assistant token counts while preserving richer result raw usage fields', () => {
+test('uses richer result token counts while preserving result raw usage fields', () => {
   const result = parseStreamJsonLines([
     line({
       type: 'assistant',
@@ -830,9 +1086,11 @@ test('keeps assistant token counts while preserving richer result raw usage fiel
     }),
   ]);
 
-  assert.equal(result?.diagnostics.inputTokens, 7);
-  assert.equal(result?.diagnostics.cacheReadInputTokens, 3);
-  assert.equal(result?.diagnostics.outputTokens, 2);
+  assert.equal(result?.diagnostics.inputTokens, 100);
+  assert.equal(result?.diagnostics.cacheReadInputTokens, 30);
+  assert.equal(result?.diagnostics.outputTokens, 20);
+  assert.equal(Object.prototype.hasOwnProperty.call(result?.diagnostics ?? {}, 'lastSubturnUsage'), false);
+  assert.equal(result?.diagnostics.lastSubturnContextTokens, null);
   assert.deepEqual(result?.diagnostics.rawUsage, {
     input_tokens: 100,
     cache_creation_input_tokens: 11,
@@ -842,7 +1100,7 @@ test('keeps assistant token counts while preserving richer result raw usage fiel
   });
 });
 
-test('keeps assistant token counts while preserving changed result raw usage values', () => {
+test('uses changed result token counts without treating assistant usage as last subturn usage', () => {
   const result = parseStreamJsonLines([
     line({
       type: 'assistant',
@@ -866,9 +1124,11 @@ test('keeps assistant token counts while preserving changed result raw usage val
     }),
   ]);
 
-  assert.equal(result?.diagnostics.inputTokens, 7);
-  assert.equal(result?.diagnostics.cacheReadInputTokens, 3);
-  assert.equal(result?.diagnostics.outputTokens, 2);
+  assert.equal(result?.diagnostics.inputTokens, 100);
+  assert.equal(result?.diagnostics.cacheReadInputTokens, 30);
+  assert.equal(result?.diagnostics.outputTokens, 20);
+  assert.equal(Object.prototype.hasOwnProperty.call(result?.diagnostics ?? {}, 'lastSubturnUsage'), false);
+  assert.equal(result?.diagnostics.lastSubturnContextTokens, null);
   assert.deepEqual(result?.diagnostics.rawUsage, {
     input_tokens: 100,
     cache_read_input_tokens: 30,
@@ -1270,7 +1530,8 @@ test('does not let task-notification background metadata overwrite active diagno
   assert.equal(result?.diagnostics.inputTokens, 7);
   assert.equal(result?.diagnostics.cacheReadInputTokens, 3);
   assert.equal(result?.diagnostics.outputTokens, 2);
-  assert.equal(result?.diagnostics.lastSubturnContextTokens, 10);
+  assert.equal(Object.prototype.hasOwnProperty.call(result?.diagnostics ?? {}, 'lastSubturnUsage'), false);
+  assert.equal(result?.diagnostics.lastSubturnContextTokens, null);
   assert.equal(result?.diagnostics.stopReason, 'active_stop');
 });
 

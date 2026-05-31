@@ -31,6 +31,8 @@ interface ParserState {
   stopReason: string | null;
   toolsUsed: Set<string>;
   lastUsage: UsageSnapshot;
+  lastSubturnUsage: UsageSnapshot | null;
+  lastSubturnContextTokens: number | null;
   rawUsage: Record<string, unknown> | null;
   lastModel: string | null;
   resultContextWindow: number | null;
@@ -78,6 +80,8 @@ export function parseStreamJsonLines(
     stopReason: null,
     toolsUsed: new Set(),
     lastUsage: EMPTY_USAGE,
+    lastSubturnUsage: null,
+    lastSubturnContextTokens: null,
     rawUsage: null,
     lastModel: null,
     resultContextWindow: null,
@@ -117,10 +121,12 @@ export function parseStreamJsonLines(
     : state.resultContent;
 
   const contextWindow = state.resultContextWindow ?? resolveContextWindow(state.lastModel, options);
-  const lastSubturnContextTokens =
-    state.lastUsage.inputTokens === null || state.lastUsage.cacheReadInputTokens === null
+  const lastSubturnContextTokens = state.lastSubturnContextTokens ??
+    (state.lastSubturnUsage === null ||
+      state.lastSubturnUsage.inputTokens === null ||
+      state.lastSubturnUsage.cacheReadInputTokens === null
       ? null
-      : state.lastUsage.inputTokens + state.lastUsage.cacheReadInputTokens;
+      : state.lastSubturnUsage.inputTokens + state.lastSubturnUsage.cacheReadInputTokens);
 
   const result: StreamJsonTurnResult = {
     content: resultContent,
@@ -133,6 +139,9 @@ export function parseStreamJsonLines(
       outputTokens: state.lastUsage.outputTokens,
       cacheReadInputTokens: state.lastUsage.cacheReadInputTokens,
       contextWindow,
+      ...(state.lastSubturnUsage && hasUsageSnapshot(state.lastSubturnUsage)
+        ? { lastSubturnUsage: state.lastSubturnUsage }
+        : {}),
       lastSubturnContextTokens,
       durationMs: state.durationMs,
       totalCostUsd: state.totalCostUsd,
@@ -177,6 +186,8 @@ function openPToParserEvent(openp: JsonObject): JsonObject {
       total_cost_usd: metadata.totalCostUsd,
       stop_reason: metadata.stopReason,
       usage: snakeUsage(metadata.rawUsage ?? metadata.usage),
+      last_subturn_usage: snakeUsage(metadata.lastSubturnUsage),
+      last_subturn_context_tokens: metadata.lastSubturnContextTokens,
       structured_output: Object.prototype.hasOwnProperty.call(openp, 'structuredOutput') &&
         openp.structuredOutput !== null
         ? openp.structuredOutput
@@ -414,17 +425,14 @@ function consumeAssistantEvent(
     state.stopReason = message.stop_reason;
   }
 
+  const isOpenPStreamingEvent = asObject(event.openp)?.form === 'streaming';
   const usage = asObject(message.usage);
   if (usage) {
     state.rawUsage = usage;
-    state.lastUsage = {
-      inputTokens: numberOrNull(usage.input_tokens),
-      outputTokens: numberOrNull(usage.output_tokens),
-      cacheReadInputTokens: numberOrNull(usage.cache_read_input_tokens),
-    };
+    state.lastUsage = usageSnapshotFromRawUsage(usage);
   }
 
-  const isOpenPStreamingEvent = asObject(event.openp)?.form === 'streaming';
+  rememberExplicitLastSubturnUsage(state, event);
   const snapshot = !isOpenPStreamingEvent ? buildAssistantSnapshot(event) : null;
   if (snapshot) {
     state.assistantEvents.push(snapshot);
@@ -457,11 +465,17 @@ function consumeResultAssistantEvent(state: ParserState, event: JsonObject): voi
   const usage = asObject(message.usage);
   if (usage) {
     state.rawUsage = usage;
-    state.lastUsage = {
-      inputTokens: numberOrNull(usage.input_tokens),
-      outputTokens: numberOrNull(usage.output_tokens),
-      cacheReadInputTokens: numberOrNull(usage.cache_read_input_tokens),
-    };
+    state.lastUsage = usageSnapshotFromRawUsage(usage);
+  }
+  const explicit = rememberExplicitLastSubturnUsage(state, event);
+  if (!explicit.usage && usage) {
+    const lastSubturnUsage = lastSubturnUsageFromRawUsage(usage);
+    if (lastSubturnUsage && hasUsageSnapshot(lastSubturnUsage)) {
+      state.lastSubturnUsage = lastSubturnUsage;
+      if (!explicit.contextTokens) {
+        state.lastSubturnContextTokens = null;
+      }
+    }
   }
 
   collectAssistantContent(state, message);
@@ -747,13 +761,17 @@ function setActiveResultFromEvent(state: ParserState, event: JsonObject): void {
   const usage = asObject(event.usage);
   if (usage) {
     state.rawUsage = usage;
+    state.lastUsage = usageSnapshotFromRawUsage(usage);
   }
-  if (!hasUsageSnapshot(state.lastUsage) && usage) {
-    state.lastUsage = {
-      inputTokens: numberOrNull(usage.input_tokens),
-      outputTokens: numberOrNull(usage.output_tokens),
-      cacheReadInputTokens: numberOrNull(usage.cache_read_input_tokens),
-    };
+  const explicit = rememberExplicitLastSubturnUsage(state, event);
+  if (!explicit.usage && usage) {
+    const lastSubturnUsage = lastSubturnUsageFromRawUsage(usage);
+    if (lastSubturnUsage && hasUsageSnapshot(lastSubturnUsage)) {
+      state.lastSubturnUsage = lastSubturnUsage;
+      if (!explicit.contextTokens) {
+        state.lastSubturnContextTokens = null;
+      }
+    }
   }
   const resultContextWindow = extractModelUsageContextWindow(event, state.lastModel);
   if (resultContextWindow !== null) {
@@ -791,6 +809,53 @@ function isExplicitErrorResult(event: JsonObject): boolean {
 
 function hasUsageSnapshot(usage: UsageSnapshot): boolean {
   return usage.inputTokens !== null || usage.outputTokens !== null || usage.cacheReadInputTokens !== null;
+}
+
+function usageSnapshotFromRawUsage(usage: JsonObject): UsageSnapshot {
+  return {
+    inputTokens: numberOrNull(usage.input_tokens ?? usage.inputTokens),
+    outputTokens: numberOrNull(usage.output_tokens ?? usage.outputTokens),
+    cacheReadInputTokens: numberOrNull(usage.cache_read_input_tokens ?? usage.cacheReadInputTokens),
+  };
+}
+
+function rememberExplicitLastSubturnUsage(
+  state: ParserState,
+  event: JsonObject,
+): { readonly usage: boolean; readonly contextTokens: boolean } {
+  let rememberedUsage = false;
+  let rememberedContextTokens = false;
+  const explicitUsage = asObject(event.last_subturn_usage) ?? asObject(event.lastSubturnUsage);
+  if (explicitUsage) {
+    const usage = usageSnapshotFromRawUsage(explicitUsage);
+    if (hasUsageSnapshot(usage)) {
+      state.lastSubturnUsage = usage;
+      state.lastSubturnContextTokens = null;
+      rememberedUsage = true;
+    }
+  }
+  const explicitContextTokens = numberOrNull(event.last_subturn_context_tokens ?? event.lastSubturnContextTokens);
+  if (explicitContextTokens !== null) {
+    state.lastSubturnContextTokens = explicitContextTokens;
+    rememberedContextTokens = true;
+  }
+  return { usage: rememberedUsage, contextTokens: rememberedContextTokens };
+}
+
+function lastSubturnUsageFromRawUsage(usage: JsonObject): UsageSnapshot | null {
+  const iteration = finalMessageIteration(usage);
+  return iteration ? usageSnapshotFromRawUsage(iteration) : null;
+}
+
+function finalMessageIteration(usage: JsonObject): JsonObject | null {
+  const iterations = Array.isArray(usage.iterations) ? usage.iterations : [];
+  for (let index = iterations.length - 1; index >= 0; index -= 1) {
+    const iteration = asObject(iterations[index]);
+    if (!iteration) continue;
+    if (iteration.type !== undefined && iteration.type !== 'message') continue;
+    return iteration;
+  }
+  return null;
 }
 
 function buildReasoningContent(state: ParserState): string | null {

@@ -27,6 +27,7 @@ interface ParserState {
   toolsUsed: string[];
   usage: BackendUsage;
   rawUsage: Record<string, unknown> | null;
+  lastSubturnUsage: BackendUsage | null;
   structuredOutput: unknown;
   durationMs: number | null;
   rawEventCount: number;
@@ -53,6 +54,34 @@ const EMPTY_USAGE: BackendUsage = {
   outputTokens: null,
 };
 
+function hasUsageSnapshot(usage: BackendUsage): boolean {
+  return usage.inputTokens !== null || usage.cacheReadInputTokens !== null || usage.outputTokens !== null;
+}
+
+function backendUsageFromRawUsage(usage: JsonObject): BackendUsage {
+  return {
+    inputTokens: numberOrNull(usage.input_tokens),
+    cacheReadInputTokens: numberOrNull(usage.cache_read_input_tokens),
+    outputTokens: numberOrNull(usage.output_tokens),
+  };
+}
+
+function lastSubturnUsageFromClaudeUsage(usage: JsonObject): BackendUsage | null {
+  const iteration = finalMessageIteration(usage);
+  return iteration ? backendUsageFromRawUsage(iteration) : null;
+}
+
+function finalMessageIteration(usage: JsonObject): JsonObject | null {
+  const iterations = Array.isArray(usage.iterations) ? usage.iterations : [];
+  for (let index = iterations.length - 1; index >= 0; index -= 1) {
+    const iteration = asObject(iterations[index]);
+    if (!iteration) continue;
+    if (iteration.type !== undefined && iteration.type !== 'message') continue;
+    return iteration;
+  }
+  return null;
+}
+
 export function parseClaudeCodeJsonlTurn(
   lines: readonly string[],
   turnId: string,
@@ -65,6 +94,7 @@ export function parseClaudeCodeJsonlTurn(
     toolsUsed: [],
     usage: EMPTY_USAGE,
     rawUsage: null,
+    lastSubturnUsage: null,
     structuredOutput: undefined,
     durationMs: null,
     rawEventCount: 0,
@@ -121,6 +151,7 @@ export function parseClaudeCodeJsonlTurn(
     stopReason: state.stopReason,
     toolsUsed: state.toolsUsed,
     usage: state.usage,
+    ...(state.lastSubturnUsage && hasUsageSnapshot(state.lastSubturnUsage) ? { lastSubturnUsage: state.lastSubturnUsage } : {}),
     rawUsage: state.rawUsage,
     rawEventCount: state.rawEventCount,
   };
@@ -307,6 +338,7 @@ function consumeEvent(state: ParserState, event: JsonObject, turnId: string): vo
     state.toolsUsed = [];
     state.usage = EMPTY_USAGE;
     state.rawUsage = null;
+    state.lastSubturnUsage = null;
     state.structuredOutput = undefined;
     state.durationMs = null;
     state.stopReason = null;
@@ -431,11 +463,8 @@ function consumeAssistantEvent(state: ParserState, event: JsonObject): void {
   const usage = asObject(message?.usage);
   if (usage) {
     state.rawUsage = usage;
-    state.usage = {
-      inputTokens: numberOrNull(usage.input_tokens),
-      cacheReadInputTokens: numberOrNull(usage.cache_read_input_tokens),
-      outputTokens: numberOrNull(usage.output_tokens),
-    };
+    state.usage = backendUsageFromRawUsage(usage);
+    state.lastSubturnUsage = lastSubturnUsageFromClaudeUsage(usage);
   }
 
   const content = Array.isArray(message?.content) ? message.content : [];

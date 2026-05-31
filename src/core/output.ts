@@ -52,7 +52,7 @@ export function formatTurnResult(result: TurnResult, options: OutputOptions): st
   const effectiveModel = result.diagnostics.model ?? options.model ?? null;
   const resultUsage = result.diagnostics.usage;
   const lastSubturnUsage = result.diagnostics.lastSubturnUsage ?? null;
-  const assistantUsage = lastSubturnUsage ?? resultUsage;
+  const assistantEventUsage = resultUsage;
   const lastSubturnContextTokens =
     result.diagnostics.lastSubturnContextTokens ??
     (lastSubturnUsage ? contextTokensFromUsage(lastSubturnUsage) : null);
@@ -112,7 +112,7 @@ export function formatTurnResult(result: TurnResult, options: OutputOptions): st
   const assistantEvents = buildAssistantEventsFromSnapshots(
     assistantSnapshots,
     options.backendSessionId,
-    assistantUsage,
+    assistantEventUsage,
     {
       turnId: result.turnId,
       resultAnswerText: result.text,
@@ -122,7 +122,7 @@ export function formatTurnResult(result: TurnResult, options: OutputOptions): st
       requestId: result.requestId ?? null,
       model: effectiveModel,
       stopReason,
-      usage: assistantUsage,
+      usage: assistantEventUsage,
       form: 'result',
     },
   );
@@ -137,7 +137,7 @@ export function formatTurnResult(result: TurnResult, options: OutputOptions): st
     result.requestId ?? null,
     effectiveModel,
     stopReason,
-    assistantUsage,
+    assistantEventUsage,
     'result',
   );
   const effectiveFallbackReasoningContent = openPEventsContainReasoningText(
@@ -176,9 +176,9 @@ export function formatTurnResult(result: TurnResult, options: OutputOptions): st
     model: effectiveModel,
     stopReason,
     usage: {
-      inputTokens: assistantUsage.inputTokens,
-      outputTokens: assistantUsage.outputTokens,
-      cacheReadInputTokens: assistantUsage.cacheReadInputTokens,
+      inputTokens: assistantEventUsage.inputTokens,
+      outputTokens: assistantEventUsage.outputTokens,
+      cacheReadInputTokens: assistantEventUsage.cacheReadInputTokens,
     },
   });
   const nestedAssistantOpenPEvents = buildNestedAssistantOpenPEvents({
@@ -194,7 +194,7 @@ export function formatTurnResult(result: TurnResult, options: OutputOptions): st
     requestId: result.requestId ?? null,
     model: effectiveModel,
     stopReason,
-    usage: assistantUsage,
+    usage: assistantEventUsage,
   });
 
   if (options.outputFormat === 'json') {
@@ -209,7 +209,7 @@ export function formatTurnResult(result: TurnResult, options: OutputOptions): st
       structuredOutputToolUseId,
       assistantEvents: assistantSnapshots ?? [],
       assistantOpenPEvents: nestedAssistantOpenPEvents,
-      assistantEventUsage: assistantUsage,
+      assistantEventUsage,
       lastSubturnUsage,
       durationMs: result.diagnostics.durationMs,
       numTurns: 1,
@@ -242,7 +242,7 @@ export function formatTurnResult(result: TurnResult, options: OutputOptions): st
       structuredOutputToolUseId,
       assistantEvents: assistantSnapshots ?? [],
       assistantOpenPEvents: nestedAssistantOpenPEvents,
-      assistantEventUsage: assistantUsage,
+      assistantEventUsage,
       lastSubturnUsage,
       durationMs: result.diagnostics.durationMs,
       numTurns: 1,
@@ -403,7 +403,7 @@ export function formatWorkerTurnResult(result: WorkerTurnResult, event: {
   };
   const effectiveModel = result.diagnostics.model ?? event.model ?? null;
   const lastSubturnUsage = result.diagnostics.lastSubturnUsage ?? null;
-  const assistantUsage = lastSubturnUsage ?? usage;
+  const assistantEventUsage = usage;
   const lastSubturnContextTokens =
     result.diagnostics.lastSubturnContextTokens ??
     (lastSubturnUsage ? contextTokensFromUsage(lastSubturnUsage) : null);
@@ -461,7 +461,7 @@ export function formatWorkerTurnResult(result: WorkerTurnResult, event: {
   const assistantEvents = buildAssistantEventsFromSnapshots(
     assistantSnapshots,
     result.sessionId,
-    assistantUsage,
+    assistantEventUsage,
       {
         turnId: event.turnId,
         resultAnswerText: result.content,
@@ -471,7 +471,7 @@ export function formatWorkerTurnResult(result: WorkerTurnResult, event: {
         requestId: result.requestId ?? null,
         model: effectiveModel,
         stopReason: result.diagnostics.stopReason,
-        usage: assistantUsage,
+        usage: assistantEventUsage,
         form: 'result',
       },
     );
@@ -486,7 +486,7 @@ export function formatWorkerTurnResult(result: WorkerTurnResult, event: {
     result.requestId ?? null,
     effectiveModel,
     result.diagnostics.stopReason,
-    assistantUsage,
+    assistantEventUsage,
     'result',
   );
   const effectiveFallbackReasoningContent = openPEventsContainReasoningText(
@@ -533,7 +533,7 @@ export function formatWorkerTurnResult(result: WorkerTurnResult, event: {
         requestId: result.requestId,
         stopReason: result.diagnostics.stopReason,
         model: effectiveModel,
-        usage: assistantUsage,
+        usage: assistantEventUsage,
       })
     : [];
   const fallbackAssistantEvents = assistantEvents.length > 0
@@ -551,7 +551,7 @@ export function formatWorkerTurnResult(result: WorkerTurnResult, event: {
                 requestId: result.requestId,
                 stopReason: result.diagnostics.stopReason,
                 model: effectiveModel,
-                usage: assistantUsage,
+                usage: assistantEventUsage,
               }),
               buildStructuredOutputAssistantEventRecord({
                 turnId: event.turnId,
@@ -561,7 +561,7 @@ export function formatWorkerTurnResult(result: WorkerTurnResult, event: {
                 requestId: result.requestId,
                 stopReason: result.diagnostics.stopReason,
                 model: effectiveModel,
-                usage: assistantUsage,
+                usage: assistantEventUsage,
               }),
             ]
           : []),
@@ -584,7 +584,7 @@ export function formatWorkerTurnResult(result: WorkerTurnResult, event: {
               requestId: result.requestId,
               stopReason: result.diagnostics.stopReason,
               model: effectiveModel,
-              usage: assistantUsage,
+              usage: assistantEventUsage,
             }),
             ...(fallbackStructuredOutput !== undefined
               ? [buildStructuredOutputAssistantEventRecord({
@@ -595,7 +595,7 @@ export function formatWorkerTurnResult(result: WorkerTurnResult, event: {
                   requestId: result.requestId,
                   stopReason: result.diagnostics.stopReason,
                   model: effectiveModel,
-                  usage: assistantUsage,
+                  usage: assistantEventUsage,
                 })]
               : []),
           ]
@@ -614,7 +614,7 @@ export function formatWorkerTurnResult(result: WorkerTurnResult, event: {
     requestId: result.requestId ?? null,
     model: effectiveModel,
     stopReason: result.diagnostics.stopReason,
-    usage: assistantUsage,
+    usage: assistantEventUsage,
   });
   const events = [
     buildResultEvent({
@@ -628,7 +628,7 @@ export function formatWorkerTurnResult(result: WorkerTurnResult, event: {
       structuredOutputToolUseId,
       assistantEvents: assistantSnapshots ?? [],
       assistantOpenPEvents: emittedAssistantOpenPEvents,
-      assistantEventUsage: assistantUsage,
+      assistantEventUsage,
       lastSubturnUsage,
       durationMs: result.diagnostics.durationMs,
       numTurns: result.diagnostics.numTurns,
@@ -682,11 +682,11 @@ function resultAnswerTextForTextOutput(result: TurnResult, options: OutputOption
     snapshots: normalizedSuppressedSnapshots ?? [],
   });
   const resultUsage = result.diagnostics.usage;
-  const assistantUsage = result.diagnostics.lastSubturnUsage ?? resultUsage;
+  const assistantEventUsage = resultUsage;
   const assistantEvents = buildAssistantEventsFromSnapshots(
     assistantSnapshots,
     options.backendSessionId,
-    assistantUsage,
+    assistantEventUsage,
     {
       turnId: result.turnId,
       resultAnswerText: result.text,
@@ -696,7 +696,7 @@ function resultAnswerTextForTextOutput(result: TurnResult, options: OutputOption
       requestId: result.requestId ?? null,
       model: result.diagnostics.model ?? options.model ?? null,
       stopReason: result.diagnostics.stopReason ?? 'end_turn',
-      usage: assistantUsage,
+      usage: assistantEventUsage,
       form: 'result',
     },
   );

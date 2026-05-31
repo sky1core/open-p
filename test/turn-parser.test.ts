@@ -83,6 +83,81 @@ test('parses a raw Claude Code turn from appended JSONL events', () => {
   });
 });
 
+test('uses final Claude usage iteration for last subturn usage', () => {
+  const result = parseClaudeCodeJsonlTurn([
+    userLine('hello'),
+    assistantLine([{ type: 'text', text: 'ok' }], {
+      input_tokens: 1,
+      cache_read_input_tokens: 10,
+      output_tokens: 1,
+      iterations: [
+        {
+          type: 'message',
+          input_tokens: 1,
+          cache_read_input_tokens: 10,
+          output_tokens: 125,
+        },
+      ],
+    }, 'end_turn'),
+    durationLine(10),
+  ], TURN_ID);
+
+  assert.deepEqual(result?.diagnostics.usage, {
+    inputTokens: 1,
+    cacheReadInputTokens: 10,
+    outputTokens: 1,
+  });
+  assert.deepEqual(result?.diagnostics.lastSubturnUsage, {
+    inputTokens: 1,
+    cacheReadInputTokens: 10,
+    outputTokens: 125,
+  });
+  assert.deepEqual(result?.diagnostics.rawUsage, {
+    input_tokens: 1,
+    cache_read_input_tokens: 10,
+    output_tokens: 1,
+    iterations: [
+      {
+        type: 'message',
+        input_tokens: 1,
+        cache_read_input_tokens: 10,
+        output_tokens: 125,
+      },
+    ],
+  });
+});
+
+test('does not reuse an earlier Claude usage iteration when final iteration has no token fields', () => {
+  const result = parseClaudeCodeJsonlTurn([
+    userLine('hello'),
+    assistantLine([{ type: 'text', text: 'ok' }], {
+      input_tokens: 3,
+      cache_read_input_tokens: 4,
+      output_tokens: 5,
+      iterations: [
+        {
+          type: 'message',
+          input_tokens: 99,
+          cache_read_input_tokens: 88,
+          output_tokens: 77,
+        },
+        {
+          type: 'message',
+          done: true,
+        },
+      ],
+    }, 'end_turn'),
+    durationLine(10),
+  ], TURN_ID);
+
+  assert.deepEqual(result?.diagnostics.usage, {
+    inputTokens: 3,
+    cacheReadInputTokens: 4,
+    outputTokens: 5,
+  });
+  assert.equal(Object.prototype.hasOwnProperty.call(result?.diagnostics ?? {}, 'lastSubturnUsage'), false);
+});
+
 test('does not strip marker-looking assistant text', () => {
   const markerText = [
     'OPENP_FINAL_START id=turn-1 nonce=nonce-1',
@@ -635,6 +710,29 @@ test('parses a redacted live Claude Code JSONL fixture', async () => {
     outputTokens: 139,
   });
   assert.equal(result?.diagnostics.durationMs, 3107);
+});
+
+test('parses last subturn usage from a redacted Claude Code usage-iterations fixture', async () => {
+  const text = await readFile(
+    new URL('./fixtures/claude/redacted-live-turn-usage-iterations.jsonl', import.meta.url),
+    'utf8',
+  );
+  const lines = text.trimEnd().split('\n');
+
+  const result = parseClaudeCodeJsonlTurn(lines, 'fixture-usage-iterations-turn');
+
+  assert.equal(result?.text, 'usage-iterations-ok');
+  assert.deepEqual(result?.diagnostics.usage, {
+    inputTokens: 5,
+    cacheReadInputTokens: 3000,
+    outputTokens: 500,
+  });
+  assert.deepEqual(result?.diagnostics.lastSubturnUsage, {
+    inputTokens: 1,
+    cacheReadInputTokens: 2800,
+    outputTokens: 125,
+  });
+  assert.equal(result?.diagnostics.durationMs, 3000);
 });
 
 test('parses a redacted Claude Code reasoning fixture variant', async () => {

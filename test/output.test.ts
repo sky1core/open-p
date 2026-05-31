@@ -162,6 +162,14 @@ test('formats result metadata with derived last subturn context token usage', ()
     cacheReadInputTokens: 3,
   });
   assert.equal(metadata(openp).lastSubturnContextTokens, 10);
+  assert.deepEqual(metadata(openp).modelUsage, {
+    'codex-test': {
+      contextWindow: 258400,
+      inputTokens: 100,
+      outputTokens: 30,
+      cacheReadInputTokens: 200,
+    },
+  });
 });
 
 test('does not derive last subturn context token usage from aggregate-only usage', () => {
@@ -402,6 +410,47 @@ test('formats worker result with full diagnostics in openp metadata', () => {
   assert.equal(metadata(openp).numTurns, 2);
   assert.equal(metadata(openp).durationMs, 456);
   assert.equal(metadata(openp).stopReason, 'end_turn');
+});
+
+test('formats worker result metadata with last subturn usage separate from aggregate usage', () => {
+  const openp = parseSingleOpenPRecord(formatWorkerTurnResult({
+    ...WORKER_RESULT,
+    diagnostics: {
+      ...WORKER_RESULT.diagnostics,
+      inputTokens: 100,
+      cacheReadInputTokens: 200,
+      outputTokens: 30,
+      lastSubturnUsage: {
+        inputTokens: 7,
+        cacheReadInputTokens: 3,
+        outputTokens: 2,
+      },
+      lastSubturnContextTokens: null,
+    },
+  }, {
+    turnId: 'public-turn-1',
+    model: 'claude-test',
+  }));
+
+  assert.deepEqual(metadata(openp).usage, {
+    inputTokens: 100,
+    outputTokens: 30,
+    cacheReadInputTokens: 200,
+  });
+  assert.deepEqual(metadata(openp).lastSubturnUsage, {
+    inputTokens: 7,
+    outputTokens: 2,
+    cacheReadInputTokens: 3,
+  });
+  assert.equal(metadata(openp).lastSubturnContextTokens, 10);
+  assert.deepEqual(metadata(openp).modelUsage, {
+    'claude-test': {
+      inputTokens: 100,
+      outputTokens: 30,
+      cacheReadInputTokens: 200,
+      contextWindow: 200000,
+    },
+  });
 });
 
 test('structured-output fallback snapshots do not expose raw JSON as answer prose', () => {
