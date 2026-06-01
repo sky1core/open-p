@@ -623,20 +623,79 @@ test('CodexBackend.runTurn streams unphased prefix without completing it from ba
   assert.equal(result.text, 'final answer');
 }));
 
-test('CodexBackend.runTurn rejects resume when the session log offset is unavailable', withFakeBin('fake-codex-success.sh', async () => {
+test('CodexBackend.runTurn falls back to stdout when resume session log is absent before launch', withFakeBin('fake-codex-resume-stdout-only.mjs', async () => {
+  const backend = new CodexBackend();
+
+  const result = await backend.runTurn(
+    { turnId: 'turn-2', prompt: 'follow up' },
+    { ...BASE_OPTIONS, resume: true, backendSessionId: FAKE_CODEX_SESSION_ID },
+  );
+
+  assert.equal(result.text, 'stdout-only final answer');
+  assert.equal(result.sessionId, FAKE_CODEX_SESSION_ID);
+  assert.equal(result.reasoningContent, 'stdout-only reasoning');
+  assert.equal(result.assistantEvents?.length, 1);
+  assert.equal(assistantEventText(result, 0), 'stdout-only commentary');
+  assert.deepEqual(result.diagnostics.usage, {
+    inputTokens: 120,
+    outputTokens: 12,
+    cacheReadInputTokens: 30,
+  });
+  assert.equal(result.diagnostics.contextWindow, null);
+  assert.equal(result.diagnostics.lastSubturnUsage, null);
+}));
+
+test('CodexBackend.runTurn rejects resume when the known session log disappears before result read', withFakeBin('fake-codex-remove-session-log.mjs', async () => {
+  await writeCodexPreviousTurnLog();
   const backend = new CodexBackend();
 
   await assert.rejects(
     backend.runTurn(
       { turnId: 'turn-2', prompt: 'follow up' },
-      { ...BASE_OPTIONS, resume: true, backendSessionId: 'missing-codex-session' },
+      { ...BASE_OPTIONS, resume: true, backendSessionId: FAKE_CODEX_SESSION_ID },
     ),
-    (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.protocolViolation,
+    (error) => error instanceof OpenPError
+      && error.exitCode === EXIT_CODES.protocolViolation
+      && error.message.includes('became unavailable'),
   );
 }));
 
-test('CodexBackend.runTurn rejects resume when the known session log disappears before result read', withFakeBin('fake-codex-remove-session-log.mjs', async () => {
+test('CodexBackend.runTurn rejects resume when the known session log is replaced by another matching log', withFakeBin('fake-codex-replace-session-log.mjs', async () => {
   await writeCodexPreviousTurnLog();
+  const backend = new CodexBackend();
+
+  await assert.rejects(
+    backend.runTurn(
+      { turnId: 'turn-2', prompt: 'follow up' },
+      { ...BASE_OPTIONS, resume: true, backendSessionId: FAKE_CODEX_SESSION_ID },
+    ),
+    (error) => error instanceof OpenPError
+      && error.exitCode === EXIT_CODES.protocolViolation
+      && error.message.includes('became unavailable'),
+  );
+}));
+
+test('CodexBackend.runTurn uses a newly created resume session log when none existed before launch', withFakeBin('fake-codex-resume-session-log.mjs', async () => {
+  const backend = new CodexBackend();
+  const result = await backend.runTurn(
+    { turnId: 'turn-2', prompt: 'follow up' },
+    { ...BASE_OPTIONS, resume: true, backendSessionId: FAKE_CODEX_SESSION_ID },
+  );
+
+  assert.equal(result.text, 'current turn final answer');
+  assert.equal(result.reasoningContent, 'current turn reasoning');
+  assert.equal(result.assistantEvents?.length, 1);
+  assert.equal(assistantEventText(result, 0), 'current turn commentary');
+  assert.equal(result.diagnostics.model, 'codex-current-model');
+  assert.equal(result.diagnostics.contextWindow, 200000);
+  assert.deepEqual(result.diagnostics.lastSubturnUsage, {
+    inputTokens: 2000,
+    outputTokens: 40,
+    cacheReadInputTokens: 300,
+  });
+}));
+
+test('CodexBackend.runTurn rejects resume when a newly created session log is unreadable', withFakeBin('fake-codex-unreadable-session-log.mjs', async () => {
   const backend = new CodexBackend();
 
   await assert.rejects(

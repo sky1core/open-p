@@ -35,6 +35,12 @@ export interface CodexSessionLogResult {
   } | null;
 }
 
+export interface CodexSessionLogBaseline {
+  readonly offsetBytes: number;
+  readonly preexisting: boolean;
+  readonly logPath: string | null;
+}
+
 interface CodexSessionLogAgentMessageMirrorCandidate {
   readonly phase: string;
   readonly text: string;
@@ -64,12 +70,28 @@ export async function getCodexSessionLogSize(sessionId: string): Promise<number 
   }
 }
 
+export async function getCodexSessionLogBaseline(sessionId: string): Promise<CodexSessionLogBaseline> {
+  const logPath = await findCodexSessionLogPath(sessionId);
+  if (!logPath) {
+    return { offsetBytes: 0, preexisting: false, logPath: null };
+  }
+  try {
+    const st = await stat(logPath);
+    return { offsetBytes: st.size, preexisting: true, logPath };
+  } catch {
+    throw new OpenPError('Codex session log became unavailable before resume launch', EXIT_CODES.protocolViolation);
+  }
+}
+
 async function findMatchingLog(dir: string, sessionId: string): Promise<string | null> {
   let entries: import('node:fs').Dirent[];
   try {
     entries = await readdir(dir, { withFileTypes: true });
-  } catch {
-    return null;
+  } catch (error) {
+    if (isNotFoundError(error)) {
+      return null;
+    }
+    throw new OpenPError('Codex session log directory is unreadable', EXIT_CODES.protocolViolation);
   }
 
   const candidates: string[] = [];
@@ -99,6 +121,13 @@ async function findMatchingLog(dir: string, sessionId: string): Promise<string |
   return candidates[0] ?? null;
 }
 
+function isNotFoundError(error: unknown): boolean {
+  return typeof error === 'object'
+    && error !== null
+    && 'code' in error
+    && error.code === 'ENOENT';
+}
+
 function isCodexSessionLogName(name: string, sessionId: string): boolean {
   return name === `${sessionId}.jsonl` || name.endsWith(`-${sessionId}.jsonl`);
 }
@@ -109,11 +138,37 @@ export async function readCodexSessionLogResult(
 ): Promise<CodexSessionLogResult | null> {
   const logPath = await findCodexSessionLogPath(sessionId);
   if (!logPath) return null;
+  return readCodexSessionLogResultAtPath(
+    logPath,
+    offsetBytes,
+    'Codex session log became unavailable after discovery',
+  );
+}
 
+export async function readCodexSessionLogResultSinceBaseline(
+  sessionId: string,
+  baseline: CodexSessionLogBaseline | null,
+): Promise<CodexSessionLogResult | null> {
+  if (baseline?.preexisting) {
+    return baseline.logPath
+      ? readCodexSessionLogResultAtPath(baseline.logPath, baseline.offsetBytes)
+      : null;
+  }
+  return readCodexSessionLogResult(sessionId, baseline?.offsetBytes ?? 0);
+}
+
+async function readCodexSessionLogResultAtPath(
+  logPath: string,
+  offsetBytes: number,
+  readFailureMessage: string | null = null,
+): Promise<CodexSessionLogResult | null> {
   let buf: Buffer;
   try {
     buf = await readFile(logPath);
   } catch {
+    if (readFailureMessage) {
+      throw new OpenPError(readFailureMessage, EXIT_CODES.protocolViolation);
+    }
     return null;
   }
   const raw = buf.subarray(offsetBytes).toString('utf8');

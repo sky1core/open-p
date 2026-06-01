@@ -388,23 +388,89 @@ test('CodexWorkerBridge.runTurn treats isFirstTurn=true even when sessionId is p
   assert.equal(result.sessionId, FAKE_CODEX_SESSION_ID);
 }));
 
-test('CodexWorkerBridge.runTurn rejects resume when the session log offset is unavailable', withFakeBin('fake-codex-success.sh', async () => {
+test('CodexWorkerBridge.runTurn falls back to stdout when resume session log is absent before launch', withFakeBin('fake-codex-resume-stdout-only.mjs', async () => {
+  const bridge = new CodexWorkerBridge();
+
+  const result = await bridge.runTurn({
+    sessionId: FAKE_CODEX_SESSION_ID,
+    isFirstTurn: false,
+    projectRoot: process.cwd(),
+    message: 'follow up',
+    timeoutMs: 10000,
+  });
+
+  assert.equal(result.content, 'stdout-only final answer');
+  assert.equal(result.sessionId, FAKE_CODEX_SESSION_ID);
+  assert.equal(result.reasoningContent, 'stdout-only reasoning');
+  assert.equal(result.assistantEvents?.length, 1);
+  assert.equal(assistantEventText(result, 0), 'stdout-only commentary');
+  assert.equal(result.diagnostics.inputTokens, 120);
+  assert.equal(result.diagnostics.outputTokens, 12);
+  assert.equal(result.diagnostics.cacheReadInputTokens, 30);
+  assert.equal(result.diagnostics.contextWindow, null);
+  assert.equal(result.diagnostics.lastSubturnUsage, null);
+}));
+
+test('CodexWorkerBridge.runTurn rejects resume when the known session log disappears before result read', withFakeBin('fake-codex-remove-session-log.mjs', async () => {
+  await writeCodexPreviousTurnLog();
   const bridge = new CodexWorkerBridge();
 
   await assert.rejects(
     bridge.runTurn({
-      sessionId: 'missing-codex-session',
+      sessionId: FAKE_CODEX_SESSION_ID,
       isFirstTurn: false,
       projectRoot: process.cwd(),
       message: 'follow up',
       timeoutMs: 10000,
     }),
-    (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.protocolViolation,
+    (error) => error instanceof OpenPError
+      && error.exitCode === EXIT_CODES.protocolViolation
+      && error.message.includes('became unavailable'),
   );
 }));
 
-test('CodexWorkerBridge.runTurn rejects resume when the known session log disappears before result read', withFakeBin('fake-codex-remove-session-log.mjs', async () => {
+test('CodexWorkerBridge.runTurn rejects resume when the known session log is replaced by another matching log', withFakeBin('fake-codex-replace-session-log.mjs', async () => {
   await writeCodexPreviousTurnLog();
+  const bridge = new CodexWorkerBridge();
+
+  await assert.rejects(
+    bridge.runTurn({
+      sessionId: FAKE_CODEX_SESSION_ID,
+      isFirstTurn: false,
+      projectRoot: process.cwd(),
+      message: 'follow up',
+      timeoutMs: 10000,
+    }),
+    (error) => error instanceof OpenPError
+      && error.exitCode === EXIT_CODES.protocolViolation
+      && error.message.includes('became unavailable'),
+  );
+}));
+
+test('CodexWorkerBridge.runTurn uses a newly created resume session log when none existed before launch', withFakeBin('fake-codex-resume-session-log.mjs', async () => {
+  const bridge = new CodexWorkerBridge();
+  const result = await bridge.runTurn({
+    sessionId: FAKE_CODEX_SESSION_ID,
+    isFirstTurn: false,
+    projectRoot: process.cwd(),
+    message: 'follow up',
+    timeoutMs: 10000,
+  });
+
+  assert.equal(result.content, 'current turn final answer');
+  assert.equal(result.reasoningContent, 'current turn reasoning');
+  assert.equal(result.assistantEvents?.length, 1);
+  assert.equal(assistantEventText(result, 0), 'current turn commentary');
+  assert.equal(result.diagnostics.model, 'codex-current-model');
+  assert.equal(result.diagnostics.contextWindow, 200000);
+  assert.deepEqual(result.diagnostics.lastSubturnUsage, {
+    inputTokens: 2000,
+    outputTokens: 40,
+    cacheReadInputTokens: 300,
+  });
+}));
+
+test('CodexWorkerBridge.runTurn rejects resume when a newly created session log is unreadable', withFakeBin('fake-codex-unreadable-session-log.mjs', async () => {
   const bridge = new CodexWorkerBridge();
 
   await assert.rejects(

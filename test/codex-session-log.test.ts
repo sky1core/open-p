@@ -10,6 +10,7 @@ import {
   findCodexSessionLogPath,
   readCodexSessionLogResult,
 } from '../src/backends/codex/session-log.js';
+import { EXIT_CODES, OpenPError } from '../src/core/errors.js';
 import { formatWorkerTurnResult } from '../src/core/output.js';
 
 function codexUserTurn(): string {
@@ -241,6 +242,28 @@ test('findCodexSessionLogPath rejects duplicate session id log paths', async () 
     await assert.rejects(
       () => findCodexSessionLogPath('dup'),
       /ambiguous Codex session log paths/,
+    );
+  } finally {
+    if (prev === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = prev;
+    }
+  }
+});
+
+test('findCodexSessionLogPath fails closed when the sessions directory cannot be read', async () => {
+  const prev = process.env.CODEX_HOME;
+  const codexHome = await mkdtemp(join(tmpdir(), 'openp-codex-home-'));
+  await writeFile(join(codexHome, 'sessions'), 'not a directory\n');
+  process.env.CODEX_HOME = codexHome;
+
+  try {
+    await assert.rejects(
+      () => findCodexSessionLogPath('abc'),
+      (error) => error instanceof OpenPError
+        && error.exitCode === EXIT_CODES.protocolViolation
+        && error.message.includes('session log directory is unreadable'),
     );
   } finally {
     if (prev === undefined) {

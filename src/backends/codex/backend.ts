@@ -17,7 +17,7 @@ import {
   type CodexStreamState,
   type CodexStreamCallbacks,
 } from './jsonl-parser.js';
-import { getCodexSessionLogSize, readCodexSessionLogResult, type CodexSessionLogResult } from './session-log.js';
+import { getCodexSessionLogBaseline, readCodexSessionLogResultSinceBaseline, type CodexSessionLogResult } from './session-log.js';
 import { runCodexExec } from './exec-runner.js';
 import { parseCodexStructuredOutputFallback, parseCodexStructuredOutputSchema } from './structured-output.js';
 
@@ -98,10 +98,9 @@ export class CodexBackend implements Backend {
         : undefined,
     };
 
-    const resumeLogOffset = !isFirstTurn
-      ? await getCodexSessionLogSize(options.backendSessionId)
+    const resumeLogBaseline = !isFirstTurn
+      ? await getCodexSessionLogBaseline(options.backendSessionId)
       : null;
-    const initialLogOffset = isFirstTurn ? 0 : requireCodexResumeLogOffset(resumeLogOffset);
 
     try {
       const result = await runCodexExec({
@@ -153,9 +152,9 @@ export class CodexBackend implements Backend {
       const resolvedSessionId = stdoutParsed.sessionId ?? options.backendSessionId;
 
       const sessionLog = resolvedSessionId
-        ? await readCodexSessionLogResult(resolvedSessionId, initialLogOffset)
+        ? await readCodexSessionLogResultSinceBaseline(resolvedSessionId, resumeLogBaseline)
         : null;
-      if (!isFirstTurn && !sessionLog) {
+      if (!isFirstTurn && resumeLogBaseline?.preexisting && !sessionLog) {
         throw new OpenPError('Codex session log became unavailable for resume turn', EXIT_CODES.protocolViolation);
       }
 
@@ -297,13 +296,6 @@ function hasCodexResultArtifacts(events: readonly AssistantEventSnapshot[]): boo
       return type === 'tool_use' || type === 'server_tool_use' || type === 'tool_result';
     });
   });
-}
-
-function requireCodexResumeLogOffset(offset: number | null): number {
-  if (offset === null) {
-    throw new OpenPError('Codex resume session log offset is unavailable', EXIT_CODES.protocolViolation);
-  }
-  return offset;
 }
 
 async function safeUnlink(path: string): Promise<void> {
