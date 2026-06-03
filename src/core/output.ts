@@ -1687,8 +1687,8 @@ function buildOpenPTurnResult(event: {
     : event.answerText.length > 0 ? [event.answerText] : [];
   const reasoning = [
     ...collectedReasoning,
-    ...(event.reasoningText && event.reasoningText.length > 0 && !collectedReasoning.includes(event.reasoningText)
-      ? [event.reasoningText]
+    ...(shouldAppendResultReasoningFallback(collectedReasoning, event.reasoningText)
+      ? [event.reasoningText!]
       : []),
   ];
   const structuredOutputToolUseId = event.structuredOutput !== undefined
@@ -1742,6 +1742,26 @@ function buildOpenPTurnResult(event: {
     structuredOutput: event.structuredOutput ?? null,
     metadata,
   });
+}
+
+function shouldAppendResultReasoningFallback(
+  collectedReasoning: readonly string[],
+  reasoningText: string | null | undefined,
+): boolean {
+  const candidate = typeof reasoningText === 'string' ? reasoningText : '';
+  if (candidate.length === 0) {
+    return false;
+  }
+  if (collectedReasoning.includes(candidate)) {
+    return false;
+  }
+  return joinReasoningSequence(collectedReasoning) !== candidate;
+}
+
+function joinReasoningSequence(texts: readonly string[]): string {
+  return texts
+    .filter((text) => text.length > 0)
+    .join('\n\n');
 }
 
 function buildOpenPUsage(usage: {
@@ -2150,17 +2170,18 @@ function buildStructuredOutputAssistantEventRecord(event: {
 }
 
 function openPEventsContainReasoningText(events: readonly Record<string, unknown>[], text: string | null | undefined): boolean {
-  if (!text) {
+  const candidate = typeof text === 'string' ? text : '';
+  if (candidate.length === 0) {
     return false;
   }
-  return events.some((event) => event.openp && typeof event.openp === 'object' && !Array.isArray(event.openp)
-    ? openPEventHasReasoningText(event.openp as Record<string, unknown>, text)
-    : openPEventHasReasoningText(event, text));
-}
-
-function openPEventHasReasoningText(event: Record<string, unknown>, text: string): boolean {
-  const output = asOpenPOutput(event);
-  return stringArray(output?.reasoning).includes(text);
+  const openPEvents = events.map((event) =>
+    event.openp && typeof event.openp === 'object' && !Array.isArray(event.openp)
+      ? event.openp as Record<string, unknown>
+      : event
+  );
+  const reasoningTexts = collectOpenPReasoningFromAssistantEvents(openPEvents);
+  return reasoningTexts.includes(candidate) ||
+    joinReasoningSequence(reasoningTexts) === candidate;
 }
 
 function buildTerminalAssistantEventRecords(event: {

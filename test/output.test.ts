@@ -593,6 +593,65 @@ test('streamed non-semantic result snapshot does not duplicate terminal result a
   assert.deepEqual(resultOutput(openp).answer, ['same answer']);
 });
 
+test('streamed reasoning snapshots do not duplicate terminal aggregate reasoning fallback', () => {
+  const firstReasoningSnapshot: AssistantEventSnapshot = {
+    message: {
+      id: 'msg-reasoning-1',
+      type: 'message',
+      role: 'assistant',
+      content: [{ type: 'thinking', thinking: 'think A' }],
+      stop_reason: 'tool_use',
+    },
+  };
+  const secondReasoningSnapshot: AssistantEventSnapshot = {
+    message: {
+      id: 'msg-reasoning-2',
+      type: 'message',
+      role: 'assistant',
+      content: [{ type: 'thinking', thinking: 'think B' }],
+      stop_reason: 'tool_use',
+    },
+  };
+  const openp = parseSingleOpenPRecord(formatTurnResult({
+    ...RESULT,
+    text: 'done',
+    structuredOutput: undefined,
+    reasoningContent: 'think A\n\nthink B',
+    assistantEvents: [firstReasoningSnapshot, secondReasoningSnapshot],
+  }, {
+    outputFormat: 'stream-json',
+    backendSessionId: '11111111-1111-4111-8111-111111111111',
+    suppressAssistantSnapshots: [firstReasoningSnapshot, secondReasoningSnapshot],
+  }));
+
+  assert.deepEqual(resultOutput(openp).reasoning, ['think A', 'think B']);
+});
+
+test('streamed reasoning snapshots preserve distinct terminal reasoning formatting', () => {
+  const reasoningSnapshot: AssistantEventSnapshot = {
+    message: {
+      id: 'msg-reasoning-1',
+      type: 'message',
+      role: 'assistant',
+      content: [{ type: 'thinking', thinking: 'think block' }],
+      stop_reason: 'tool_use',
+    },
+  };
+  const openp = parseSingleOpenPRecord(formatTurnResult({
+    ...RESULT,
+    text: 'done',
+    structuredOutput: undefined,
+    reasoningContent: '  think block\n',
+    assistantEvents: [reasoningSnapshot],
+  }, {
+    outputFormat: 'stream-json',
+    backendSessionId: '11111111-1111-4111-8111-111111111111',
+    suppressAssistantSnapshots: [reasoningSnapshot],
+  }));
+
+  assert.deepEqual(resultOutput(openp).reasoning, ['think block', '  think block\n']);
+});
+
 test('suppressed tool snapshots preserve all tool calls in the result aggregate', () => {
   const streamedSnapshot: AssistantEventSnapshot = {
     message: {
