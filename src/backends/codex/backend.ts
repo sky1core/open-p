@@ -248,7 +248,7 @@ function selectCodexResultSource(
       content: sessionLog.content ?? '',
       reasoningContent: sessionLog.reasoningContent,
       assistantEvents: sessionLog.commentaryEvents,
-      usage: hasCodexUsageSnapshot(sessionLog.usage) ? sessionLog.usage : stdoutParsed.usage,
+      usage: hasCodexUsageSnapshot(sessionLog.usage) ? sessionLog.usage : emptyCodexUsage(),
       model: sessionLog.model,
       contextWindow: sessionLog.contextWindow,
       lastSubturnUsage: sessionLog.lastSubturnUsage,
@@ -280,6 +280,18 @@ function hasCodexUsageSnapshot(usage: {
   return usage.inputTokens !== null ||
     usage.outputTokens !== null ||
     usage.cacheReadInputTokens !== null;
+}
+
+function emptyCodexUsage(): {
+  readonly inputTokens: null;
+  readonly outputTokens: null;
+  readonly cacheReadInputTokens: null;
+} {
+  return {
+    inputTokens: null,
+    outputTokens: null,
+    cacheReadInputTokens: null,
+  };
 }
 
 function hasCodexResultArtifacts(events: readonly AssistantEventSnapshot[]): boolean {

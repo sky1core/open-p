@@ -514,7 +514,7 @@ test('CodexWorkerBridge.runTurn reads resumed turn result after the previous log
   assert.equal(result.diagnostics.model, 'codex-current-model');
 }));
 
-test('CodexWorkerBridge.runTurn falls back to stdout aggregate usage when session log only has token count', withFakeBin('fake-codex-session-log-no-usage.mjs', async () => {
+test('CodexWorkerBridge.runTurn does not mix stdout aggregate usage when session log only has token count', withFakeBin('fake-codex-session-log-no-usage.mjs', async () => {
   const bridge = new CodexWorkerBridge();
 
   const result = await bridge.runTurn({
@@ -527,9 +527,9 @@ test('CodexWorkerBridge.runTurn falls back to stdout aggregate usage when sessio
 
   assert.equal(result.content, 'session log final answer');
   assert.equal(result.diagnostics.model, 'codex-log-model');
-  assert.equal(result.diagnostics.inputTokens, 999);
-  assert.equal(result.diagnostics.outputTokens, 11);
-  assert.equal(result.diagnostics.cacheReadInputTokens, 222);
+  assert.equal(result.diagnostics.inputTokens, null);
+  assert.equal(result.diagnostics.outputTokens, null);
+  assert.equal(result.diagnostics.cacheReadInputTokens, null);
   assert.deepEqual(result.diagnostics.lastSubturnUsage, {
     inputTokens: 333,
     outputTokens: 5,
