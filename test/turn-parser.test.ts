@@ -244,6 +244,17 @@ test('clears stale stop reason when later assistant snapshot omits it', () => {
   assert.equal(result?.diagnostics.stopReason, null);
 });
 
+test('replaces same-message assistant snapshot after a terminal stop marker', () => {
+  const result = parseClaudeCodeJsonlTurn([
+    userLine('hello'),
+    assistantLine([{ type: 'text', text: 'hel' }], undefined, 'end_turn', undefined, undefined, 'msg_1'),
+    assistantLine([{ type: 'text', text: 'hello' }], undefined, undefined, undefined, undefined, 'msg_1'),
+    durationLine(100),
+  ], TURN_ID);
+
+  assert.equal(result?.text, 'hello');
+});
+
 test('resets intermediate text when a newer user turn appears in the observed segment', () => {
   const lines = [
     userLine('old'),
@@ -349,7 +360,7 @@ test('keeps duplicate Claude Code assistant text after a terminal boundary', () 
   assert.equal(parseClaudeCodeJsonlTurn([...lines, durationLine(100)], TURN_ID)?.text, 'A\n\nA');
 });
 
-test('keeps terminal boundary from duplicate Claude Code assistant metadata snapshots', () => {
+test('replaces duplicate Claude Code assistant metadata snapshots for the same message id', () => {
   const lines = [
     userLine('hello'),
     assistantLine([{ type: 'text', text: 'A' }], undefined, undefined, undefined, undefined, 'msg-one'),
@@ -357,7 +368,7 @@ test('keeps terminal boundary from duplicate Claude Code assistant metadata snap
     assistantLine([{ type: 'text', text: 'A\n\nB' }], undefined, undefined, undefined, undefined, 'msg-one'),
   ];
 
-  assert.equal(parseClaudeCodeJsonlTurn([...lines, durationLine(100)], TURN_ID)?.text, 'A\n\nA\n\nB');
+  assert.equal(parseClaudeCodeJsonlTurn([...lines, durationLine(100)], TURN_ID)?.text, 'A\n\nB');
 });
 
 test('accumulates intermediate reasoning across assistant subturns', () => {
@@ -462,6 +473,16 @@ test('synthetic no-response assistant can close a linked background task without
 
   assert.equal(result?.text, 'working\n\nactive result');
   assert.equal(result?.reasoningContent, null);
+});
+
+test('keeps a real Claude no-response answer when it is not synthetic', () => {
+  const result = parseClaudeCodeJsonlTurn([
+    userLine('hello'),
+    assistantLine([{ type: 'text', text: 'No response requested.' }], undefined, 'end_turn'),
+    durationLine(10),
+  ], TURN_ID);
+
+  assert.equal(result?.text, 'No response requested.');
 });
 
 test('fails closed when task-notification ordering is ambiguous without uuid linkage', () => {
@@ -877,6 +898,23 @@ test('treats local-command-looking prompt text as caller input without local-com
   ], TURN_ID);
 
   assert.equal(result?.text, 'literal prompt handled');
+});
+
+test('treats prompt-id local-command-looking prompt text as caller input without caveat linkage', () => {
+  const result = parseClaudeCodeJsonlTurn([
+    JSON.stringify({
+      type: 'user',
+      promptId: 'caller-prompt-id',
+      message: {
+        role: 'user',
+        content: '<command-name>/compact</command-name>\n<command-message>compact</command-message>',
+      },
+    }),
+    assistantLine([{ type: 'text', text: 'literal prompt with prompt id handled' }], undefined, 'end_turn'),
+    durationLine(10),
+  ], TURN_ID);
+
+  assert.equal(result?.text, 'literal prompt with prompt id handled');
 });
 
 function userLine(content: string, uuid?: string, parentUuid?: string): string {

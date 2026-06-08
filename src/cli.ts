@@ -353,11 +353,7 @@ async function main(argv: readonly string[]): Promise<number> {
         : existingState?.sessionLogPath ?? null,
       lastTurnId: result.turnId,
     });
-    if (options.outputFormat === 'stream-json') {
-      process.stdout.write(successOutput);
-    } else {
-      process.stdout.write(successOutput);
-    }
+    process.stdout.write(successOutput);
     return EXIT_CODES.success;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

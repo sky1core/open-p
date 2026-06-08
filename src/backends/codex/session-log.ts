@@ -280,6 +280,9 @@ export function extractSessionLogResult(rawLog: string): CodexSessionLogResult {
             pushAnswerSnapshot(text, payload.phase, payload.id);
           } else if (isCommentaryPhase(payload.phase)) {
             pushCommentarySnapshot(text, payload.phase, payload.id);
+          } else {
+            lastFinalResponseItemText ??= text;
+            pushAnswerSnapshot(text, payload.phase, payload.id);
           }
         }
         lastAgentMessageMirrorCandidate = null;
@@ -307,6 +310,9 @@ export function extractSessionLogResult(rawLog: string): CodexSessionLogResult {
             pushAnswerSnapshot(text, payload.phase, payload.id);
           } else if (isCommentaryPhase(payload.phase)) {
             pushCommentarySnapshot(text, payload.phase, payload.id);
+          } else {
+            lastFinalResponseItemText ??= text;
+            pushAnswerSnapshot(text, payload.phase, payload.id);
           }
           lastAgentMessageMirrorCandidate = buildCodexSessionLogAgentMessageMirrorCandidate(payload.phase, text);
         } else {
@@ -342,6 +348,9 @@ export function extractSessionLogResult(rawLog: string): CodexSessionLogResult {
           pushAnswerSnapshot(item.text.trim(), item.phase, item.id);
         } else if (isCommentaryPhase(item.phase)) {
           pushCommentarySnapshot(item.text.trim(), item.phase, item.id);
+        } else {
+          lastFinalResponseItemText ??= item.text.trim();
+          pushAnswerSnapshot(item.text.trim(), item.phase, item.id);
         }
         continue;
       }

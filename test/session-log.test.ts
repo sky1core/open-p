@@ -7,6 +7,7 @@ import test from 'node:test';
 import {
   resolveClaudeCodeProjectLogDir,
   resolveClaudeCodeSessionLogPath,
+  readNewText,
   snapshotClaudeCodeSessionLogPaths,
   waitForClaudeCodeTurnResult,
 } from '../src/backends/claude/session-log.js';
@@ -98,6 +99,28 @@ test('reports backend exit during active turn instead of waiting for timeout', a
     }),
     (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.backendExited,
   );
+});
+
+test('readNewText does not advance past an incomplete UTF-8 tail byte sequence', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-session-log-utf8-'));
+  const logPath = join(dir, 'session.jsonl');
+  const prefix = Buffer.from('{"text":"');
+  const splitChar = Buffer.from('한');
+  const suffix = Buffer.from('"}\n');
+
+  await writeFile(logPath, Buffer.concat([prefix, splitChar.subarray(0, 1)]));
+
+  const first = await readNewText(logPath, 0);
+  assert.equal(first.text, prefix.toString('utf8'));
+  assert.equal(first.nextOffset, prefix.length);
+  assert.equal(first.text.includes('�'), false);
+
+  await appendFile(logPath, Buffer.concat([splitChar.subarray(1), suffix]));
+
+  const second = await readNewText(logPath, first.nextOffset);
+  assert.equal(second.text, '한"}\n');
+  assert.equal(second.nextOffset, prefix.length + splitChar.length + suffix.length);
+  assert.equal(second.text.includes('�'), false);
 });
 
 test('fails closed on Claude Code API error assistant without publishing it as intermediate text', async () => {

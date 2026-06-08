@@ -33,6 +33,21 @@ function withFakeKiro(behavior: string, fn: () => Promise<void>): () => Promise<
   };
 }
 
+test('KiroWorkerBridge.runTurn rejects missing first-turn intent', async () => {
+  const bridge = new KiroWorkerBridge();
+
+  await assert.rejects(
+    () => bridge.runTurn({
+      sessionId: null,
+      projectRoot: process.cwd(),
+      message: 'hello',
+    } as Parameters<KiroWorkerBridge['runTurn']>[0]),
+    (error) => error instanceof OpenPError &&
+      error.exitCode === EXIT_CODES.usage &&
+      error.message.includes('explicit isFirstTurn'),
+  );
+});
+
 test('KiroWorkerBridge.runTurn succeeds on first turn', withFakeKiro('success', async () => {
   const bridge = new KiroWorkerBridge();
   const result = await bridge.runTurn({

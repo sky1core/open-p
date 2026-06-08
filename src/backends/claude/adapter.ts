@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { runAbortableOperation, throwIfAborted } from '../../core/abort.js';
 import { EXIT_CODES, OpenPError } from '../../core/errors.js';
-import { DEFAULT_TERMINATE_GRACE_MS, GracefulInterrupt, shouldTerminateOnAbort } from '../../core/graceful-interrupt.js';
+import { DEFAULT_TERMINATE_GRACE_MS, shouldTerminateOnAbort } from '../../core/graceful-interrupt.js';
 import { SessionLockStore } from '../../core/session-lock.js';
 import { SessionStateStore, validateSessionStateCompatibility } from '../../core/session-state.js';
 import type { Backend } from '../../core/backend.js';
@@ -27,6 +27,7 @@ import { resolveInteractivePermissionMode } from './permission-mode.js';
 import { isPublishableIntermediateText } from './screen-monitor.js';
 import { withThinkingSummariesSettings } from './settings.js';
 import { buildClaudeToolsArgs } from './tools.js';
+import { createClaudePtyInterrupter } from './pty-interrupt.js';
 import {
   appendClaudeCodePtySuppressionArgs,
   CLAUDE_CODE_BACKGROUND_SUPPRESSION_ENV,
@@ -83,7 +84,7 @@ export class ClaudeCodeBackend implements Backend {
     }
 
     const claudeCodeBin = resolveClaudeCodeBin();
-    await assertClaudeCodeBin(claudeCodeBin, { cwd: options.cwd });
+    await assertClaudeCodeBin(claudeCodeBin, { cwd: options.cwd, isolateAnthropicEnv: true });
     const nativeSessionId = options.resume ? options.backendSessionId : null;
     const expectedLogPath = nativeSessionId ? resolveClaudeCodeSessionLogPath(nativeSessionId, options.cwd) : null;
     const existingLogPath = nativeSessionId ? await findClaudeCodeSessionLog(nativeSessionId, options.cwd) : null;
@@ -97,10 +98,11 @@ export class ClaudeCodeBackend implements Backend {
       cwd: options.cwd,
       sessionName,
       env: CLAUDE_CODE_BACKGROUND_SUPPRESSION_ENV,
+      isolateAnthropicEnv: true,
     });
 
     let primaryError: unknown = null;
-    const interrupter = createPtyInterrupter(pty);
+    const interrupter = createClaudePtyInterrupter(pty);
     const forceHandler = (): void => {
       interrupter.requestForceStop();
     };
@@ -385,22 +387,6 @@ async function forcePtyStop(
   signal: NodeJS.Signals,
 ): Promise<void> {
   await pty.terminate(signal);
-}
-
-function createPtyInterrupter(pty: {
-  interrupt(): Promise<void>;
-  terminate(signal?: NodeJS.Signals): Promise<void>;
-}): GracefulInterrupt {
-  return new GracefulInterrupt({
-    isAlive: () => true,
-    sendSignal: (signal) => {
-      if (signal === 'SIGINT') {
-        void pty.interrupt().catch(() => undefined);
-        return;
-      }
-      void pty.terminate(signal).catch(() => undefined);
-    },
-  });
 }
 
 async function isPtyAlive(pty: { isAlive?(): Promise<boolean> }): Promise<boolean> {

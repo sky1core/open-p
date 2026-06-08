@@ -502,7 +502,7 @@ test('preserves structured output from result events', () => {
   assert.deepEqual(result?.structuredOutput, { ok: true, label: 'OPENP_SCHEMA' });
 });
 
-test('uses structured output as content when result text is empty', () => {
+test('keeps empty result text when structured output is present', () => {
   const result = parseStreamJsonLines([
     line({
       type: 'result',
@@ -512,7 +512,7 @@ test('uses structured output as content when result text is empty', () => {
     }),
   ]);
 
-  assert.equal(result?.content, '{"ok":true}');
+  assert.equal(result?.content, '');
   assert.deepEqual(result?.structuredOutput, { ok: true });
 });
 
@@ -1605,7 +1605,7 @@ test('extracts contextWindow from result event modelUsage', () => {
   assert.equal(result.diagnostics.contextWindow, 200_000);
 });
 
-test('extracts contextWindow from modelUsage with model suffix variant', () => {
+test('does not infer contextWindow from modelUsage suffix variants', () => {
   const result = parseStreamJsonLines([
     line({ type: 'system', subtype: 'init', session_id: 'session-1' }),
     line({
@@ -1630,7 +1630,64 @@ test('extracts contextWindow from modelUsage with model suffix variant', () => {
     }),
   ]);
   assert.ok(result);
+  assert.equal(result.diagnostics.contextWindow, null);
+});
+
+test('extracts contextWindow from exact system modelUsage variant', () => {
+  const result = parseStreamJsonLines([
+    line({ type: 'system', subtype: 'init', session_id: 'session-1', model: 'claude-opus-4-7[1m]' }),
+    line({
+      type: 'assistant',
+      message: {
+        model: 'claude-opus-4-7',
+        stop_reason: 'end_turn',
+        usage: { input_tokens: 10, cache_read_input_tokens: 0, output_tokens: 5 },
+        content: [{ type: 'text', text: 'hello' }],
+      },
+    }),
+    line({
+      type: 'result',
+      subtype: 'success',
+      session_id: 'session-1',
+      result: 'hello',
+      num_turns: 1,
+      duration_ms: 100,
+      modelUsage: {
+        'claude-opus-4-7[1m]': { contextWindow: 1_000_000, maxOutputTokens: 64_000 },
+      },
+    }),
+  ]);
+  assert.ok(result);
   assert.equal(result.diagnostics.contextWindow, 1_000_000);
+});
+
+test('prefers the current assistant modelUsage entry over an earlier system variant', () => {
+  const result = parseStreamJsonLines([
+    line({ type: 'system', subtype: 'init', session_id: 'session-1', model: 'claude-opus-4-7[1m]' }),
+    line({
+      type: 'assistant',
+      message: {
+        model: 'claude-opus-4-7',
+        stop_reason: 'end_turn',
+        usage: { input_tokens: 10, cache_read_input_tokens: 0, output_tokens: 5 },
+        content: [{ type: 'text', text: 'hello' }],
+      },
+    }),
+    line({
+      type: 'result',
+      subtype: 'success',
+      session_id: 'session-1',
+      result: 'hello',
+      num_turns: 1,
+      duration_ms: 100,
+      modelUsage: {
+        'claude-opus-4-7': { contextWindow: 200_000, maxOutputTokens: 32_000 },
+        'claude-opus-4-7[1m]': { contextWindow: 1_000_000, maxOutputTokens: 64_000 },
+      },
+    }),
+  ]);
+  assert.ok(result);
+  assert.equal(result.diagnostics.contextWindow, 200_000);
 });
 
 test('contextWindow is null when backend does not provide modelUsage', () => {

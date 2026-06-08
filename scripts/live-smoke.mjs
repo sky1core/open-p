@@ -8,7 +8,8 @@ const rootDir = dirname(dirname(fileURLToPath(import.meta.url)));
 const cliPath = join(rootDir, 'dist', 'src', 'cli.js');
 const args = process.argv.slice(2);
 const enabled = args.includes('--run');
-const timeoutMs = Number.parseInt(readArg('--timeout-ms') ?? '90000', 10);
+const timeoutMs = readPositiveIntegerArg('--timeout-ms', '90000');
+const backend = readValueArg('--backend') ?? 'claude';
 
 if (!enabled) {
   console.log('Skipping live smoke. Run `npm run smoke:live -- --run` after `npm run build`.');
@@ -122,8 +123,7 @@ async function smokePublicOptions() {
     '60',
     '--dangerously-skip-permissions',
     '--verbose',
-    '--effort',
-    'low',
+    ...publicReasoningEffortArgs(),
     '--output-format',
     'json',
     'Return exactly openp-live-public-options-ok',
@@ -131,6 +131,10 @@ async function smokePublicOptions() {
   const result = JSON.parse(stdout);
   assertOpenPRecord(result, 'public options result record');
   assertEqual(openPResultText(result.openp), 'openp-live-public-options-ok', 'public options result');
+}
+
+function publicReasoningEffortArgs() {
+  return backend === 'kiro' ? [] : ['--effort', 'low'];
 }
 
 function userEvent(turnId, text) {
@@ -189,18 +193,42 @@ function openPResultText(openp) {
   return answers.filter((answer) => typeof answer === 'string').join('\n\n');
 }
 
-function readArg(name) {
+function readValueArg(name) {
+  const inlinePrefix = `${name}=`;
+  const inline = args.find((arg) => arg.startsWith(inlinePrefix));
+  if (inline) {
+    const value = inline.slice(inlinePrefix.length);
+    if (value.length === 0) {
+      throw new Error(`${name} requires a value`);
+    }
+    return value;
+  }
   const index = args.indexOf(name);
   if (index < 0) {
     return null;
   }
   const value = args[index + 1];
-  return value && !value.startsWith('--') ? value : null;
+  if (!value || value.startsWith('--')) {
+    throw new Error(`${name} requires a value`);
+  }
+  return value;
+}
+
+function readPositiveIntegerArg(name, defaultValue) {
+  const value = readValueArg(name) ?? defaultValue;
+  if (!/^[1-9]\d*$/.test(value)) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+  return parsed;
 }
 
 function runOpenP(args, input = '') {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [cliPath, ...args], {
+    const child = spawn(process.execPath, [cliPath, backend, ...args], {
       cwd: rootDir,
       env: process.env,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -209,7 +237,7 @@ function runOpenP(args, input = '') {
     let stderr = '';
     const timer = setTimeout(() => {
       child.kill('SIGTERM');
-      reject(new Error(`live smoke timed out after ${timeoutMs}ms: node ${cliPath} ${args.join(' ')}`));
+      reject(new Error(`live smoke timed out after ${timeoutMs}ms: node ${cliPath} ${backend} ${args.join(' ')}`));
     }, timeoutMs);
 
     child.stdout.setEncoding('utf8');

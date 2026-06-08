@@ -1,6 +1,7 @@
 import type { BackendWorkerBridge } from '../../core/backend.js';
 import { EXIT_CODES, OpenPError } from '../../core/errors.js';
 import type { WorkerTurnRequest, WorkerTurnResult, WorkerTurnDiagnostics } from '../../core/worker-types.js';
+import { readRequiredFirstTurnFlag } from '../../core/worker-input.js';
 
 import { buildKiroAcpArgs } from './args.js';
 import { resolveKiroBin } from './bin.js';
@@ -11,7 +12,7 @@ export class KiroWorkerBridge implements BackendWorkerBridge {
   async runTurn(request: WorkerTurnRequest): Promise<WorkerTurnResult> {
     rejectUnsupportedOptions(request);
 
-    const isFirstTurn = request.isFirstTurn ?? !request.sessionId;
+    const isFirstTurn = readRequiredFirstTurnFlag(request);
     const { args, trustAllTools } = buildKiroAcpArgs({
       model: request.model,
       executionMode: request.executionMode,

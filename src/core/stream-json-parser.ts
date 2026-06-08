@@ -35,6 +35,7 @@ interface ParserState {
   lastSubturnContextTokens: number | null;
   rawUsage: Record<string, unknown> | null;
   lastModel: string | null;
+  modelCandidates: Set<string>;
   resultContextWindow: number | null;
   autoCompacted: boolean | null;
   activeAssistantTexts: string[];
@@ -50,7 +51,6 @@ interface ParserState {
   backgroundTexts: string[];
   pendingBackgroundTexts: string[];
   lastFlushedBackgroundText: string | null;
-  deferredResultAfterBackground: JsonObject | null;
   tentativeResultBeforeBackgroundText: JsonObject | null;
   structuredOutput: unknown;
 }
@@ -84,6 +84,7 @@ export function parseStreamJsonLines(
     lastSubturnContextTokens: null,
     rawUsage: null,
     lastModel: null,
+    modelCandidates: new Set(),
     resultContextWindow: null,
     autoCompacted: null,
     activeAssistantTexts: [],
@@ -99,7 +100,6 @@ export function parseStreamJsonLines(
     backgroundTexts: [],
     pendingBackgroundTexts: [],
     lastFlushedBackgroundText: null,
-    deferredResultAfterBackground: null,
     tentativeResultBeforeBackgroundText: null,
     structuredOutput: undefined,
   };
@@ -115,11 +115,6 @@ export function parseStreamJsonLines(
   if (state.resultContent === null) {
     return null;
   }
-  const hasStructuredOutput = state.structuredOutput !== undefined;
-  const resultContent = state.resultContent.trim().length === 0 && hasStructuredOutput
-    ? JSON.stringify(state.structuredOutput)
-    : state.resultContent;
-
   const contextWindow = state.resultContextWindow ?? resolveContextWindow(state.lastModel, options);
   const lastSubturnContextTokens = state.lastSubturnContextTokens ??
     (state.lastSubturnUsage === null ||
@@ -129,7 +124,7 @@ export function parseStreamJsonLines(
       : state.lastSubturnUsage.inputTokens + state.lastSubturnUsage.cacheReadInputTokens);
 
   const result: StreamJsonTurnResult = {
-    content: resultContent,
+    content: state.resultContent,
     reasoningContent: buildReasoningContent(state),
     ...(state.assistantEvents.length > 0 ? { assistantEvents: [...state.assistantEvents] } : {}),
     sessionId: state.sessionId,
@@ -384,6 +379,9 @@ function consumeSystemEvent(state: ParserState, event: JsonObject): void {
   if (event.subtype === 'auto_compaction' || event.subtype === 'auto_compacted') {
     state.autoCompacted = true;
   }
+  if (typeof event.model === 'string' && event.model.trim()) {
+    rememberModelCandidate(state, event.model);
+  }
 }
 
 function consumeAssistantEvent(
@@ -419,7 +417,7 @@ function consumeAssistantEvent(
   }
 
   if (typeof message.model === 'string') {
-    state.lastModel = message.model;
+    rememberModelCandidate(state, message.model);
   }
   if (typeof message.stop_reason === 'string') {
     state.stopReason = message.stop_reason;
@@ -456,7 +454,7 @@ function consumeResultAssistantEvent(state: ParserState, event: JsonObject): voi
   if (!message) return;
 
   if (typeof message.model === 'string') {
-    state.lastModel = message.model;
+    rememberModelCandidate(state, message.model);
   }
   if (typeof message.stop_reason === 'string') {
     state.stopReason = message.stop_reason;
@@ -661,7 +659,6 @@ function consumeResultEvent(
     if (state.resultContent !== null || resultMatchesBackgroundText(event, state.lastFlushedBackgroundText)) {
       return;
     }
-    state.deferredResultAfterBackground = event;
     return;
   }
 
@@ -678,9 +675,6 @@ function consumeResultEvent(
     }
     const backgroundText = flushBackgroundText(state, options);
     state.inBackgroundTask = false;
-    if (state.resultContent === null && !resultMatchesBackgroundText(event, backgroundText)) {
-      state.deferredResultAfterBackground = event;
-    }
     return;
   }
 
@@ -689,7 +683,6 @@ function consumeResultEvent(
   }
 
   setActiveResultFromEvent(state, event);
-  state.deferredResultAfterBackground = null;
 }
 
 function publishIntermediateText(state: ParserState, options: StreamJsonParserOptions): void {
@@ -773,7 +766,7 @@ function setActiveResultFromEvent(state: ParserState, event: JsonObject): void {
       }
     }
   }
-  const resultContextWindow = extractModelUsageContextWindow(event, state.lastModel);
+  const resultContextWindow = extractModelUsageContextWindow(event, state.lastModel, state.modelCandidates);
   if (resultContextWindow !== null) {
     state.resultContextWindow = resultContextWindow;
   }
@@ -870,26 +863,45 @@ function resolveContextWindow(model: string | null, options: StreamJsonParserOpt
   return typeof options.contextWindow === 'number' && Number.isFinite(options.contextWindow) ? options.contextWindow : null;
 }
 
-function extractModelUsageContextWindow(event: JsonObject, model: string | null): number | null {
+function extractModelUsageContextWindow(
+  event: JsonObject,
+  model: string | null,
+  modelCandidates: ReadonlySet<string>,
+): number | null {
   const modelUsage = asObject(event.modelUsage);
   if (!modelUsage) return null;
-  for (const key of Object.keys(modelUsage)) {
-    const entry = asObject(modelUsage[key]);
-    if (!entry) continue;
-    if (typeof entry.contextWindow === 'number' && Number.isFinite(entry.contextWindow)) {
-      if (model && (key === model || key.startsWith(model + '-') || key.startsWith(model + '['))) return entry.contextWindow;
-      if (!model) return entry.contextWindow;
+  if (model) {
+    const exactEntry = asObject(modelUsage[model]);
+    if (typeof exactEntry?.contextWindow === 'number' && Number.isFinite(exactEntry.contextWindow)) {
+      return exactEntry.contextWindow;
     }
   }
-  if (model) {
-    for (const key of Object.keys(modelUsage)) {
-      const entry = asObject(modelUsage[key]);
-      if (entry && typeof entry.contextWindow === 'number' && Number.isFinite(entry.contextWindow)) {
-        return entry.contextWindow;
-      }
+  for (const candidate of modelCandidates) {
+    if (candidate === model) {
+      continue;
     }
+    const exactEntry = asObject(modelUsage[candidate]);
+    if (typeof exactEntry?.contextWindow === 'number' && Number.isFinite(exactEntry.contextWindow)) {
+      return exactEntry.contextWindow;
+    }
+  }
+  const entries = Object.values(modelUsage)
+    .map((entry) => asObject(entry))
+    .filter((entry): entry is JsonObject => entry !== null);
+  if (!model && modelCandidates.size === 0 && entries.length === 1 &&
+    typeof entries[0]!.contextWindow === 'number' && Number.isFinite(entries[0]!.contextWindow)) {
+    return entries[0]!.contextWindow;
   }
   return null;
+}
+
+function rememberModelCandidate(state: ParserState, model: string): void {
+  const trimmed = model.trim();
+  if (!trimmed) {
+    return;
+  }
+  state.lastModel = trimmed;
+  state.modelCandidates.add(trimmed);
 }
 
 function isTaskNotification(event: JsonObject): boolean {

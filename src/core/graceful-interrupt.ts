@@ -12,8 +12,8 @@ export class GracefulInterrupt {
   private sentInterrupt = false;
   private sentTerminate = false;
   private sentKill = false;
-  private interruptTimer: NodeJS.Timeout | undefined;
   private terminateTimer: NodeJS.Timeout | undefined;
+  private killTimer: NodeJS.Timeout | undefined;
 
   constructor(private readonly options: GracefulInterruptOptions) {}
 
@@ -35,7 +35,7 @@ export class GracefulInterrupt {
     if (!this.options.isAlive()) {
       return;
     }
-    this.clearInterruptTimer();
+    this.clearTerminateTimer();
     if (!this.sentTerminate) {
       this.sentTerminate = true;
       this.options.sendSignal('SIGTERM');
@@ -49,45 +49,45 @@ export class GracefulInterrupt {
     if (!this.options.isAlive() || this.sentKill) {
       return;
     }
-    this.clearInterruptTimer();
     this.clearTerminateTimer();
+    this.clearKillTimer();
     this.sentKill = true;
     this.options.sendSignal('SIGKILL');
   }
 
   clear(): void {
-    this.clearInterruptTimer();
     this.clearTerminateTimer();
+    this.clearKillTimer();
   }
 
   private scheduleTerminate(): void {
-    if (this.interruptTimer) {
-      return;
-    }
-    this.interruptTimer = setTimeout(() => {
-      this.interruptTimer = undefined;
-      this.requestForceStop();
-    }, this.options.interruptGraceMs ?? DEFAULT_INTERRUPT_GRACE_MS);
-  }
-
-  private scheduleKill(): void {
     if (this.terminateTimer) {
       return;
     }
     this.terminateTimer = setTimeout(() => {
       this.terminateTimer = undefined;
-      this.requestKillNow();
-    }, this.options.terminateGraceMs ?? DEFAULT_TERMINATE_GRACE_MS);
+      this.requestForceStop();
+    }, this.options.interruptGraceMs ?? DEFAULT_INTERRUPT_GRACE_MS);
   }
 
-  private clearInterruptTimer(): void {
-    clearTimeout(this.interruptTimer);
-    this.interruptTimer = undefined;
+  private scheduleKill(): void {
+    if (this.killTimer) {
+      return;
+    }
+    this.killTimer = setTimeout(() => {
+      this.killTimer = undefined;
+      this.requestKillNow();
+    }, this.options.terminateGraceMs ?? DEFAULT_TERMINATE_GRACE_MS);
   }
 
   private clearTerminateTimer(): void {
     clearTimeout(this.terminateTimer);
     this.terminateTimer = undefined;
+  }
+
+  private clearKillTimer(): void {
+    clearTimeout(this.killTimer);
+    this.killTimer = undefined;
   }
 }
 

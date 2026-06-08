@@ -74,6 +74,26 @@ class FakeManagedProcess implements ClaudeCodeManagedProcess {
   }
 }
 
+test('worker bridge rejects missing first-turn intent before starting a Claude process', async () => {
+  let starts = 0;
+  const bridge = new ClaudeCodeWorkerBridge(UNUSED_PROVIDER, undefined, async (request) => {
+    starts += 1;
+    return new FakeManagedProcess(request.sessionId, request.launchSignature);
+  });
+
+  await assert.rejects(
+    () => bridge.runTurn({
+      sessionId: null,
+      projectRoot: '/work/open-p',
+      message: 'missing explicit flag',
+    } as Parameters<ClaudeCodeWorkerBridge['runTurn']>[0]),
+    (error) => error instanceof OpenPError &&
+      error.exitCode === EXIT_CODES.usage &&
+      error.message.includes('explicit isFirstTurn'),
+  );
+  assert.equal(starts, 0);
+});
+
 test('worker bridge creates a backend session and sends first turn as raw message', async () => {
   const starts: ClaudeCodeWorkerBridgeStartRequest[] = [];
   const processes: FakeManagedProcess[] = [];
@@ -88,6 +108,7 @@ test('worker bridge creates a backend session and sends first turn as raw messag
 
   const result = await bridge.runTurn({
     sessionId: null,
+    isFirstTurn: true,
     projectRoot: '/work/open-p',
     message: 'continue',
     seedContext: 'seed',
@@ -99,7 +120,11 @@ test('worker bridge creates a backend session and sends first turn as raw messag
     jsonSchema: '{"type":"object"}',
     bin: 'claude',
     binArgs: ['--allowedTools', 'Bash'],
-    env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:9999' },
+    env: {
+      ANTHROPIC_BASE_URL: 'http://127.0.0.1:9999',
+      ANTHROPIC_API_KEY: 'blocked',
+      ANTHROPIC_AUTH_TOKEN: 'blocked',
+    },
     local: true,
     contextWindowsByModel: { haiku: 200_000 },
     onIntermediateText: (text) => streamed.push(text),
@@ -121,6 +146,8 @@ test('worker bridge creates a backend session and sends first turn as raw messag
   assert.equal(processes[0]?.prompts[0], 'continue');
   assert.equal(processes[0]?.turnTimeouts[0], 0);
   assert.equal(starts[0]?.launchSignature.env.ANTHROPIC_BASE_URL, 'http://127.0.0.1:9999');
+  assert.equal('ANTHROPIC_API_KEY' in (starts[0]?.launchSignature.env ?? {}), false);
+  assert.equal('ANTHROPIC_AUTH_TOKEN' in (starts[0]?.launchSignature.env ?? {}), false);
   assert.equal(starts[0]?.launchSignature.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS, '1');
 });
 
@@ -137,6 +164,7 @@ test('worker bridge keeps result when JSONL streaming differs from result', asyn
 
   const result = await bridge.runTurn({
     sessionId: null,
+    isFirstTurn: true,
     projectRoot: '/work/open-p',
     message: 'continue',
     onIntermediateText: (text) => streamed.push(text),
@@ -155,6 +183,7 @@ test('worker bridge rejects first turn when Claude session log omits backend ses
   await assert.rejects(
     () => bridge.runTurn({
       sessionId: null,
+      isFirstTurn: true,
       projectRoot: '/work/open-p',
       message: 'hello',
     }),
@@ -204,6 +233,7 @@ test('worker bridge uses claude command lookup when no request bin is supplied',
 
   await bridge.runTurn({
     sessionId: null,
+    isFirstTurn: true,
     projectRoot: '/work/open-p',
     message: 'hello',
   });
@@ -220,6 +250,7 @@ test('worker bridge request bin takes precedence over default command lookup', a
 
   await bridge.runTurn({
     sessionId: null,
+    isFirstTurn: true,
     projectRoot: '/work/open-p',
     message: 'hello',
     bin: '/custom/claude',
@@ -240,11 +271,13 @@ test('worker bridge reuses same live process and sends resume turn as raw messag
 
   const first = await bridge.runTurn({
     sessionId: null,
+    isFirstTurn: true,
     projectRoot: '/work/open-p',
     message: 'first',
   });
   await bridge.runTurn({
     sessionId: first.sessionId,
+    isFirstTurn: false,
     projectRoot: '/work/open-p',
     message: 'second',
     seedContext: 'must not repeat',
@@ -267,6 +300,7 @@ test('worker bridge rejects resume when Claude session log returns a different s
   await assert.rejects(
     () => bridge.runTurn({
       sessionId: '11111111-1111-4111-8111-111111111111',
+      isFirstTurn: false,
       projectRoot: '/work/open-p',
       message: 'resume',
     }),
@@ -286,12 +320,14 @@ test('worker bridge restarts with resume when launch signature changes', async (
 
   const first = await bridge.runTurn({
     sessionId: null,
+    isFirstTurn: true,
     projectRoot: '/work/open-p',
     message: 'first',
     model: 'haiku',
   });
   await bridge.runTurn({
     sessionId: first.sessionId,
+    isFirstTurn: false,
     projectRoot: '/work/open-p',
     message: 'second',
     model: 'sonnet',
@@ -319,11 +355,13 @@ test('worker bridge discards a process after turn failure before allowing anothe
 
   await assert.rejects(() => bridge.runTurn({
     sessionId,
+    isFirstTurn: false,
     projectRoot: '/work/open-p',
     message: 'first',
   }), /turn failed/);
   await bridge.runTurn({
     sessionId,
+    isFirstTurn: false,
     projectRoot: '/work/open-p',
     message: 'second',
   });
@@ -346,6 +384,7 @@ test('worker bridge rejects an already aborted turn before starting a process', 
   await assert.rejects(
     () => bridge.runTurn({
       sessionId: null,
+      isFirstTurn: true,
       projectRoot: '/work/open-p',
       message: 'should not start',
       signal: controller.signal,

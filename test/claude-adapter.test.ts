@@ -80,7 +80,7 @@ test('single-turn backend does not mask the primary turn failure when force clea
   }, new Error('primary failed'), 10));
 });
 
-test('single-turn backend keeps forceSignal wired during aborted PTY cleanup', async () => {
+test('single-turn backend skips force cleanup signal after graceful interrupt closes PTY', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'openp-claude-adapter-'));
   const fakeClaude = join(dir, 'claude');
   const stateRoot = join(dir, 'state');
@@ -127,7 +127,7 @@ test('single-turn backend keeps forceSignal wired during aborted PTY cleanup', a
   }
 
   assert.equal(session.interruptCount, 1);
-  assert.deepEqual(session.terminateSignals, ['SIGTERM']);
+  assert.deepEqual(session.terminateSignals, []);
 });
 
 test('single-turn backend launches Claude with background suppression (env + disallowed tools)', async () => {
@@ -143,10 +143,12 @@ test('single-turn backend launches Claude with background suppression (env + dis
   const session = new AbortDuringSubmitSession(() => abort.abort(), () => undefined);
   let capturedArgs: readonly string[] = [];
   let capturedDisableBackgroundTasks: string | undefined;
+  let capturedIsolateAnthropicEnv: boolean | undefined;
   const backend = new ClaudeCodeBackend({
     start: async (_command: string, args: readonly string[], options: PtyStartOptions): Promise<PtySession> => {
       capturedArgs = args;
       capturedDisableBackgroundTasks = options.env?.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS;
+      capturedIsolateAnthropicEnv = options.isolateAnthropicEnv;
       return session;
     },
   });
@@ -183,6 +185,7 @@ test('single-turn backend launches Claude with background suppression (env + dis
   }
 
   assert.equal(capturedDisableBackgroundTasks, '1');
+  assert.equal(capturedIsolateAnthropicEnv, true);
   const disallowIndex = capturedArgs.indexOf('--disallowedTools');
   assert.notEqual(disallowIndex, -1);
   assert.equal(capturedArgs[disallowIndex + 1], 'Monitor,Workflow,AskUserQuestion');

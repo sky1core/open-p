@@ -110,6 +110,34 @@ process.exit(0);
   assert.deepEqual(commandLines[1], ['capture-pane', '-p', '-t', 'fake-session', '-S', '3', '-E', '3']);
 });
 
+test('tmux session treats a dead pane as not alive even when the session remains', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-fake-tmux-'));
+  const fakeTmux = join(dir, 'fake-tmux.js');
+  const logPath = join(dir, 'commands.log');
+  await writeFile(fakeTmux, `#!/usr/bin/env node
+const fs = require('node:fs');
+const logPath = ${JSON.stringify(logPath)};
+const args = process.argv.slice(2);
+fs.appendFileSync(logPath, JSON.stringify(args) + '\\n');
+if (args[0] === 'has-session') {
+  process.exit(0);
+}
+if (args[0] === 'display-message' && args.includes('#{pane_dead}')) {
+  process.stdout.write('1\\n');
+  process.exit(0);
+}
+process.exit(0);
+`);
+  await chmod(fakeTmux, 0o755);
+
+  const session = new TmuxSession(fakeTmux, 'fake-session', 10);
+  assert.equal(await session.isAlive(), false);
+
+  const commandLog = await readFile(logPath, 'utf8');
+  assert.match(commandLog, /"has-session","-t","fake-session"/);
+  assert.match(commandLog, /"display-message","-p","-t","fake-session","#\{pane_dead\}"/);
+});
+
 test('tmux session exit retries with interrupt before a second graceful exit', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'openp-fake-tmux-'));
   const fakeTmux = join(dir, 'fake-tmux.js');
@@ -162,14 +190,125 @@ process.exit(0);
     .filter((index) => index >= 0);
   const pasteCommands = pasteIndexes.map((index) => commandLines[index]!);
   const interruptIndex = commandLines.findIndex((args) => args[0] === 'send-keys' && args.includes('C-c'));
+  const clearIndexes = commandLines
+    .map((args, index) => args[0] === 'send-keys' && args.includes('C-u') ? index : -1)
+    .filter((index) => index >= 0);
 
   assert.equal(pasteIndexes.length, 2);
+  assert.equal(clearIndexes.length, 2);
   for (const pasteCommand of pasteCommands) {
     assert.deepEqual(pasteCommand.slice(0, 4), ['paste-buffer', '-p', '-r', '-b']);
   }
+  assert.ok(clearIndexes[0]! < pasteIndexes[0]!);
   assert.ok(pasteIndexes[0]! < interruptIndex);
   assert.ok(interruptIndex < pasteIndexes[1]!);
+  assert.ok(clearIndexes[1]! < pasteIndexes[1]!);
   assert.match(commandLog, /"send-keys","-t","fake-session","C-c"/);
+});
+
+test('tmux session clears existing input before submitting graceful exit', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-fake-tmux-'));
+  const fakeTmux = join(dir, 'fake-tmux.js');
+  const statePath = join(dir, 'state.json');
+  const bufferPath = join(dir, 'buffer.txt');
+  const submissionsPath = join(dir, 'submissions.log');
+  await writeFile(statePath, JSON.stringify({ alive: true, draft: 'leftover draft' }));
+  await writeFile(fakeTmux, `#!/usr/bin/env node
+const fs = require('node:fs');
+const statePath = ${JSON.stringify(statePath)};
+const bufferPath = ${JSON.stringify(bufferPath)};
+const submissionsPath = ${JSON.stringify(submissionsPath)};
+const args = process.argv.slice(2);
+const readState = () => JSON.parse(fs.readFileSync(statePath, 'utf8'));
+const writeState = (state) => fs.writeFileSync(statePath, JSON.stringify(state));
+if (args[0] === 'has-session') {
+  process.exit(readState().alive ? 0 : 1);
+}
+if (args[0] === 'display-message' && args.includes('#{pane_dead}')) {
+  process.stdout.write('0\\n');
+  process.exit(0);
+}
+if (args[0] === 'load-buffer') {
+  fs.writeFileSync(bufferPath, fs.readFileSync(0, 'utf8'));
+  process.exit(0);
+}
+if (args[0] === 'paste-buffer') {
+  const state = readState();
+  state.draft += fs.readFileSync(bufferPath, 'utf8');
+  writeState(state);
+  process.exit(0);
+}
+if (args[0] === 'send-keys' && args.includes('C-u')) {
+  const state = readState();
+  state.draft = '';
+  writeState(state);
+  process.exit(0);
+}
+if (args[0] === 'send-keys' && args.includes('Enter')) {
+  const state = readState();
+  fs.appendFileSync(submissionsPath, state.draft + '\\n');
+  if (state.draft === '/exit') {
+    state.alive = false;
+  }
+  writeState(state);
+  process.exit(0);
+}
+process.exit(0);
+`);
+  await chmod(fakeTmux, 0o755);
+
+  const session = new TmuxSession(fakeTmux, 'fake-session', 10);
+  await session.exit();
+
+  assert.equal((await readFile(submissionsPath, 'utf8')).trim(), '/exit');
+  assert.equal(await session.isAlive(), false);
+});
+
+test('tmux session marks closed after successful graceful exit', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-fake-tmux-'));
+  const fakeTmux = join(dir, 'fake-tmux.js');
+  const statePath = join(dir, 'state.json');
+  const bufferPath = join(dir, 'buffer.txt');
+  await writeFile(statePath, JSON.stringify({ alive: true }));
+  await writeFile(fakeTmux, `#!/usr/bin/env node
+const fs = require('node:fs');
+const statePath = ${JSON.stringify(statePath)};
+const bufferPath = ${JSON.stringify(bufferPath)};
+const args = process.argv.slice(2);
+const readState = () => JSON.parse(fs.readFileSync(statePath, 'utf8'));
+const writeState = (state) => fs.writeFileSync(statePath, JSON.stringify(state));
+if (args[0] === 'has-session') {
+  process.exit(readState().alive ? 0 : 1);
+}
+if (args[0] === 'load-buffer') {
+  fs.writeFileSync(bufferPath, fs.readFileSync(0, 'utf8'));
+  process.exit(0);
+}
+if (args[0] === 'paste-buffer') {
+  process.exit(0);
+}
+if (args[0] === 'send-keys') {
+  const input = fs.existsSync(bufferPath) ? fs.readFileSync(bufferPath, 'utf8') : '';
+  if (input.trim() === '/exit') {
+    writeState({ alive: false });
+  }
+  process.exit(0);
+}
+if (args[0] === 'display-message') {
+  process.stdout.write('0\\n');
+  process.exit(0);
+}
+process.exit(0);
+`);
+  await chmod(fakeTmux, 0o755);
+  let closedCount = 0;
+
+  const session = new TmuxSession(fakeTmux, 'fake-session', 10, undefined, () => {
+    closedCount += 1;
+  });
+  await session.exit();
+
+  assert.equal(closedCount >= 1, true);
 });
 
 test('tmux session terminate kills the owned session', async () => {

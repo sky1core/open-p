@@ -111,6 +111,21 @@ function assistantEventText(result: Awaited<ReturnType<CodexWorkerBridge['runTur
 
 const STRUCTURED_OUTPUT_SCHEMA = '{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"],"additionalProperties":false}';
 
+test('CodexWorkerBridge.runTurn rejects missing first-turn intent', async () => {
+  const bridge = new CodexWorkerBridge();
+
+  await assert.rejects(
+    () => bridge.runTurn({
+      sessionId: null,
+      projectRoot: process.cwd(),
+      message: 'hello',
+    } as Parameters<CodexWorkerBridge['runTurn']>[0]),
+    (error) => error instanceof OpenPError &&
+      error.exitCode === EXIT_CODES.usage &&
+      error.message.includes('explicit isFirstTurn'),
+  );
+});
+
 test('CodexWorkerBridge.runTurn succeeds with fake codex', withFakeBin('fake-codex-success.sh', async () => {
   const bridge = new CodexWorkerBridge();
   const result = await bridge.runTurn({
@@ -263,6 +278,23 @@ test('CodexWorkerBridge.runTurn parses json-schema result text as structured out
   assert.deepEqual(intermediateTexts, []);
   assert.equal(result.content, '{"ok":true}');
   assert.deepEqual(result.structuredOutput, { ok: true });
+}));
+
+test('CodexWorkerBridge.runTurn reports a stable worker turn label for structured output errors', withFakeBin('fake-codex-invalid-structured-output.sh', async () => {
+  const bridge = new CodexWorkerBridge();
+
+  await assert.rejects(
+    bridge.runTurn({
+      sessionId: 'caller-session-id',
+      isFirstTurn: true,
+      projectRoot: process.cwd(),
+      message: 'json',
+      jsonSchema: STRUCTURED_OUTPUT_SCHEMA,
+      timeoutMs: 10000,
+    }),
+    (err: Error) => err.message.includes('structured output for turn codex-worker-turn was not valid JSON') &&
+      !err.message.includes('caller-session-id'),
+  );
 }));
 
 test('CodexWorkerBridge.runTurn throws on non-zero exit', withFakeBin('fake-codex-error.sh', async () => {

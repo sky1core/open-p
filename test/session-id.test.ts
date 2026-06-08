@@ -14,6 +14,8 @@ test('rejects session ids that are unsafe as path components', () => {
   assert.equal(isSafeSessionId('trailing-space '), false);
   assert.equal(isSafeSessionId('has/slash'), false);
   assert.equal(isSafeSessionId('has\\backslash'), false);
+  assert.equal(isSafeSessionId('-dash-leading'), false);
+  assert.equal(isSafeSessionId('--help'), false);
   assert.equal(isSafeSessionId('has\nnewline'), false);
   assert.equal(isSafeSessionId('a'.repeat(MAX_SESSION_ID_BYTES + 1)), false);
 });

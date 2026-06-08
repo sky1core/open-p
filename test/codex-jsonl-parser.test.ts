@@ -179,6 +179,109 @@ test('parseCodexOutput extracts session id from thread.started', () => {
   assert.equal(parsed.sessionId, sessionId);
 });
 
+test('parseCodexOutput preserves assistant text with an unknown native phase', () => {
+  const stdout = [
+    JSON.stringify({
+      type: 'response_item',
+      payload: {
+        type: 'message',
+        role: 'assistant',
+        phase: 'draft',
+        id: 'draft-1',
+        content: [{ type: 'output_text', text: 'draft answer' }],
+      },
+    }),
+  ].join('\n');
+
+  const parsed = parseCodexOutput(stdout, null);
+  assert.equal(parsed.content, 'draft answer');
+  assert.equal(parsed.assistantEvents.length, 1);
+  assert.deepEqual(firstBlocks(parsed.assistantEvents), [{ type: 'text', text: 'draft answer' }]);
+});
+
+test('parseCodexOutput keeps final display text when an unknown native phase follows', () => {
+  const stdout = [
+    JSON.stringify({
+      type: 'response_item',
+      payload: {
+        type: 'message',
+        role: 'assistant',
+        phase: 'final_answer',
+        id: 'final-1',
+        content: [{ type: 'output_text', text: 'final answer' }],
+      },
+    }),
+    JSON.stringify({
+      type: 'response_item',
+      payload: {
+        type: 'message',
+        role: 'assistant',
+        phase: 'draft',
+        id: 'draft-1',
+        content: [{ type: 'output_text', text: 'draft answer' }],
+      },
+    }),
+  ].join('\n');
+
+  const parsed = parseCodexOutput(stdout, null);
+  assert.equal(parsed.content, 'final answer');
+  assert.deepEqual(firstBlocks(parsed.assistantEvents), [
+    { type: 'text', text: 'final answer' },
+    { type: 'text', text: 'draft answer' },
+  ]);
+});
+
+test('parseCodexOutput lets final display text override an earlier unknown native phase', () => {
+  const stdout = [
+    JSON.stringify({
+      type: 'response_item',
+      payload: {
+        type: 'message',
+        role: 'assistant',
+        phase: 'draft',
+        id: 'draft-1',
+        content: [{ type: 'output_text', text: 'draft answer' }],
+      },
+    }),
+    JSON.stringify({
+      type: 'response_item',
+      payload: {
+        type: 'message',
+        role: 'assistant',
+        phase: 'final_answer',
+        id: 'final-1',
+        content: [{ type: 'output_text', text: 'final answer' }],
+      },
+    }),
+  ].join('\n');
+
+  const parsed = parseCodexOutput(stdout, null);
+  assert.equal(parsed.content, 'final answer');
+  assert.deepEqual(firstBlocks(parsed.assistantEvents), [
+    { type: 'text', text: 'draft answer' },
+    { type: 'text', text: 'final answer' },
+  ]);
+});
+
+test('processCodexStdoutLine streams assistant text with an unknown native phase as answer', () => {
+  const state = createStreamState();
+  const snapshots: string[] = [];
+  processCodexStdoutLine(JSON.stringify({
+    type: 'response_item',
+    payload: {
+      type: 'message',
+      role: 'assistant',
+      phase: 'draft',
+      id: 'draft-1',
+      content: [{ type: 'output_text', text: 'draft answer' }],
+    },
+  }), state, {
+    onAssistantText: (text) => snapshots.push(text),
+  });
+
+  assert.deepEqual(snapshots, ['draft answer']);
+});
+
 test('parseCodexOutput ignores unrelated generic session id fields', () => {
   const stdout = [
     JSON.stringify({ type: 'session_configured', session_id: 'agent-session_01:opaque' }),

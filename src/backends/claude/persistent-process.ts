@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { runAbortableOperation, throwIfAborted } from '../../core/abort.js';
 import { EXIT_CODES, OpenPError } from '../../core/errors.js';
-import { DEFAULT_TERMINATE_GRACE_MS, GracefulInterrupt, shouldTerminateOnAbort } from '../../core/graceful-interrupt.js';
+import { DEFAULT_TERMINATE_GRACE_MS, shouldTerminateOnAbort } from '../../core/graceful-interrupt.js';
 import { parseJsonSchemaText } from '../../core/json-schema.js';
 import type { ManagedBackendProcess, ProcessStartRequest } from '../../core/persistent-process.js';
 import type {
@@ -36,8 +36,9 @@ import { withThinkingSummariesSettings } from './settings.js';
 import { buildClaudeToolsArgs } from './tools.js';
 import {
   appendClaudeCodePtySuppressionArgs,
-  withClaudeCodeBackgroundSuppressionEnv,
+  withClaudeCodeSafeLaunchEnv,
 } from './launch-safety.js';
+import { createClaudePtyInterrupter } from './pty-interrupt.js';
 import { assertClaudeCodeBin } from './bin.js';
 import { createClaudeSessionLogIdleDebugLogger } from './diagnostics.js';
 
@@ -121,7 +122,7 @@ export class PersistentClaudeCodeProcess implements ManagedBackendProcess {
       backgroundCallback: turnBackgroundCallback,
     };
 
-    const interrupter = createPtyInterrupter(this.pty);
+    const interrupter = createClaudePtyInterrupter(this.pty);
     const forceHandler = (): void => {
       interrupter.requestForceStop();
     };
@@ -343,10 +344,10 @@ export class PersistentClaudeCodeProcess implements ManagedBackendProcess {
 export async function startPersistentClaudeCodeProcess(
   options: StartPersistentClaudeCodeProcessOptions,
 ): Promise<PersistentClaudeCodeProcess> {
-  const env = withClaudeCodeBackgroundSuppressionEnv(options.launchSignature.env);
+  const env = withClaudeCodeSafeLaunchEnv(options.launchSignature.env);
   await assertClaudeCodeBin(options.launchSignature.bin, {
     env,
-    isolateAnthropicEnv: options.launchSignature.local,
+    isolateAnthropicEnv: true,
     cwd: options.cwd,
   });
   const nativeSessionId = options.resume ? options.sessionId : null;
@@ -361,7 +362,7 @@ export async function startPersistentClaudeCodeProcess(
     cwd: options.cwd,
     sessionName,
     env,
-    isolateAnthropicEnv: options.launchSignature.local,
+    isolateAnthropicEnv: true,
   });
   const process = new PersistentClaudeCodeProcess(
     options.sessionId,
@@ -382,7 +383,10 @@ export async function startPersistentClaudeCodeProcess(
   } catch (error) {
     await pty.exit().catch(() => undefined);
     if (await pty.isAlive().catch(() => false)) {
-      throw new OpenPError(`failed to start Claude Code process and graceful cleanup left session ${options.sessionId} alive`, EXIT_CODES.sessionBusy);
+      await forcePtyStopWithEscalation(pty).catch(() => undefined);
+    }
+    if (await pty.isAlive().catch(() => false)) {
+      throw new OpenPError(`failed to start Claude Code process and cleanup left session ${options.sessionId} alive`, EXIT_CODES.sessionBusy);
     }
     throw error;
   }
@@ -484,22 +488,6 @@ async function forcePtyStop(
   signal: NodeJS.Signals,
 ): Promise<void> {
   await pty.terminate(signal);
-}
-
-function createPtyInterrupter(pty: {
-  interrupt(): Promise<void>;
-  terminate(signal?: NodeJS.Signals): Promise<void>;
-}): GracefulInterrupt {
-  return new GracefulInterrupt({
-    isAlive: () => true,
-    sendSignal: (signal) => {
-      if (signal === 'SIGINT') {
-        void pty.interrupt().catch(() => undefined);
-        return;
-      }
-      void pty.terminate(signal).catch(() => undefined);
-    },
-  });
 }
 
 async function waitForPtyStop(pty: { isAlive(): Promise<boolean> }, timeoutMs: number): Promise<boolean> {

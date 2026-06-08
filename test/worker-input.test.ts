@@ -5,6 +5,7 @@ import { TRANSCRIPT_CONTEXT_POLICY, prepareWorkerTurnInput } from '../src/core/w
 test('prepares first turn as raw user message', () => {
   const prepared = prepareWorkerTurnInput({
     sessionId: null,
+    isFirstTurn: true,
     projectRoot: '/work/open-p',
     message: 'continue',
     seedContext: 'seed must not be injected',
@@ -19,6 +20,7 @@ test('prepares first turn as raw user message', () => {
 test('prepares resume turn as raw user message', () => {
   const prepared = prepareWorkerTurnInput({
     sessionId: '11111111-1111-4111-8111-111111111111',
+    isFirstTurn: false,
     projectRoot: '/work/open-p',
     message: 'next turn',
     seedContext: 'must not be duplicated',
@@ -41,4 +43,15 @@ test('keeps explicit first turn raw even with an existing backend session id', (
 
   assert.equal(prepared.isFirstTurn, true);
   assert.equal(prepared.prompt, 'first with known id');
+});
+
+test('rejects missing first-turn intent instead of inferring it from session id', () => {
+  assert.throws(
+    () => prepareWorkerTurnInput({
+      sessionId: null,
+      projectRoot: '/work/open-p',
+      message: 'missing explicit flag',
+    } as Parameters<typeof prepareWorkerTurnInput>[0]),
+    /worker turn requires explicit isFirstTurn/,
+  );
 });

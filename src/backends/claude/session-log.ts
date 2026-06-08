@@ -813,7 +813,8 @@ export async function readNewText(path: string, offset: number): Promise<{ text:
     return { text: '', nextOffset: offset };
   }
   if (offset === 0 && size < 1024 * 1024) {
-    return { text: await readFile(path, 'utf8'), nextOffset: size };
+    const buffer = await readFile(path);
+    return decodeCompleteUtf8Prefix(buffer, offset);
   }
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
@@ -823,9 +824,44 @@ export async function readNewText(path: string, offset: number): Promise<{ text:
     });
     stream.on('error', reject);
     stream.on('end', () => {
-      resolve({ text: Buffer.concat(chunks).toString('utf8'), nextOffset: size });
+      resolve(decodeCompleteUtf8Prefix(Buffer.concat(chunks), offset));
     });
   });
+}
+
+function decodeCompleteUtf8Prefix(buffer: Buffer, offset: number): { text: string; nextOffset: number } {
+  const incompleteBytes = incompleteUtf8SuffixLength(buffer);
+  const completeLength = buffer.length - incompleteBytes;
+  return {
+    text: buffer.subarray(0, completeLength).toString('utf8'),
+    nextOffset: offset + completeLength,
+  };
+}
+
+function incompleteUtf8SuffixLength(buffer: Buffer): number {
+  let continuationBytes = 0;
+  for (let index = buffer.length - 1; index >= Math.max(0, buffer.length - 4); index -= 1) {
+    const byte = buffer[index]!;
+    if ((byte & 0b1100_0000) === 0b1000_0000) {
+      continuationBytes += 1;
+      continue;
+    }
+    const sequenceLength = utf8SequenceLength(byte);
+    if (sequenceLength <= 1) {
+      return 0;
+    }
+    const observedLength = continuationBytes + 1;
+    return observedLength < sequenceLength ? observedLength : 0;
+  }
+  return 0;
+}
+
+function utf8SequenceLength(byte: number): number {
+  if (byte <= 0x7f) return 1;
+  if (byte >= 0xc2 && byte <= 0xdf) return 2;
+  if (byte >= 0xe0 && byte <= 0xef) return 3;
+  if (byte >= 0xf0 && byte <= 0xf4) return 4;
+  return 0;
 }
 
 function sleep(ms: number): Promise<void> {

@@ -19,7 +19,9 @@ export function execFileText(
   return new Promise((resolve, reject) => {
     const child = spawn(command, [...args], {
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: options.env || options.isolateAnthropicEnv ? buildChildEnv(options.env ?? {}, options.isolateAnthropicEnv ?? false) : undefined,
+      env: (options.env || options.isolateAnthropicEnv)
+        ? buildChildEnv(options.env ?? {}, options.isolateAnthropicEnv ?? false)
+        : undefined,
       cwd: options.cwd,
     });
     let stdout = '';

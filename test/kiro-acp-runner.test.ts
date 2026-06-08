@@ -166,6 +166,45 @@ test('runKiroAcp rejects Kiro effort command failures before the prompt', async 
   );
 });
 
+test('runKiroAcp does not reject effort setup from streaming chunk keyword matches', async () => {
+  const result = await runKiroAcp({
+    bin: FIXTURE,
+    args: ['acp'],
+    cwd: process.cwd(),
+    prompt: 'hello',
+    sessionId: null,
+    isFirstTurn: true,
+    reasoningEffort: 'high',
+    timeoutMs: 5000,
+    trustAllTools: false,
+    env: env('effort-chunk-false-positive'),
+  });
+
+  assert.equal(result.content, 'partial answer');
+});
+
+test('runKiroAcp reports structured effort setup failure diagnostics in the error text', async () => {
+  await assert.rejects(
+    runKiroAcp({
+      bin: FIXTURE,
+      args: ['acp'],
+      cwd: process.cwd(),
+      prompt: 'hello',
+      sessionId: null,
+      isFirstTurn: true,
+      reasoningEffort: 'high',
+      timeoutMs: 5000,
+      trustAllTools: false,
+      env: env('effort-unsupported'),
+    }),
+    (error) => error instanceof OpenPError &&
+      error.exitCode === EXIT_CODES.unsupportedOption &&
+      error.message.includes('kiro_setup_effort_unsupported') &&
+      error.message.includes('setupCommand=effort') &&
+      error.message.includes('setupSessionId=33333333-3333-4333-8333-333333333333'),
+  );
+});
+
 test('runKiroAcp rejects Kiro effort unsupported-model wording before the prompt', async () => {
   await assert.rejects(
     runKiroAcp({
@@ -604,25 +643,31 @@ test('runKiroAcp keeps timeout classified when backend returns an error after ti
 test('runKiroAcp treats SIGTERM abort reason as terminate phase, not graceful SIGINT', async () => {
   const ac = new AbortController();
   const signalLog = await tempSignalLog();
-  setTimeout(() => ac.abort('SIGTERM'), 100);
+  const rpcLog = await tempSignalLog();
 
-  await assert.rejects(
-    runKiroAcp({
-      bin: FIXTURE,
-      args: ['acp'],
-      cwd: process.cwd(),
-      prompt: 'hello',
-      sessionId: null,
-      isFirstTurn: true,
-      timeoutMs: 30000,
-      trustAllTools: false,
-      env: { ...env('ignore-interrupt'), OPENP_FAKE_KIRO_SIGNAL_LOG: signalLog },
-      signal: ac.signal,
-      interruptGraceMs: 10000,
-      terminateGraceMs: 50,
-    }),
-    isAbortError,
-  );
+  const running = runKiroAcp({
+    bin: FIXTURE,
+    args: ['acp'],
+    cwd: process.cwd(),
+    prompt: 'hello',
+    sessionId: null,
+    isFirstTurn: true,
+    timeoutMs: 30000,
+    trustAllTools: false,
+    env: {
+      ...env('ignore-interrupt'),
+      OPENP_FAKE_KIRO_SIGNAL_LOG: signalLog,
+      OPENP_FAKE_KIRO_RPC_LOG: rpcLog,
+    },
+    signal: ac.signal,
+    interruptGraceMs: 10000,
+    terminateGraceMs: 50,
+  });
+
+  await waitForRpcMethod(rpcLog, 'session/prompt');
+  ac.abort('SIGTERM');
+
+  await assert.rejects(running, isAbortError);
   assert.deepEqual(await readSignalLog(signalLog), ['SIGTERM']);
 });
 

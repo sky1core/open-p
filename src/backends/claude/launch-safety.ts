@@ -2,6 +2,8 @@ export const CLAUDE_CODE_BACKGROUND_SUPPRESSION_ENV: Readonly<Record<string, str
   CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1',
 };
 
+const SAFE_ANTHROPIC_ENV_KEYS = new Set(['ANTHROPIC_BASE_URL']);
+
 export const CLAUDE_CODE_PTY_DISALLOWED_TOOLS = 'Monitor,Workflow,AskUserQuestion';
 export const CLAUDE_CODE_DISALLOWED_TOOLS_FLAG = '--disallowedTools';
 
@@ -12,6 +14,19 @@ export function withClaudeCodeBackgroundSuppressionEnv(
     ...env,
     ...CLAUDE_CODE_BACKGROUND_SUPPRESSION_ENV,
   };
+}
+
+export function withClaudeCodeSafeLaunchEnv(
+  env: Readonly<Record<string, string>> = {},
+): Readonly<Record<string, string>> {
+  const safeEnv: Record<string, string> = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (key.startsWith('ANTHROPIC_') && !SAFE_ANTHROPIC_ENV_KEYS.has(key)) {
+      continue;
+    }
+    safeEnv[key] = value;
+  }
+  return withClaudeCodeBackgroundSuppressionEnv(safeEnv);
 }
 
 export function appendClaudeCodePtySuppressionArgs(args: string[]): void {

@@ -2,7 +2,7 @@ import type { AssistantContentBlock, AssistantEventSnapshot, BackendUsage, Inter
 
 export interface WorkerTurnRequest {
   readonly sessionId: string | null;
-  readonly isFirstTurn?: boolean;
+  readonly isFirstTurn: boolean;
   readonly projectRoot: string;
   readonly message: string;
   readonly transcript?: unknown;

@@ -424,10 +424,6 @@ class KiroAcpClient {
     }
 
     this.throwIfInterruptedOrTimedOut();
-    if (isKiroEffortCommandFailure(this.setupCommandText)) {
-      throw new OpenPError(`Kiro effort setup failed: ${this.setupCommandText.trim()}`, EXIT_CODES.unsupportedOption);
-    }
-
     const setupLogTexts = await waitForKiroPromptScopedAssistantTexts({
       sessionId,
       fromOffset: commandLogOffset,
@@ -437,7 +433,7 @@ class KiroAcpClient {
     });
     const failedSetupLogText = setupLogTexts.find(isKiroEffortCommandFailure);
     if (failedSetupLogText) {
-      throw new OpenPError(`Kiro effort setup failed: ${failedSetupLogText.trim()}`, EXIT_CODES.unsupportedOption);
+      throw buildKiroEffortSetupFailureError(sessionId, failedSetupLogText);
     }
   }
 
@@ -674,4 +670,12 @@ function isKiroEffortCommandFailure(text: string): boolean {
     || normalized.includes('unsupported')
     || normalized.includes('unknown command')
     || normalized.includes('invalid effort');
+}
+
+function buildKiroEffortSetupFailureError(sessionId: string, text: string): OpenPError {
+  const marker = text.trim().replace(/\s+/g, ' ').slice(0, 200);
+  return new OpenPError(
+    `Kiro effort setup failed: reasonCode=kiro_setup_effort_unsupported setupCommand=effort setupSessionId=${sessionId} matchedMarker=${JSON.stringify(marker)}`,
+    EXIT_CODES.unsupportedOption,
+  );
 }

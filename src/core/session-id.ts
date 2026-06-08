@@ -4,6 +4,9 @@ export function isSafeSessionId(value: string): boolean {
   if (!value || value.trim() !== value || Buffer.byteLength(value, 'utf8') > MAX_SESSION_ID_BYTES) {
     return false;
   }
+  if (value.startsWith('-')) {
+    return false;
+  }
   if (value.includes('/') || value.includes('\\')) {
     return false;
   }

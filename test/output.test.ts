@@ -627,7 +627,7 @@ test('streamed reasoning snapshots do not duplicate terminal aggregate reasoning
   assert.deepEqual(resultOutput(openp).reasoning, ['think A', 'think B']);
 });
 
-test('streamed reasoning snapshots preserve distinct terminal reasoning formatting', () => {
+test('streamed reasoning snapshots suppress whitespace-only terminal reasoning duplicates', () => {
   const reasoningSnapshot: AssistantEventSnapshot = {
     message: {
       id: 'msg-reasoning-1',
@@ -649,7 +649,22 @@ test('streamed reasoning snapshots preserve distinct terminal reasoning formatti
     suppressAssistantSnapshots: [reasoningSnapshot],
   }));
 
-  assert.deepEqual(resultOutput(openp).reasoning, ['think block', '  think block\n']);
+  assert.deepEqual(resultOutput(openp).reasoning, ['think block']);
+});
+
+test('terminal reasoning fallback preserves whitespace-only reasoning when it was not emitted', () => {
+  const openp = parseSingleOpenPRecord(formatTurnResult({
+    ...RESULT,
+    text: 'done',
+    structuredOutput: undefined,
+    reasoningContent: '  \n',
+    assistantEvents: [],
+  }, {
+    outputFormat: 'stream-json',
+    backendSessionId: '11111111-1111-4111-8111-111111111111',
+  }));
+
+  assert.deepEqual(resultOutput(openp).reasoning, ['  \n']);
 });
 
 test('suppressed tool snapshots preserve all tool calls in the result aggregate', () => {

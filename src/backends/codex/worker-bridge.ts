@@ -8,6 +8,7 @@ import { createAbortError } from '../../core/abort.js';
 import { EXIT_CODES, OpenPError } from '../../core/errors.js';
 import type { AssistantEventSnapshot } from '../../core/types.js';
 import type { WorkerTurnRequest, WorkerTurnResult, WorkerTurnDiagnostics } from '../../core/worker-types.js';
+import { readRequiredFirstTurnFlag } from '../../core/worker-input.js';
 
 import { resolveCodexBin } from './bin.js';
 import { buildFirstTurnArgs, buildResumeTurnArgs, validateCodexBackendArgs } from './args.js';
@@ -25,7 +26,7 @@ export class CodexWorkerBridge implements BackendWorkerBridge {
   async runTurn(request: WorkerTurnRequest): Promise<WorkerTurnResult> {
     const startMs = Date.now();
     const bin = request.bin ?? resolveCodexBin();
-    const isFirstTurn = request.isFirstTurn ?? !request.sessionId;
+    const isFirstTurn = readRequiredFirstTurnFlag(request);
     if (!isFirstTurn && !request.sessionId) {
       throw new OpenPError('Codex resume requires a session id', EXIT_CODES.usage);
     }
@@ -155,7 +156,7 @@ export class CodexWorkerBridge implements BackendWorkerBridge {
       const structuredOutput = parseCodexStructuredOutputFallback(
         resultContent,
         structuredOutputSchema,
-        request.sessionId ?? 'codex-worker-turn',
+        'codex-worker-turn',
       );
 
       const durationMs = Date.now() - startMs;

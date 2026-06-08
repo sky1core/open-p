@@ -16,7 +16,7 @@ import {
   startPersistentClaudeCodeProcess,
 } from './persistent-process.js';
 import { resolveClaudeCodeBin } from './bin.js';
-import { withClaudeCodeBackgroundSuppressionEnv } from './launch-safety.js';
+import { withClaudeCodeSafeLaunchEnv } from './launch-safety.js';
 
 export interface ClaudeCodeManagedProcess extends ManagedBackendProcess {
   sendTurn(prompt: string, options: PersistentClaudeCodeTurnOptions): Promise<TurnResult>;
@@ -59,7 +59,7 @@ export class ClaudeCodeWorkerBridge implements BackendWorkerBridge {
       executionMode: request.executionMode ?? null,
       tools: request.tools ?? null,
       jsonSchema: request.jsonSchema ?? null,
-      env: withClaudeCodeBackgroundSuppressionEnv(request.env ?? {}),
+      env: withClaudeCodeSafeLaunchEnv(request.env ?? {}),
       local: request.local ?? false,
     });
 

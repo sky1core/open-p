@@ -206,6 +206,92 @@ test('extractLatestTokenCount returns null for token_count without last_token_us
   assert.equal(extractLatestTokenCount(log), null);
 });
 
+test('extractSessionLogResult preserves assistant text with an unknown native phase', () => {
+  const result = extractSessionLogResult([
+    codexUserTurn(),
+    JSON.stringify({
+      type: 'event_msg',
+      payload: {
+        type: 'agent_message',
+        phase: 'draft',
+        id: 'draft-1',
+        message: 'draft answer',
+      },
+    }),
+    JSON.stringify({ type: 'event_msg', payload: { type: 'task_complete' } }),
+  ].join('\n'));
+
+  assert.equal(result.content, 'draft answer');
+  assert.equal(result.commentaryEvents.length, 1);
+  assert.deepEqual(firstBlocks(result.commentaryEvents), [{ type: 'text', text: 'draft answer' }]);
+});
+
+test('extractSessionLogResult keeps final display text when an unknown native phase follows', () => {
+  const result = extractSessionLogResult([
+    codexUserTurn(),
+    JSON.stringify({
+      type: 'response_item',
+      payload: {
+        type: 'message',
+        role: 'assistant',
+        phase: 'final_answer',
+        id: 'final-1',
+        content: [{ type: 'output_text', text: 'final answer' }],
+      },
+    }),
+    JSON.stringify({
+      type: 'response_item',
+      payload: {
+        type: 'message',
+        role: 'assistant',
+        phase: 'draft',
+        id: 'draft-1',
+        content: [{ type: 'output_text', text: 'draft answer' }],
+      },
+    }),
+    JSON.stringify({ type: 'event_msg', payload: { type: 'task_complete' } }),
+  ].join('\n'));
+
+  assert.equal(result.content, 'final answer');
+  assert.deepEqual(firstBlocks(result.commentaryEvents), [
+    { type: 'text', text: 'final answer' },
+    { type: 'text', text: 'draft answer' },
+  ]);
+});
+
+test('extractSessionLogResult lets final display text override an earlier unknown native phase', () => {
+  const result = extractSessionLogResult([
+    codexUserTurn(),
+    JSON.stringify({
+      type: 'response_item',
+      payload: {
+        type: 'message',
+        role: 'assistant',
+        phase: 'draft',
+        id: 'draft-1',
+        content: [{ type: 'output_text', text: 'draft answer' }],
+      },
+    }),
+    JSON.stringify({
+      type: 'response_item',
+      payload: {
+        type: 'message',
+        role: 'assistant',
+        phase: 'final_answer',
+        id: 'final-1',
+        content: [{ type: 'output_text', text: 'final answer' }],
+      },
+    }),
+    JSON.stringify({ type: 'event_msg', payload: { type: 'task_complete' } }),
+  ].join('\n'));
+
+  assert.equal(result.content, 'final answer');
+  assert.deepEqual(firstBlocks(result.commentaryEvents), [
+    { type: 'text', text: 'draft answer' },
+    { type: 'text', text: 'final answer' },
+  ]);
+});
+
 test('findCodexSessionLogPath requires exact or dash-prefixed session suffix', async () => {
   const prev = process.env.CODEX_HOME;
   const codexHome = await mkdtemp(join(tmpdir(), 'openp-codex-home-'));

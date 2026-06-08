@@ -141,7 +141,12 @@ for await (const line of input) {
           ? `The current model does not support effort ${effort}.`
         : behavior === 'effort-unsupported'
           ? `Unsupported effort: ${effort}.`
+        : behavior === 'effort-chunk-false-positive'
+          ? `Setup note: older models are not supported. Effort set to ${effort}.`
         : `Effort set to ${effort}.`;
+      const logText = behavior === 'effort-chunk-false-positive'
+        ? `Effort set to ${effort}.`
+        : text;
       if (behavior !== 'effort-late-output') {
         send({
           jsonrpc: '2.0',
@@ -172,7 +177,7 @@ for await (const line of input) {
           kind: 'AssistantMessage',
           data: {
             message_id: `assistant-${Date.now()}`,
-            content: [{ kind: 'text', data: text }],
+            content: [{ kind: 'text', data: logText }],
           },
         });
       }

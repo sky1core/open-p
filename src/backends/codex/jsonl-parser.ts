@@ -161,6 +161,9 @@ function extractFromEvents(
             pushAnswerSnapshot(text, payload.phase, payload.id);
           } else if (isVisibleAssistantMessagePhase(payload.phase)) {
             pushVisibleAssistantSnapshot(text, payload.phase);
+          } else {
+            lastResponseItemText ??= text;
+            pushAnswerSnapshot(text, payload.phase, payload.id);
           }
         }
         lastAgentMessageMirrorCandidate = null;
@@ -185,6 +188,9 @@ function extractFromEvents(
             pushAnswerSnapshot(text, payload.phase, payload.id);
           } else if (isVisibleAssistantMessagePhase(payload.phase)) {
             pushVisibleAssistantSnapshot(text, payload.phase);
+          } else {
+            lastResponseItemText ??= text;
+            pushAnswerSnapshot(text, payload.phase, payload.id);
           }
           lastAgentMessageMirrorCandidate = buildCodexAgentMessageMirrorCandidate(payload.phase, text);
         }
@@ -209,6 +215,9 @@ function extractFromEvents(
           pushAnswerSnapshot(text, item.phase, item.id);
         } else if (isVisibleAssistantMessagePhase(item.phase)) {
           assistantEvents.push(buildAssistantSnapshot(text, String(item.phase), nextAssistantEventId(item.id)));
+        } else {
+          lastResponseItemText ??= text;
+          pushAnswerSnapshot(text, item.phase, item.id);
         }
         continue;
       }
@@ -339,6 +348,8 @@ export function processCodexStdoutLine(
         } else if (isVisibleAssistantMessagePhase(payload.phase)) {
           appendAssistantText(state, callbacks, text);
           emitAssistantSnapshot(callbacks, text, payload.phase, nextCodexAssistantEventId(state, payload.id));
+        } else {
+          appendAssistantText(state, callbacks, text);
         }
       }
       state.lastAgentMessageMirrorCandidate = null;
@@ -366,6 +377,8 @@ export function processCodexStdoutLine(
         } else if (isVisibleAssistantMessagePhase(payload.phase)) {
           appendAssistantText(state, callbacks, text);
           emitAssistantSnapshot(callbacks, text, payload.phase, nextCodexAssistantEventId(state, payload.id));
+        } else {
+          appendAssistantText(state, callbacks, text);
         }
         state.lastAgentMessageMirrorCandidate = buildCodexAgentMessageMirrorCandidate(payload.phase, text);
       }
@@ -397,6 +410,8 @@ export function processCodexStdoutLine(
     } else if (isVisibleAssistantMessagePhase(item.phase)) {
       appendAssistantText(state, callbacks, text);
       emitAssistantSnapshot(callbacks, text, item.phase, nextCodexAssistantEventId(state, item.id));
+    } else {
+      appendAssistantText(state, callbacks, text);
     }
   }
 }

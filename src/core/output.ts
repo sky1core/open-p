@@ -1755,13 +1755,24 @@ function shouldAppendResultReasoningFallback(
   if (collectedReasoning.includes(candidate)) {
     return false;
   }
-  return joinReasoningSequence(collectedReasoning) !== candidate;
+  const candidateKey = reasoningDuplicateKey(candidate);
+  if (candidateKey.length === 0) {
+    return joinReasoningSequence(collectedReasoning) !== candidate;
+  }
+  if (collectedReasoning.some((text) => reasoningDuplicateKey(text) === candidateKey)) {
+    return false;
+  }
+  return reasoningDuplicateKey(joinReasoningSequence(collectedReasoning)) !== candidateKey;
 }
 
 function joinReasoningSequence(texts: readonly string[]): string {
   return texts
     .filter((text) => text.length > 0)
     .join('\n\n');
+}
+
+function reasoningDuplicateKey(text: string): string {
+  return text.replace(/\s+/g, ' ').trim();
 }
 
 function buildOpenPUsage(usage: {
@@ -2180,8 +2191,15 @@ function openPEventsContainReasoningText(events: readonly Record<string, unknown
       : event
   );
   const reasoningTexts = collectOpenPReasoningFromAssistantEvents(openPEvents);
+  const candidateKey = reasoningDuplicateKey(candidate);
+  if (candidateKey.length === 0) {
+    return reasoningTexts.includes(candidate) ||
+      joinReasoningSequence(reasoningTexts) === candidate;
+  }
   return reasoningTexts.includes(candidate) ||
-    joinReasoningSequence(reasoningTexts) === candidate;
+    reasoningTexts.some((reasoningText) => reasoningDuplicateKey(reasoningText) === candidateKey) ||
+    joinReasoningSequence(reasoningTexts) === candidate ||
+    reasoningDuplicateKey(joinReasoningSequence(reasoningTexts)) === candidateKey;
 }
 
 function buildTerminalAssistantEventRecords(event: {

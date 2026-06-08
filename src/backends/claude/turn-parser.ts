@@ -648,12 +648,13 @@ function shouldReplaceActiveAssistantText(
 }
 
 function isNewAssistantMessageBoundary(state: ActiveAssistantTextState, messageId: string | null): boolean {
-  if (state.lastActiveAssistantHadTerminalStop || state.activeAssistantTexts.length === 0) {
+  if (state.activeAssistantTexts.length === 0) {
     return true;
   }
-  return messageId !== null &&
-    state.lastActiveAssistantMessageId !== null &&
-    messageId !== state.lastActiveAssistantMessageId;
+  if (messageId !== null && state.lastActiveAssistantMessageId !== null) {
+    return messageId !== state.lastActiveAssistantMessageId;
+  }
+  return state.lastActiveAssistantHadTerminalStop;
 }
 
 function lastActiveAssistantTextBlocks(state: ActiveAssistantTextState): readonly string[] {

@@ -75,7 +75,13 @@ export class TmuxProvider implements PtyProvider {
       shellCommand,
     ]);
     activeOpenpTmuxSessions.set(options.sessionName, this.tmuxBin);
-    return new TmuxSession(this.tmuxBin, options.sessionName);
+    return new TmuxSession(
+      this.tmuxBin,
+      options.sessionName,
+      undefined,
+      undefined,
+      () => activeOpenpTmuxSessions.delete(options.sessionName),
+    );
   }
 
   private async ensureAvailable(): Promise<void> {
@@ -122,6 +128,7 @@ export class TmuxSession implements PtySession {
     private readonly sendProcessSignal: ProcessSignalSender = (pid, signal) => {
       process.kill(pid, signal);
     },
+    private readonly onClosed: (() => void) | null = null,
   ) {
     this.id = sessionName;
   }
@@ -136,12 +143,17 @@ export class TmuxSession implements PtySession {
     await execFileText(this.tmuxBin, ['send-keys', '-t', this.sessionName, 'Enter']);
   }
 
+  async clearInputLine(): Promise<void> {
+    await execFileText(this.tmuxBin, ['send-keys', '-t', this.sessionName, 'C-u']);
+  }
+
   async interrupt(): Promise<void> {
     await execFileText(this.tmuxBin, ['send-keys', '-t', this.sessionName, 'C-c']);
   }
 
   async terminate(signal: NodeJS.Signals = 'SIGTERM'): Promise<void> {
     if (!(await this.isAlive())) {
+      this.markClosed();
       return;
     }
     const panePid = await this.resolvePanePid();
@@ -153,21 +165,27 @@ export class TmuxSession implements PtySession {
 
   async exit(): Promise<void> {
     if (!(await this.isAlive())) {
+      this.markClosed();
       return;
     }
+    await this.clearInputLine();
     await this.write('/exit');
     await this.submit();
     if (await this.waitForExit(this.exitTimeoutMs)) {
+      this.markClosed();
       return;
     }
     await this.interrupt();
     await sleep(500);
     if (!(await this.isAlive())) {
+      this.markClosed();
       return;
     }
+    await this.clearInputLine();
     await this.write('/exit');
     await this.submit();
     if (await this.waitForExit(this.exitTimeoutMs)) {
+      this.markClosed();
       return;
     }
     throw new OpenPError(`tmux session ${this.sessionName} did not exit after graceful /exit`, EXIT_CODES.backendExited);
@@ -187,9 +205,25 @@ export class TmuxSession implements PtySession {
   async isAlive(): Promise<boolean> {
     try {
       await execFileText(this.tmuxBin, ['has-session', '-t', this.sessionName]);
-      return true;
     } catch {
+      this.markClosed();
       return false;
+    }
+    try {
+      const paneDead = await execFileText(this.tmuxBin, [
+        'display-message',
+        '-p',
+        '-t',
+        this.sessionName,
+        '#{pane_dead}',
+      ]);
+      const alive = paneDead.stdout.trim() !== '1';
+      if (!alive) {
+        this.markClosed();
+      }
+      return alive;
+    } catch {
+      return true;
     }
   }
 
@@ -249,15 +283,22 @@ export class TmuxSession implements PtySession {
 
   private async killSessionIfAlive(): Promise<void> {
     if (!(await this.isAlive())) {
+      this.markClosed();
       return;
     }
     try {
       await execFileText(this.tmuxBin, ['kill-session', '-t', this.sessionName]);
+      this.markClosed();
     } catch (error) {
       if (await this.isAlive()) {
         throw error;
       }
+      this.markClosed();
     }
+  }
+
+  private markClosed(): void {
+    this.onClosed?.();
   }
 }
 

@@ -23,6 +23,7 @@ class StartupFailureSession implements PtySession {
   exitCount = 0;
   alive = true;
   submitCount = 0;
+  readonly terminateSignals: NodeJS.Signals[] = [];
 
   constructor(
     private readonly closeOnExit: boolean,
@@ -37,7 +38,8 @@ class StartupFailureSession implements PtySession {
 
   async interrupt(): Promise<void> {}
 
-  async terminate(): Promise<void> {
+  async terminate(signal: NodeJS.Signals = 'SIGTERM'): Promise<void> {
+    this.terminateSignals.push(signal);
     this.alive = false;
   }
 
@@ -718,6 +720,45 @@ test('persistent Claude Code startup failure gracefully exits the started PTY', 
   assert.equal(await session.isAlive(), false);
 });
 
+test('persistent Claude Code startup launch isolates ambient Anthropic env', async () => {
+  const session = new StartupFailureSession(true, true);
+  let capturedIsolateAnthropicEnv: boolean | undefined;
+  let capturedEnv: Readonly<Record<string, string>> | undefined;
+  const provider: PtyProvider = {
+    start: async (_command: string, _args: readonly string[], options: PtyStartOptions) => {
+      capturedIsolateAnthropicEnv = options.isolateAnthropicEnv;
+      capturedEnv = options.env;
+      return session;
+    },
+  };
+
+  const started = await startPersistentClaudeCodeProcess({
+    sessionId: randomUUID(),
+    launchSignature: buildLaunchSignature({
+      backendId: 'claude',
+      bin: process.execPath,
+      binArgs: [],
+      env: {
+        ANTHROPIC_BASE_URL: 'http://127.0.0.1:9999',
+        ANTHROPIC_API_KEY: 'blocked',
+        ANTHROPIC_AUTH_TOKEN: 'blocked',
+      },
+      local: false,
+    }),
+    resume: false,
+    cwd: TEST_CWD,
+    provider,
+    timeoutMs: 1_000,
+  });
+
+  await started.shutdown();
+  assert.equal(capturedIsolateAnthropicEnv, true);
+  assert.equal(capturedEnv?.ANTHROPIC_BASE_URL, 'http://127.0.0.1:9999');
+  assert.equal('ANTHROPIC_API_KEY' in (capturedEnv ?? {}), false);
+  assert.equal('ANTHROPIC_AUTH_TOKEN' in (capturedEnv ?? {}), false);
+  assert.equal(capturedEnv?.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS, '1');
+});
+
 test('readiness timeout stays bounded when turn timeout is disabled', () => {
   assert.equal(readinessTimeoutMs(0), 15_000);
   assert.equal(readinessTimeoutMs(1_000), 1_000);
@@ -855,7 +896,7 @@ test('input prompt line detection rejects assistant text that contains prompt gl
   assert.equal(isClaudeCodeInputPromptLine('        82% context used'), false);
 });
 
-test('persistent Claude Code startup failure reports unsafe session when graceful exit leaves PTY alive', async () => {
+test('persistent Claude Code startup failure escalates cleanup when graceful exit leaves PTY alive', async () => {
   const session = new StartupFailureSession(false, false);
   const provider = providerFor(session);
 
@@ -868,11 +909,12 @@ test('persistent Claude Code startup failure reports unsafe session when gracefu
       provider,
       timeoutMs: 1_000,
     }),
-    (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.sessionBusy,
+    /still waiting for workspace trust/i,
   );
 
   assert.equal(session.exitCount, 1);
-  assert.equal(await session.isAlive(), true);
+  assert.deepEqual(session.terminateSignals, ['SIGTERM']);
+  assert.equal(await session.isAlive(), false);
 });
 
 test('persistent background watcher keeps pending flush on the previous callback before arming the new task', async () => {

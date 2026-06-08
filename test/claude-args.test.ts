@@ -118,6 +118,29 @@ test('buildClaudeCodeArgs rejects raw reasoning effort backend arg', () => {
   );
 });
 
+test('buildClaudeCodeArgs rejects raw Claude print and permission backend args', () => {
+  for (const backendArgs of [
+    ['-p'],
+    ['--print'],
+    ['--input-format', 'stream-json'],
+    ['--input-format=stream-json'],
+    ['--output-format', 'stream-json'],
+    ['--output-format=stream-json'],
+    ['--include-partial-messages'],
+    ['--permission-mode', 'bypassPermissions'],
+    ['--permission-mode=bypassPermissions'],
+    ['--dangerously-skip-permissions'],
+  ]) {
+    assert.throws(
+      () => buildClaudeCodeArgs({
+        ...OPTIONS,
+        backendArgs,
+      }),
+      /unsupported backend arg:/,
+    );
+  }
+});
+
 test('builds Claude Code args with json schema pass-through', () => {
   const schema = '{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"]}';
   const args = buildClaudeCodeArgs({
@@ -377,6 +400,41 @@ test('buildPersistentClaudeCodeArgs rejects raw reasoning effort backend arg', (
     }),
     /unsupported backend arg: --effort/,
   );
+});
+
+test('buildPersistentClaudeCodeArgs rejects raw Claude print and permission backend args', () => {
+  for (const binArgs of [
+    ['-p'],
+    ['--print'],
+    ['--input-format', 'stream-json'],
+    ['--input-format=stream-json'],
+    ['--output-format', 'stream-json'],
+    ['--output-format=stream-json'],
+    ['--include-partial-messages'],
+    ['--permission-mode', 'bypassPermissions'],
+    ['--permission-mode=bypassPermissions'],
+    ['--dangerously-skip-permissions'],
+  ]) {
+    assert.throws(
+      () => buildPersistentClaudeCodeArgs({
+        sessionId: '11111111-1111-4111-8111-111111111111',
+        resume: false,
+        cwd: '/tmp/workspace',
+        launchSignature: buildLaunchSignature({
+          backendId: 'claude',
+          bin: 'claude',
+          binArgs,
+          model: null,
+          reasoningEffort: null,
+          executionMode: null,
+          jsonSchema: null,
+          env: {},
+          local: false,
+        }),
+      }),
+      /unsupported backend arg:/,
+    );
+  }
 });
 
 test('persistent Claude Code args merge caller settings with thinking summaries', () => {
