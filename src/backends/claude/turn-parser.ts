@@ -20,6 +20,13 @@ interface ActiveAssistantTextState {
   lastActiveAssistantHadTerminalStop: boolean;
 }
 
+interface ReasoningContentState {
+  reasoningTexts: string[];
+  reasoningContentBlocks: AssistantContentBlock[];
+  lastReasoningMessageId: string | null;
+  lastReasoningContentBlockCount: number;
+}
+
 interface ParserState {
   inScope: boolean;
   resultText: string | null;
@@ -33,6 +40,9 @@ interface ParserState {
   rawEventCount: number;
   stopReason: string | null;
   reasoningTexts: string[];
+  reasoningContentBlocks: AssistantContentBlock[];
+  lastReasoningMessageId: string | null;
+  lastReasoningContentBlockCount: number;
   activeAssistantTexts: string[];
   lastActiveAssistantMessageId: string | null;
   lastActiveAssistantTextBlockCount: number;
@@ -100,6 +110,9 @@ export function parseClaudeCodeJsonlTurn(
     rawEventCount: 0,
     stopReason: null,
     reasoningTexts: [],
+    reasoningContentBlocks: [],
+    lastReasoningMessageId: null,
+    lastReasoningContentBlockCount: 0,
     activeAssistantTexts: [],
     lastActiveAssistantMessageId: null,
     lastActiveAssistantTextBlockCount: 0,
@@ -194,14 +207,24 @@ export function extractClaudeCodeIntermediateContent(
     lastActiveAssistantTextBlockCount: 0,
     lastActiveAssistantHadTerminalStop: false,
   };
-  let pendingReasoningBlocks: string[] = [];
-  const pendingReasoningContentBlocks: AssistantContentBlock[] = [];
+  const reasoningState: ReasoningContentState = {
+    reasoningTexts: [],
+    reasoningContentBlocks: [],
+    lastReasoningMessageId: null,
+    lastReasoningContentBlockCount: 0,
+  };
   let pendingAssistantSnapshot: AssistantEventSnapshot | null = null;
   const clearTextState = (): void => {
     textState.activeAssistantTexts = [];
     textState.lastActiveAssistantMessageId = null;
     textState.lastActiveAssistantTextBlockCount = 0;
     textState.lastActiveAssistantHadTerminalStop = false;
+  };
+  const clearReasoningState = (): void => {
+    reasoningState.reasoningTexts = [];
+    reasoningState.reasoningContentBlocks = [];
+    reasoningState.lastReasoningMessageId = null;
+    reasoningState.lastReasoningContentBlockCount = 0;
   };
 
   for (const line of lines) {
@@ -210,8 +233,7 @@ export function extractClaudeCodeIntermediateContent(
     rememberLocalCommandTranscriptPromptId(localCommandTranscriptPromptIds, event);
     if (event.type === 'user' && isTaskNotification(event)) {
       clearTextState();
-      pendingReasoningBlocks = [];
-      pendingReasoningContentBlocks.splice(0, pendingReasoningContentBlocks.length);
+      clearReasoningState();
       pendingAssistantSnapshot = null;
       const uuid = stringOrNull(event.uuid);
       if (uuid) {
@@ -225,8 +247,7 @@ export function extractClaudeCodeIntermediateContent(
       if (isSyntheticNoResponseAssistant(event)) {
         inBackgroundTask = false;
         clearTextState();
-        pendingReasoningBlocks = [];
-        pendingReasoningContentBlocks.splice(0, pendingReasoningContentBlocks.length);
+        clearReasoningState();
         pendingAssistantSnapshot = null;
         continue;
       }
@@ -238,8 +259,7 @@ export function extractClaudeCodeIntermediateContent(
     if (isCallerUserTurn(event, localCommandTranscriptPromptIds)) {
       inBackgroundTask = false;
       clearTextState();
-      pendingReasoningBlocks = [];
-      pendingReasoningContentBlocks.splice(0, pendingReasoningContentBlocks.length);
+      clearReasoningState();
       pendingAssistantSnapshot = null;
       localCommandTranscriptPromptIds.clear();
       continue;
@@ -248,8 +268,7 @@ export function extractClaudeCodeIntermediateContent(
       if (!hasNonBackgroundParent(backgroundParentUuids, event) && isBackgroundTaskEnd(event)) {
         inBackgroundTask = false;
         clearTextState();
-        pendingReasoningBlocks = [];
-        pendingReasoningContentBlocks.splice(0, pendingReasoningContentBlocks.length);
+        clearReasoningState();
         pendingAssistantSnapshot = null;
         continue;
       }
@@ -268,8 +287,7 @@ export function extractClaudeCodeIntermediateContent(
     }
     if (messageStopReason(event) === 'end_turn' && !options.includeTerminalAssistant) {
       clearTextState();
-      pendingReasoningBlocks = [];
-      pendingReasoningContentBlocks.splice(0, pendingReasoningContentBlocks.length);
+      clearReasoningState();
       pendingAssistantSnapshot = null;
       continue;
     }
@@ -289,12 +307,8 @@ export function extractClaudeCodeIntermediateContent(
       } else if (item.type === 'thinking' || item.type === 'reasoning') {
         const reasoningText = extractReasoningBlockText(item);
         if (reasoningText) {
-          appendReasoningContent(
-            eventReasoningBlocks,
-            eventReasoningContentBlocks,
-            reasoningText,
-            [item],
-          );
+          eventReasoningBlocks.push(reasoningText);
+          eventReasoningContentBlocks.push(item);
         }
       }
     }
@@ -306,10 +320,10 @@ export function extractClaudeCodeIntermediateContent(
     }
     if (eventReasoningBlocks.length > 0) {
       appendReasoningContent(
-        pendingReasoningBlocks,
-        pendingReasoningContentBlocks,
+        reasoningState,
         joinTextBlocks(eventReasoningBlocks),
         eventReasoningContentBlocks,
+        messageId,
       );
     }
     if (eventTextBlocks.length > 0 || eventReasoningBlocks.length > 0) {
@@ -319,9 +333,9 @@ export function extractClaudeCodeIntermediateContent(
 
   return {
     text: buildFallbackResultText(textState),
-    reasoningText: pendingReasoningBlocks.length > 0 ? pendingReasoningBlocks.join('\n\n') : null,
-    reasoningContentBlocks: pendingReasoningContentBlocks.length > 0
-      ? [...pendingReasoningContentBlocks]
+    reasoningText: reasoningState.reasoningTexts.length > 0 ? reasoningState.reasoningTexts.join('\n\n') : null,
+    reasoningContentBlocks: reasoningState.reasoningContentBlocks.length > 0
+      ? [...reasoningState.reasoningContentBlocks]
       : null,
     assistantSnapshot: pendingAssistantSnapshot,
   };
@@ -346,6 +360,9 @@ function consumeEvent(state: ParserState, event: JsonObject, turnId: string): vo
     state.durationMs = null;
     state.stopReason = null;
     state.reasoningTexts = [];
+    state.reasoningContentBlocks = [];
+    state.lastReasoningMessageId = null;
+    state.lastReasoningContentBlockCount = 0;
     state.activeAssistantTexts = [];
     state.lastActiveAssistantMessageId = null;
     state.lastActiveAssistantTextBlockCount = 0;
@@ -479,6 +496,8 @@ function consumeAssistantEvent(state: ParserState, event: JsonObject): void {
 
   const content = Array.isArray(message?.content) ? message.content : [];
   const eventTextBlocks: string[] = [];
+  const eventReasoningBlocks: string[] = [];
+  const eventReasoningContentBlocks: AssistantContentBlock[] = [];
   for (const block of content) {
     const item = asObject(block);
     if (!item) continue;
@@ -491,7 +510,8 @@ function consumeAssistantEvent(state: ParserState, event: JsonObject): void {
     if ((item.type === 'thinking' || item.type === 'reasoning')) {
       const reasoningText = extractReasoningBlockText(item);
       if (reasoningText) {
-        appendReasoningText(state.reasoningTexts, reasoningText);
+        eventReasoningBlocks.push(reasoningText);
+        eventReasoningContentBlocks.push(item);
       }
     }
     if (item.type === 'text' && typeof item.text === 'string') {
@@ -499,6 +519,14 @@ function consumeAssistantEvent(state: ParserState, event: JsonObject): void {
         eventTextBlocks.push(item.text);
       }
     }
+  }
+  if (eventReasoningBlocks.length > 0) {
+    appendReasoningContent(
+      state,
+      joinTextBlocks(eventReasoningBlocks),
+      eventReasoningContentBlocks,
+      messageId,
+    );
   }
   if (eventTextBlocks.length > 0) {
     appendActiveAssistantTextBlocks(state, eventTextBlocks, messageId, stopReason !== null);
@@ -678,32 +706,77 @@ function buildReasoningContent(state: ParserState): string | null {
   return explicitReasoning || null;
 }
 
-function appendReasoningText(texts: string[], reasoningText: string): void {
-  appendReasoningContent(texts, [], reasoningText, []);
-}
-
+// Reasoning accumulation follows the same SPEC.md rule as answer accumulation: an assistant update
+// with the same native `message.id` is a same-message snapshot of the latest reasoning segment,
+// and a different `message.id` always starts a new segment (never merged by text comparison).
+// Raw references show every Claude assistant event carries `message.id`; events without it are
+// unverified and keep the pre-message-id whole-text cumulative-snapshot behavior unchanged.
 function appendReasoningContent(
-  texts: string[],
-  contentBlocks: AssistantContentBlock[],
+  state: ReasoningContentState,
   reasoningText: string,
   nextContentBlocks: readonly AssistantContentBlock[],
+  messageId: string | null,
 ): void {
-  const currentText = joinTextBlocks(texts);
-  if (!currentText) {
-    texts.push(reasoningText);
-    contentBlocks.push(...nextContentBlocks);
+  if (state.reasoningTexts.length === 0) {
+    pushReasoningSegment(state, reasoningText, nextContentBlocks, messageId);
     return;
   }
+  if (messageId !== null && state.lastReasoningMessageId !== null) {
+    if (messageId !== state.lastReasoningMessageId) {
+      pushReasoningSegment(state, reasoningText, nextContentBlocks, messageId);
+      return;
+    }
+    const lastSegmentText = state.reasoningTexts[state.reasoningTexts.length - 1]!;
+    if (reasoningText === lastSegmentText || isStablePrefixOfLongerText(reasoningText, lastSegmentText)) {
+      return;
+    }
+    if (isStablePrefixOfLongerText(lastSegmentText, reasoningText)) {
+      replaceLastReasoningSegment(state, reasoningText, nextContentBlocks, messageId);
+      return;
+    }
+    pushReasoningSegment(state, reasoningText, nextContentBlocks, messageId);
+    return;
+  }
+  const currentText = joinTextBlocks(state.reasoningTexts);
   if (reasoningText === currentText || isStablePrefixOfLongerText(reasoningText, currentText)) {
     return;
   }
   if (isStablePrefixOfLongerText(currentText, reasoningText)) {
-    texts.splice(0, texts.length, reasoningText);
-    contentBlocks.splice(0, contentBlocks.length, ...nextContentBlocks);
+    state.reasoningTexts.splice(0, state.reasoningTexts.length, reasoningText);
+    state.reasoningContentBlocks.splice(0, state.reasoningContentBlocks.length, ...nextContentBlocks);
+    state.lastReasoningMessageId = messageId;
+    state.lastReasoningContentBlockCount = nextContentBlocks.length;
     return;
   }
-  texts.push(reasoningText);
-  contentBlocks.push(...nextContentBlocks);
+  pushReasoningSegment(state, reasoningText, nextContentBlocks, messageId);
+}
+
+function pushReasoningSegment(
+  state: ReasoningContentState,
+  reasoningText: string,
+  nextContentBlocks: readonly AssistantContentBlock[],
+  messageId: string | null,
+): void {
+  state.reasoningTexts.push(reasoningText);
+  state.reasoningContentBlocks.push(...nextContentBlocks);
+  state.lastReasoningMessageId = messageId;
+  state.lastReasoningContentBlockCount = nextContentBlocks.length;
+}
+
+function replaceLastReasoningSegment(
+  state: ReasoningContentState,
+  reasoningText: string,
+  nextContentBlocks: readonly AssistantContentBlock[],
+  messageId: string | null,
+): void {
+  state.reasoningTexts.splice(state.reasoningTexts.length - 1, 1, reasoningText);
+  state.reasoningContentBlocks.splice(
+    state.reasoningContentBlocks.length - state.lastReasoningContentBlockCount,
+    state.lastReasoningContentBlockCount,
+    ...nextContentBlocks,
+  );
+  state.lastReasoningMessageId = messageId;
+  state.lastReasoningContentBlockCount = nextContentBlocks.length;
 }
 
 function isTaskNotification(event: JsonObject): boolean {

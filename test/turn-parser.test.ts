@@ -731,6 +731,108 @@ test('replaces cumulative Claude Code reasoning snapshots without duplicating ea
   ]);
 });
 
+test('replaces same-message reasoning snapshots by message id without duplicating earlier reasoning segments', () => {
+  const lines = [
+    liveShapeUserLine('40000000-0000-4000-8000-000000000001', 'use a tool, then answer'),
+    liveShapeAssistantLine({
+      messageId: 'msg_01FirstThinkSegmentAAAA',
+      parentUuid: '40000000-0000-4000-8000-000000000001',
+      uuid: '40000000-0000-4000-8000-000000000002',
+      stopReason: 'tool_use',
+      content: [{ type: 'thinking', thinking: 'first think', signature: 'sig-first' }],
+    }),
+    liveShapeAssistantLine({
+      messageId: 'msg_01FirstThinkSegmentAAAA',
+      parentUuid: '40000000-0000-4000-8000-000000000002',
+      uuid: '40000000-0000-4000-8000-000000000003',
+      stopReason: 'tool_use',
+      content: [{ type: 'tool_use', id: 'toolu_01ReasoningDedup00001', name: 'Bash', input: { command: 'true' } }],
+    }),
+    liveShapeToolResultLine({
+      parentUuid: '40000000-0000-4000-8000-000000000003',
+      uuid: '40000000-0000-4000-8000-000000000004',
+      toolUseId: 'toolu_01ReasoningDedup00001',
+      content: 'ok',
+    }),
+    liveShapeAssistantLine({
+      messageId: 'msg_01SecondThinkSegmentBBB',
+      parentUuid: '40000000-0000-4000-8000-000000000004',
+      uuid: '40000000-0000-4000-8000-000000000005',
+      stopReason: null,
+      content: [{ type: 'thinking', thinking: 'second A', signature: 'sig-second' }],
+    }),
+    liveShapeAssistantLine({
+      messageId: 'msg_01SecondThinkSegmentBBB',
+      parentUuid: '40000000-0000-4000-8000-000000000005',
+      uuid: '40000000-0000-4000-8000-000000000006',
+      stopReason: null,
+      content: [{ type: 'thinking', thinking: 'second A\n\nsecond B', signature: 'sig-second' }],
+    }),
+    liveShapeAssistantLine({
+      messageId: 'msg_01SecondThinkSegmentBBB',
+      parentUuid: '40000000-0000-4000-8000-000000000006',
+      uuid: '40000000-0000-4000-8000-000000000007',
+      stopReason: 'end_turn',
+      content: [{ type: 'text', text: 'final answer' }],
+    }),
+    liveShapeDurationLine(1500, '40000000-0000-4000-8000-000000000008'),
+  ];
+
+  const result = parseClaudeCodeJsonlTurn(lines, TURN_ID);
+  const intermediate = extractClaudeCodeIntermediateContent(lines, {
+    includeTerminalAssistant: true,
+  });
+
+  assert.equal(result?.text, 'final answer');
+  assert.equal(result?.reasoningContent, 'first think\n\nsecond A\n\nsecond B');
+  assert.equal(intermediate.text, 'final answer');
+  assert.equal(intermediate.reasoningText, 'first think\n\nsecond A\n\nsecond B');
+  assert.deepEqual(intermediate.reasoningContentBlocks, [
+    { type: 'thinking', thinking: 'first think', signature: 'sig-first' },
+    { type: 'thinking', thinking: 'second A\n\nsecond B', signature: 'sig-second' },
+  ]);
+});
+
+test('keeps reasoning from a new message id as a separate segment even when it starts with earlier reasoning text', () => {
+  const lines = [
+    liveShapeUserLine('50000000-0000-4000-8000-000000000001', 'think twice'),
+    liveShapeAssistantLine({
+      messageId: 'msg_01OverMergeGuardAAAAAAA',
+      parentUuid: '50000000-0000-4000-8000-000000000001',
+      uuid: '50000000-0000-4000-8000-000000000002',
+      stopReason: null,
+      content: [{ type: 'thinking', thinking: 'alpha', signature: 'sig-a' }],
+    }),
+    liveShapeAssistantLine({
+      messageId: 'msg_01OverMergeGuardBBBBBBB',
+      parentUuid: '50000000-0000-4000-8000-000000000002',
+      uuid: '50000000-0000-4000-8000-000000000003',
+      stopReason: null,
+      content: [{ type: 'thinking', thinking: 'alpha beta', signature: 'sig-b' }],
+    }),
+    liveShapeAssistantLine({
+      messageId: 'msg_01OverMergeGuardBBBBBBB',
+      parentUuid: '50000000-0000-4000-8000-000000000003',
+      uuid: '50000000-0000-4000-8000-000000000004',
+      stopReason: 'end_turn',
+      content: [{ type: 'text', text: 'ok' }],
+    }),
+    liveShapeDurationLine(900, '50000000-0000-4000-8000-000000000005'),
+  ];
+
+  const result = parseClaudeCodeJsonlTurn(lines, TURN_ID);
+  const intermediate = extractClaudeCodeIntermediateContent(lines, {
+    includeTerminalAssistant: true,
+  });
+
+  assert.equal(result?.reasoningContent, 'alpha\n\nalpha beta');
+  assert.equal(intermediate.reasoningText, 'alpha\n\nalpha beta');
+  assert.deepEqual(intermediate.reasoningContentBlocks, [
+    { type: 'thinking', thinking: 'alpha', signature: 'sig-a' },
+    { type: 'thinking', thinking: 'alpha beta', signature: 'sig-b' },
+  ]);
+});
+
 test('preserves Claude Code reasoning block whitespace', () => {
   const result = parseClaudeCodeJsonlTurn([
     userLine('hello'),
@@ -988,5 +1090,97 @@ function durationLine(durationMs: number): string {
     type: 'system',
     subtype: 'turn_duration',
     durationMs,
+  });
+}
+
+// Line builders below follow the live Claude Code session-log event shape recorded in
+// .agents/references/full-suite/20260524-195248/cases/claude-sonnet-4-6/*/claude-session-log.jsonl.
+const LIVE_SHAPE_SESSION_ID = '30000000-0000-4000-8000-000000000000';
+
+function liveShapeUserLine(uuid: string, content: string): string {
+  return JSON.stringify({
+    parentUuid: null,
+    isSidechain: false,
+    type: 'user',
+    message: { role: 'user', content },
+    uuid,
+    timestamp: '2026-06-10T00:00:00.000Z',
+    userType: 'external',
+    cwd: '/redacted/workspace',
+    sessionId: LIVE_SHAPE_SESSION_ID,
+    version: '2.1.150',
+    gitBranch: 'main',
+  });
+}
+
+function liveShapeAssistantLine(options: {
+  readonly messageId: string;
+  readonly parentUuid: string;
+  readonly uuid: string;
+  readonly stopReason: string | null;
+  readonly content: readonly Record<string, unknown>[];
+}): string {
+  return JSON.stringify({
+    parentUuid: options.parentUuid,
+    isSidechain: false,
+    message: {
+      model: 'claude-sonnet-4-6',
+      id: options.messageId,
+      type: 'message',
+      role: 'assistant',
+      content: options.content,
+      stop_reason: options.stopReason,
+      stop_sequence: null,
+      usage: { input_tokens: 3, cache_read_input_tokens: 100, output_tokens: 50 },
+    },
+    requestId: 'req_011LiveShapeReasoning',
+    type: 'assistant',
+    uuid: options.uuid,
+    timestamp: '2026-06-10T00:00:01.000Z',
+    userType: 'external',
+    cwd: '/redacted/workspace',
+    sessionId: LIVE_SHAPE_SESSION_ID,
+    version: '2.1.150',
+    gitBranch: 'main',
+  });
+}
+
+function liveShapeToolResultLine(options: {
+  readonly parentUuid: string;
+  readonly uuid: string;
+  readonly toolUseId: string;
+  readonly content: string;
+}): string {
+  return JSON.stringify({
+    parentUuid: options.parentUuid,
+    isSidechain: false,
+    type: 'user',
+    message: {
+      role: 'user',
+      content: [{ tool_use_id: options.toolUseId, type: 'tool_result', content: options.content }],
+    },
+    uuid: options.uuid,
+    timestamp: '2026-06-10T00:00:02.000Z',
+    toolUseResult: { stdout: options.content, stderr: '', interrupted: false, isImage: false },
+    sourceToolAssistantUUID: options.parentUuid,
+    userType: 'external',
+    cwd: '/redacted/workspace',
+    sessionId: LIVE_SHAPE_SESSION_ID,
+    version: '2.1.150',
+    gitBranch: 'main',
+  });
+}
+
+function liveShapeDurationLine(durationMs: number, uuid: string): string {
+  return JSON.stringify({
+    type: 'system',
+    subtype: 'turn_duration',
+    durationMs,
+    messageCount: 4,
+    timestamp: '2026-06-10T00:00:03.000Z',
+    uuid,
+    cwd: '/redacted/workspace',
+    sessionId: LIVE_SHAPE_SESSION_ID,
+    version: '2.1.150',
   });
 }
