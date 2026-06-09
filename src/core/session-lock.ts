@@ -47,6 +47,12 @@ export class SessionLockStore {
       if (!recovered || !(await tryWriteSessionLock(path, lockFile))) {
         throw new OpenPError(`session ${sessionId} is busy`, EXIT_CODES.sessionBusy);
       }
+      // A concurrent acquirer racing the same stale lock may have removed our
+      // fresh lock between recovery and write. This point-in-time ownership
+      // check narrows that window; plain fs primitives cannot close it fully.
+      if (!(await verifySessionLockOwnership(path, lockFile.token))) {
+        throw new OpenPError(`session ${sessionId} is busy`, EXIT_CODES.sessionBusy);
+      }
     }
 
     return {
@@ -90,6 +96,21 @@ async function recoverStaleSessionLock(path: string): Promise<boolean> {
     return false;
   }
 
+  // Re-read just before unlink: a concurrent recoverer may have already
+  // replaced the stale lock with its own fresh lock, which we must not remove.
+  let current: unknown;
+  try {
+    current = JSON.parse(await readFile(path, 'utf8'));
+  } catch (error) {
+    if (isErrorCode(error, 'ENOENT')) {
+      return true;
+    }
+    throw new OpenPError(`failed to read session lock: ${path}`, EXIT_CODES.sessionState);
+  }
+  if (!isLockFile(current) || current.token !== existing.token) {
+    return false;
+  }
+
   try {
     await unlink(path);
     return true;
@@ -99,6 +120,16 @@ async function recoverStaleSessionLock(path: string): Promise<boolean> {
     }
     throw new OpenPError(`failed to recover stale session lock: ${path}`, EXIT_CODES.sessionState);
   }
+}
+
+async function verifySessionLockOwnership(path: string, token: string): Promise<boolean> {
+  let current: unknown;
+  try {
+    current = JSON.parse(await readFile(path, 'utf8'));
+  } catch {
+    return false;
+  }
+  return isLockFile(current) && current.token === token;
 }
 
 async function releaseSessionLock(path: string, token: string): Promise<void> {

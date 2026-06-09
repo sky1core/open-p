@@ -98,3 +98,61 @@ test('rejects unsafe session ids at the lock path boundary', async () => {
     (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.sessionState,
   );
 });
+
+test('concurrent acquires over a stale lock yield at most one owner', async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), 'openp-lock-'));
+  const stateRoot = await mkdtemp(join(tmpdir(), 'openp-lock-root-'));
+  const path = new SessionLockStore(projectRoot, stateRoot).pathForSession(SESSION_ID);
+
+  for (let iteration = 0; iteration < 25; iteration += 1) {
+    await mkdir(join(stateRoot, 'locks'), { recursive: true });
+    await writeFile(path, JSON.stringify({
+      token: `stale-token-${iteration}`,
+      sessionId: SESSION_ID,
+      pid: 99_999_999,
+      createdAt: new Date().toISOString(),
+    }));
+
+    const stores = Array.from({ length: 6 }, () => new SessionLockStore(projectRoot, stateRoot));
+    const outcomes = await Promise.all(stores.map(async (store) => {
+      try {
+        return { lock: await store.acquire(SESSION_ID) };
+      } catch (error) {
+        if (error instanceof OpenPError && error.exitCode === EXIT_CODES.sessionBusy) {
+          return { busy: true as const };
+        }
+        throw error;
+      }
+    }));
+
+    const winners = outcomes.filter((outcome) => 'lock' in outcome && outcome.lock);
+    assert.equal(winners.length <= 1, true, `iteration ${iteration}: multiple lock owners`);
+    if (winners.length === 1) {
+      const winner = winners[0] as { lock: { path: string; release(): Promise<void> } };
+      const raw = JSON.parse(await readFile(path, 'utf8'));
+      assert.notEqual(raw.token, `stale-token-${iteration}`, `iteration ${iteration}: stale lock left on disk`);
+      await winner.lock.release();
+    }
+  }
+});
+
+test('stale recovery does not remove a lock replaced by a live owner', async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), 'openp-lock-'));
+  const stateRoot = await mkdtemp(join(tmpdir(), 'openp-lock-root-'));
+  const store = new SessionLockStore(projectRoot, stateRoot);
+  const path = store.pathForSession(SESSION_ID);
+  await mkdir(join(stateRoot, 'locks'), { recursive: true });
+  // A live-pid lock must stay untouched even though it was not created by this store.
+  await writeFile(path, JSON.stringify({
+    token: 'live-owner-token',
+    sessionId: SESSION_ID,
+    pid: process.pid,
+    createdAt: new Date().toISOString(),
+  }));
+
+  await assert.rejects(
+    () => store.acquire(SESSION_ID),
+    (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.sessionBusy,
+  );
+  assert.equal((await readFile(path, 'utf8')).includes('live-owner-token'), true);
+});
