@@ -188,6 +188,37 @@ test('CodexBackend.runTurn throws on non-zero exit', withFakeBin('fake-codex-err
   );
 }));
 
+test('CodexBackend.runTurn reports a completed Codex turn with no final answer', withFakeBin('fake-codex-exit-no-final-session-log.mjs', async () => {
+  await writeCodexPreviousTurnLog();
+  const backend = new CodexBackend();
+
+  await assert.rejects(
+    backend.runTurn(
+      { turnId: 'turn-no-final', prompt: 'hello' },
+      { ...BASE_OPTIONS, resume: true, backendSessionId: FAKE_CODEX_SESSION_ID },
+    ),
+    (error) => error instanceof OpenPError &&
+      error.exitCode === EXIT_CODES.backendExited &&
+      error.message.includes('Codex CLI completed without a final answer') &&
+      error.message.includes('exit code 1'),
+  );
+}));
+
+test('CodexBackend.runTurn diagnoses a first-turn Codex completion with no final answer', withFakeBin('fake-codex-exit-no-final-session-log.mjs', async () => {
+  const backend = new CodexBackend();
+
+  await assert.rejects(
+    backend.runTurn(
+      { turnId: 'turn-first-no-final', prompt: 'hello' },
+      BASE_OPTIONS,
+    ),
+    (error) => error instanceof OpenPError &&
+      error.exitCode === EXIT_CODES.backendExited &&
+      error.message.includes('Codex CLI completed without a final answer') &&
+      error.message.includes('exit code 1'),
+  );
+}));
+
 test('CodexBackend.runTurn throws on empty response', withFakeBin('fake-codex-empty.sh', async () => {
   const backend = new CodexBackend();
 

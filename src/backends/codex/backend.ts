@@ -20,6 +20,7 @@ import {
 import { getCodexSessionLogBaseline, readCodexSessionLogResultSinceBaseline, type CodexSessionLogResult } from './session-log.js';
 import { runCodexExec } from './exec-runner.js';
 import { parseCodexStructuredOutputFallback, parseCodexStructuredOutputSchema } from './structured-output.js';
+import { createCodexNonZeroExitError } from './exit-diagnostics.js';
 
 export class CodexBackend implements Backend {
   async runTurn(request: TurnRequest, options: BackendRunOptions): Promise<TurnResult> {
@@ -129,9 +130,14 @@ export class CodexBackend implements Backend {
       }
 
       if (result.exitCode !== 0) {
-        const stderrSnippet = result.stderr.trim().slice(0, 500);
-        const details = stderrSnippet ? `: ${stderrSnippet}` : '';
-        throw new OpenPError(`Codex CLI exited with code ${result.exitCode}${details}`, EXIT_CODES.backendExited);
+        throw await createCodexNonZeroExitError({
+          exitCode: result.exitCode,
+          stderr: result.stderr,
+          stdout: result.stdout,
+          outputLastMessagePath,
+          sessionId: isFirstTurn ? null : options.backendSessionId,
+          sessionLogBaseline: resumeLogBaseline,
+        });
       }
 
       let lastMessageContent: string | null = null;

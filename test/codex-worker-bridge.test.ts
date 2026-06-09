@@ -312,6 +312,43 @@ test('CodexWorkerBridge.runTurn throws on non-zero exit', withFakeBin('fake-code
   );
 }));
 
+test('CodexWorkerBridge.runTurn reports a completed Codex turn with no final answer', withFakeBin('fake-codex-exit-no-final-session-log.mjs', async () => {
+  await writeCodexPreviousTurnLog();
+  const bridge = new CodexWorkerBridge();
+
+  await assert.rejects(
+    bridge.runTurn({
+      sessionId: FAKE_CODEX_SESSION_ID,
+      isFirstTurn: false,
+      projectRoot: process.cwd(),
+      message: 'hello',
+      timeoutMs: 10000,
+    }),
+    (error) => error instanceof OpenPError &&
+      error.exitCode === EXIT_CODES.backendExited &&
+      error.message.includes('Codex CLI completed without a final answer') &&
+      error.message.includes('exit code 1'),
+  );
+}));
+
+test('CodexWorkerBridge.runTurn diagnoses a first-turn Codex completion with no final answer', withFakeBin('fake-codex-exit-no-final-session-log.mjs', async () => {
+  const bridge = new CodexWorkerBridge();
+
+  await assert.rejects(
+    bridge.runTurn({
+      sessionId: null,
+      isFirstTurn: true,
+      projectRoot: process.cwd(),
+      message: 'hello',
+      timeoutMs: 10000,
+    }),
+    (error) => error instanceof OpenPError &&
+      error.exitCode === EXIT_CODES.backendExited &&
+      error.message.includes('Codex CLI completed without a final answer') &&
+      error.message.includes('exit code 1'),
+  );
+}));
+
 test('CodexWorkerBridge.runTurn throws on timeout', withFakeBin('fake-codex-slow.sh', async () => {
   const bridge = new CodexWorkerBridge();
 
