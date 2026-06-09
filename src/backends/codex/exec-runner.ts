@@ -93,6 +93,11 @@ export function runCodexExec(options: CodexExecOptions): Promise<CodexExecResult
 
     const rl = createInterface({ input: child.stdout!, crlfDelay: Infinity });
     rl.on('line', (line: string) => {
+      if (settled) {
+        // The result is already resolved; a grandchild holding the inherited
+        // stdout pipe must not emit streaming records after the result.
+        return;
+      }
       stdout += line + '\n';
       try {
         options.onStdoutLine?.(line);
@@ -120,18 +125,23 @@ export function runCodexExec(options: CodexExecOptions): Promise<CodexExecResult
     });
 
     child.on('exit', (code, sig) => {
-      const exitResult = {
-        stdout,
-        stderr,
-        exitCode: code,
-        signal: sig ?? terminationSignal,
-        timedOut,
+      // Capture only exitCode/signal here; stdout/stderr are assembled at
+      // settle time so lines that a grandchild writes to the inherited stdout
+      // pipe between exit and the grace settle are not lost.
+      const settleWithCurrentBuffers = (): void => {
+        settle({
+          stdout,
+          stderr,
+          exitCode: code,
+          signal: sig ?? terminationSignal,
+          timedOut,
+        });
       };
       if (timedOut || aborted) {
-        settle(exitResult);
+        settleWithCurrentBuffers();
         return;
       }
-      closeGraceTimer = setTimeout(() => settle(exitResult), 1000);
+      closeGraceTimer = setTimeout(settleWithCurrentBuffers, 1000);
     });
 
     child.on('close', (code, sig) => {
