@@ -32,12 +32,17 @@ await appendLog({
   payload: {
     type: 'token_count',
     info: {
-      model_context_window: 258400,
+      total_token_usage: {
+        input_tokens: 111,
+        cached_input_tokens: 22,
+        output_tokens: 3,
+      },
       last_token_usage: {
         input_tokens: 111,
         cached_input_tokens: 22,
         output_tokens: 3,
       },
+      model_context_window: 258400,
     },
   },
 });
@@ -64,24 +69,23 @@ await appendLog({
   payload: {
     type: 'token_count',
     info: {
-      model_context_window: 258400,
+      total_token_usage: {
+        input_tokens: 444,
+        cached_input_tokens: 66,
+        output_tokens: 8,
+      },
       last_token_usage: {
         input_tokens: 333,
         cached_input_tokens: 44,
         output_tokens: 5,
       },
+      model_context_window: 258400,
     },
   },
 });
 await appendLog({
-  type: 'turn.completed',
-  session_id: SESSION_ID,
-  result: 'session log final answer',
-  usage: {
-    input_tokens: 999,
-    cached_input_tokens: 222,
-    output_tokens: 11,
-  },
+  type: 'event_msg',
+  payload: { type: 'task_complete' },
 });
 await sleep(50);
 
@@ -90,8 +94,8 @@ emitStdout({
   session_id: SESSION_ID,
   result: 'session log final answer',
   usage: {
-    input_tokens: 444,
-    cached_input_tokens: 55,
-    output_tokens: 6,
+    input_tokens: 7777,
+    cached_input_tokens: 888,
+    output_tokens: 99,
   },
 });

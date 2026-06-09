@@ -457,7 +457,9 @@ test('extractSessionLogResult extracts content, reasoning, commentary, usage, an
   assert.equal(result.sessionId, 'ses-111');
   assert.equal(result.model, 'codex-mini');
   assert.equal(result.contextWindow, 128000);
-  assert.deepEqual(result.usage, { inputTokens: 800, outputTokens: 30, cacheReadInputTokens: 200 });
+  // usage comes from token_count last_token_usage sums; turn.completed.usage
+  // (a stdout-only shape absent from real session logs) must be ignored here.
+  assert.deepEqual(result.usage, { inputTokens: 500, outputTokens: 20, cacheReadInputTokens: 100 });
   assert.deepEqual(result.lastSubturnUsage, { inputTokens: 500, outputTokens: 20, cacheReadInputTokens: 100 });
   assert.equal(result.commentaryEvents.length, 8);
   const c0 = result.commentaryEvents[0]!.message.content as any[];
@@ -778,6 +780,115 @@ test('extractSessionLogResult returns empty commentary when no commentary events
   assert.equal(result.content, 'answer');
   assert.equal(result.commentaryEvents.length, 0);
   assert.equal(result.reasoningContent, null);
+});
+
+function codexTokenCount(
+  total: { input: number; cached: number; output: number },
+  last: { input: number; cached: number; output: number },
+): string {
+  return JSON.stringify({
+    type: 'event_msg',
+    payload: {
+      type: 'token_count',
+      info: {
+        total_token_usage: {
+          input_tokens: total.input,
+          cached_input_tokens: total.cached,
+          output_tokens: total.output,
+        },
+        last_token_usage: {
+          input_tokens: last.input,
+          cached_input_tokens: last.cached,
+          output_tokens: last.output,
+        },
+        model_context_window: 258400,
+      },
+    },
+  });
+}
+
+test('extractSessionLogResult fills aggregate usage from a single token_count last_token_usage', () => {
+  const log = [
+    codexUserTurn(),
+    // total deliberately differs from last (resumed session): using total must fail.
+    codexTokenCount({ input: 9999, cached: 8888, output: 777 }, { input: 500, cached: 100, output: 20 }),
+    JSON.stringify({
+      type: 'event_msg',
+      payload: { type: 'agent_message', phase: 'final_answer', message: 'single subturn answer' },
+    }),
+    JSON.stringify({ type: 'event_msg', payload: { type: 'task_complete' } }),
+  ].join('\n');
+
+  const result = extractSessionLogResult(log);
+  assert.equal(result.content, 'single subturn answer');
+  assert.deepEqual(result.usage, { inputTokens: 500, outputTokens: 20, cacheReadInputTokens: 100 });
+  assert.deepEqual(result.lastSubturnUsage, { inputTokens: 500, outputTokens: 20, cacheReadInputTokens: 100 });
+});
+
+test('extractSessionLogResult sums aggregate usage across multi-subturn token_count events', () => {
+  // Values mirror .agents/references/full-suite/20260524-195248/cases/codex-gpt-5.5/tool-use-file/codex-session-log.jsonl
+  const log = [
+    codexUserTurn(),
+    codexTokenCount({ input: 28014, cached: 3456, output: 392 }, { input: 28014, cached: 3456, output: 392 }),
+    codexTokenCount({ input: 56648, cached: 30976, output: 627 }, { input: 28634, cached: 27520, output: 235 }),
+    codexTokenCount({ input: 85557, cached: 59520, output: 858 }, { input: 28909, cached: 28544, output: 231 }),
+    codexTokenCount({ input: 114826, cached: 88064, output: 1375 }, { input: 29269, cached: 28544, output: 517 }),
+    JSON.stringify({
+      type: 'event_msg',
+      payload: { type: 'agent_message', phase: 'final_answer', message: 'multi subturn answer' },
+    }),
+    JSON.stringify({ type: 'event_msg', payload: { type: 'task_complete' } }),
+  ].join('\n');
+
+  const result = extractSessionLogResult(log);
+  assert.deepEqual(result.usage, {
+    inputTokens: 114826,
+    outputTokens: 1375,
+    cacheReadInputTokens: 88064,
+  });
+  assert.deepEqual(result.lastSubturnUsage, {
+    inputTokens: 29269,
+    outputTokens: 517,
+    cacheReadInputTokens: 28544,
+  });
+});
+
+test('extractSessionLogResult scoped resume tail reports the resumed turn usage without session totals', () => {
+  // Values mirror turn 2 of .agents/references/openp-codex-live-0721-usage-probe/20260610-070233/codex-session-log.jsonl:
+  // total_token_usage is session-cumulative (52394 includes turn 1); last_token_usage is the resumed turn alone.
+  const resumedTail = [
+    codexUserTurn(),
+    codexTokenCount({ input: 52394, cached: 15616, output: 51 }, { input: 26318, cached: 4992, output: 18 }),
+    JSON.stringify({
+      type: 'event_msg',
+      payload: { type: 'agent_message', phase: 'final_answer', message: 'resumed turn answer' },
+    }),
+    JSON.stringify({ type: 'event_msg', payload: { type: 'task_complete' } }),
+  ].join('\n');
+
+  const result = extractSessionLogResult(resumedTail);
+  assert.equal(result.content, 'resumed turn answer');
+  assert.deepEqual(result.usage, {
+    inputTokens: 26318,
+    outputTokens: 18,
+    cacheReadInputTokens: 4992,
+  });
+});
+
+test('extractSessionLogResult keeps usage null without token_count events', () => {
+  const log = [
+    codexUserTurn(),
+    JSON.stringify({
+      type: 'event_msg',
+      payload: { type: 'agent_message', phase: 'final_answer', message: 'answer without usage' },
+    }),
+    JSON.stringify({ type: 'event_msg', payload: { type: 'task_complete' } }),
+  ].join('\n');
+
+  const result = extractSessionLogResult(log);
+  assert.equal(result.content, 'answer without usage');
+  assert.deepEqual(result.usage, { inputTokens: null, outputTokens: null, cacheReadInputTokens: null });
+  assert.equal(result.lastSubturnUsage, null);
 });
 
 test('extractSessionLogResult rejects missing active turn boundary', () => {

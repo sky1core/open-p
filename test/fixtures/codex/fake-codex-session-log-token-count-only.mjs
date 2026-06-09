@@ -29,12 +29,17 @@ await appendLog({
   payload: {
     type: 'token_count',
     info: {
-      model_context_window: 258400,
+      total_token_usage: {
+        input_tokens: 333,
+        cached_input_tokens: 44,
+        output_tokens: 5,
+      },
       last_token_usage: {
         input_tokens: 333,
         cached_input_tokens: 44,
         output_tokens: 5,
       },
+      model_context_window: 258400,
     },
   },
 });
@@ -47,9 +52,8 @@ await appendLog({
   },
 });
 await appendLog({
-  type: 'turn.completed',
-  session_id: SESSION_ID,
-  result: 'session log final answer',
+  type: 'event_msg',
+  payload: { type: 'task_complete' },
 });
 
 emitStdout({

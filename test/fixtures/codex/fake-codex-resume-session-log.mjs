@@ -34,24 +34,53 @@ const events = [
     payload: {
       type: 'token_count',
       info: {
-        model_context_window: 200000,
-        last_token_usage: {
-          input_tokens: 2000,
-          cached_input_tokens: 300,
+        // total_token_usage is session-cumulative (includes the previous turn);
+        // last_token_usage is this subturn alone.
+        total_token_usage: {
+          input_tokens: 1900,
+          cached_input_tokens: 270,
           output_tokens: 40,
         },
+        last_token_usage: {
+          input_tokens: 1800,
+          cached_input_tokens: 250,
+          output_tokens: 30,
+        },
+        model_context_window: 200000,
       },
     },
   },
   {
-    type: 'turn.completed',
-    session_id: SESSION_ID,
-    result: 'current turn final answer',
-    usage: {
-      input_tokens: 2200,
-      cached_input_tokens: 350,
-      output_tokens: 45,
+    type: 'event_msg',
+    payload: {
+      type: 'token_count',
+      info: {
+        total_token_usage: {
+          input_tokens: 2100,
+          cached_input_tokens: 320,
+          output_tokens: 50,
+        },
+        last_token_usage: {
+          input_tokens: 200,
+          cached_input_tokens: 50,
+          output_tokens: 10,
+        },
+        model_context_window: 200000,
+      },
     },
+  },
+  {
+    type: 'response_item',
+    payload: {
+      type: 'message',
+      role: 'assistant',
+      phase: 'final_answer',
+      content: [{ type: 'output_text', text: 'current turn final answer' }],
+    },
+  },
+  {
+    type: 'event_msg',
+    payload: { type: 'task_complete' },
   },
 ];
 

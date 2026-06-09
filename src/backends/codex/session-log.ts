@@ -180,7 +180,7 @@ export function extractSessionLogResult(rawLog: string): CodexSessionLogResult {
 
   let content: string | null = null;
   let sessionId: string | null = null;
-  let turnCompletedUsage: { inputTokens: number | null; outputTokens: number | null; cacheReadInputTokens: number | null } | null = null;
+  let tokenCountUsageSum: { inputTokens: number | null; outputTokens: number | null; cacheReadInputTokens: number | null } | null = null;
   const reasoningParts: string[] = [];
   const commentaryEvents: AssistantEventSnapshot[] = [];
   let lastFinalResponseItemText: string | null = null;
@@ -246,14 +246,9 @@ export function extractSessionLogResult(rawLog: string): CodexSessionLogResult {
           sessionId = candidateId;
         }
       }
-      const usage = asObject(event.usage);
-      if (usage) {
-        turnCompletedUsage = {
-          inputTokens: typeof usage.input_tokens === 'number' ? usage.input_tokens : null,
-          outputTokens: typeof usage.output_tokens === 'number' ? usage.output_tokens : null,
-          cacheReadInputTokens: typeof usage.cached_input_tokens === 'number' ? usage.cached_input_tokens : null,
-        };
-      }
+      // `turn.completed` is a stdout event; observed Codex session logs never contain
+      // one, so it is not a session-log usage source. Aggregate usage comes from
+      // `event_msg` `token_count` `last_token_usage` sums instead.
       continue;
     }
 
@@ -329,7 +324,10 @@ export function extractSessionLogResult(rawLog: string): CodexSessionLogResult {
       if (payload.type === 'token_count') {
         lastAgentMessageMirrorCandidate = null;
         const tokenDiag = extractTokenCountFromPayload(payload, currentTurnModel);
-        if (tokenDiag) latestTokenCount = tokenDiag;
+        if (tokenDiag) {
+          latestTokenCount = tokenDiag;
+          tokenCountUsageSum = addSubturnUsage(tokenCountUsageSum, tokenDiag);
+        }
       }
       if (payload.type === 'task_complete') {
         lastAgentMessageMirrorCandidate = null;
@@ -373,7 +371,7 @@ export function extractSessionLogResult(rawLog: string): CodexSessionLogResult {
     content = lastFinalResponseItemText;
   }
 
-  const usage = turnCompletedUsage ?? {
+  const usage = tokenCountUsageSum ?? {
     inputTokens: null,
     outputTokens: null,
     cacheReadInputTokens: null,
@@ -446,6 +444,22 @@ function extractTokenCountFromPayload(
     cacheReadInputTokens: typeof usage?.cached_input_tokens === 'number' ? usage.cached_input_tokens : null,
     contextWindow: typeof info.model_context_window === 'number' ? info.model_context_window : null,
   };
+}
+
+function addSubturnUsage(
+  sum: { inputTokens: number | null; outputTokens: number | null; cacheReadInputTokens: number | null } | null,
+  subturn: CodexSessionDiagnostics,
+): { inputTokens: number | null; outputTokens: number | null; cacheReadInputTokens: number | null } {
+  return {
+    inputTokens: addNullableTokens(sum?.inputTokens ?? null, subturn.inputTokens),
+    outputTokens: addNullableTokens(sum?.outputTokens ?? null, subturn.outputTokens),
+    cacheReadInputTokens: addNullableTokens(sum?.cacheReadInputTokens ?? null, subturn.cacheReadInputTokens),
+  };
+}
+
+function addNullableTokens(sum: number | null, next: number | null): number | null {
+  if (next === null) return sum;
+  return (sum ?? 0) + next;
 }
 
 function isFinalPhase(phase: unknown): boolean {

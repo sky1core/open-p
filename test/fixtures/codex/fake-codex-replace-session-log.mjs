@@ -15,11 +15,21 @@ await mkdir(dirname(newLogPath), { recursive: true });
 const replacementEvents = [
   { type: 'event_msg', payload: { type: 'user_message', message: 'replacement prompt' } },
   {
-    type: 'turn.completed',
-    session_id: sessionId,
-    result: 'replacement log answer',
-    usage: { input_tokens: 50, output_tokens: 10 },
+    type: 'event_msg',
+    payload: {
+      type: 'token_count',
+      info: {
+        total_token_usage: { input_tokens: 50, cached_input_tokens: 0, output_tokens: 10 },
+        last_token_usage: { input_tokens: 50, cached_input_tokens: 0, output_tokens: 10 },
+        model_context_window: 258400,
+      },
+    },
   },
+  {
+    type: 'event_msg',
+    payload: { type: 'agent_message', phase: 'final_answer', message: 'replacement log answer' },
+  },
+  { type: 'event_msg', payload: { type: 'task_complete' } },
 ];
 
 await writeFile(
