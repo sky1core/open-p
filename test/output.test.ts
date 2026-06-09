@@ -1084,3 +1084,105 @@ function hasOpenPMetadataForbiddenField(value: unknown): boolean {
   };
   return visit(value);
 }
+
+function answerSnapshot(id: string, text: string, semanticKind?: 'commentary'): AssistantEventSnapshot {
+  return {
+    message: { id, role: 'assistant', content: [{ type: 'text', text }] },
+    requestId: null,
+    ...(semanticKind ? { semanticKind } : {}),
+  };
+}
+
+const PREFIX_DIAGNOSTICS: TurnResult['diagnostics'] = {
+  durationMs: null,
+  toolsUsed: [],
+  usage: { inputTokens: null, cacheReadInputTokens: null, outputTokens: null },
+  rawEventCount: 1,
+};
+
+function prefixResult(text: string, assistantEvents: readonly AssistantEventSnapshot[]): TurnResult {
+  return {
+    turnId: 'turn-prefix',
+    text,
+    requestId: null,
+    sessionId: '33333333-3333-4333-8333-333333333333',
+    assistantEvents,
+    diagnostics: PREFIX_DIAGNOSTICS,
+  };
+}
+
+function resultAnswerArray(output: string): string[] {
+  for (const line of output.trim().split('\n')) {
+    const record = JSON.parse(line) as { openp?: { form?: string; output?: { answer?: string[] } } };
+    if (record.openp?.form === 'result') {
+      return record.openp.output?.answer ?? [];
+    }
+  }
+  throw new Error('no result record found');
+}
+
+test('text output keeps the result answer remainder missing from snapshots', () => {
+  const output = formatTurnResult(prefixResult('A\n\nB', [answerSnapshot('msg-1', 'A')]), {
+    outputFormat: 'text',
+    backendSessionId: '33333333-3333-4333-8333-333333333333',
+  });
+  assert.equal(output, 'A\n\nB\n');
+});
+
+test('text output keeps the confirmed answer when snapshots are commentary only', () => {
+  const output = formatTurnResult(prefixResult('A', [answerSnapshot('msg-1', 'progress note', 'commentary')]), {
+    outputFormat: 'text',
+    backendSessionId: '33333333-3333-4333-8333-333333333333',
+  });
+  assert.equal(output, 'progress note\n\nA\n');
+});
+
+test('json result fallback appends only the missing answer remainder after prefix snapshots', () => {
+  const output = formatTurnResult(prefixResult('A\n\nB', [answerSnapshot('msg-1', 'A')]), {
+    outputFormat: 'json',
+    backendSessionId: '33333333-3333-4333-8333-333333333333',
+  });
+  assert.deepEqual(resultAnswerArray(output), ['A', 'B']);
+});
+
+test('json result fallback keeps the full answer text when snapshots are unrelated', () => {
+  const output = formatTurnResult(prefixResult('Z', [answerSnapshot('msg-1', 'A')]), {
+    outputFormat: 'json',
+    backendSessionId: '33333333-3333-4333-8333-333333333333',
+  });
+  assert.deepEqual(resultAnswerArray(output), ['A', 'Z']);
+});
+
+test('json result emits no fallback when snapshots already cover the answer text', () => {
+  const output = formatTurnResult(prefixResult('A\n\nB', [answerSnapshot('msg-1', 'A'), answerSnapshot('msg-2', 'B')]), {
+    outputFormat: 'json',
+    backendSessionId: '33333333-3333-4333-8333-333333333333',
+  });
+  assert.deepEqual(resultAnswerArray(output), ['A', 'B']);
+});
+
+test('worker result fallback appends only the missing answer remainder after prefix snapshots', () => {
+  const workerResult: WorkerTurnResult = {
+    content: 'A\n\nB',
+    reasoningContent: null,
+    requestId: null,
+    sessionId: '33333333-3333-4333-8333-333333333333',
+    assistantEvents: [answerSnapshot('msg-1', 'A')],
+    diagnostics: {
+      numTurns: null,
+      inputTokens: null,
+      outputTokens: null,
+      cacheReadInputTokens: null,
+      contextWindow: null,
+      lastSubturnContextTokens: null,
+      durationMs: null,
+      totalCostUsd: null,
+      stopReason: null,
+      toolsUsed: [],
+      autoCompacted: false,
+      intermediateTextCount: null,
+    },
+  };
+  const output = formatWorkerTurnResult(workerResult, { turnId: 'turn-prefix' });
+  assert.deepEqual(resultAnswerArray(output), ['A', 'B']);
+});

@@ -527,7 +527,7 @@ export function formatWorkerTurnResult(result: WorkerTurnResult, event: {
     ? buildResultTextAssistantEventRecords({
         turnId: event.turnId,
         sessionId: result.sessionId,
-        answerText: result.content,
+        answerText: resultTextFallbackAnswerText(assistantEvents, result.content),
         reasoningText: missingFallbackReasoningContent,
         emitAnswer: true,
         requestId: result.requestId,
@@ -701,7 +701,22 @@ function resultAnswerTextForTextOutput(result: TurnResult, options: OutputOption
     },
   );
   const answers = collectOpenPAnswersFromAssistantEvents(extractEmittedAssistantOpenPEvents(assistantEvents));
-  return answers.length > 0 ? answers.join('\n\n') : result.text;
+  if (answers.length === 0) {
+    return result.text;
+  }
+  const joined = answers.join('\n\n');
+  if (
+    result.structuredOutput !== undefined ||
+    result.text.length === 0 ||
+    joined === result.text ||
+    answers.includes(result.text)
+  ) {
+    return joined;
+  }
+  // Snapshot-derived answers do not cover the confirmed result answer text;
+  // append the missing remainder (or the full text) like the JSON-family
+  // result fallback so text output never drops confirmed answer content.
+  return [...answers, resultTextFallbackAnswerText(assistantEvents, result.text)].join('\n\n');
 }
 
 function shouldEmitResultTextFallback(
@@ -1448,6 +1463,22 @@ function openPAnswerEventsContainResultText(events: readonly Record<string, unkn
   const extracted = extractEmittedAssistantOpenPEvents(events);
   const answers = collectOpenPAnswersFromAssistantEvents(extracted.length > 0 ? extracted : events);
   return answers.includes(text);
+}
+
+function resultTextFallbackAnswerText(events: readonly Record<string, unknown>[], text: string): string {
+  if (text.length === 0) {
+    return text;
+  }
+  const extracted = extractEmittedAssistantOpenPEvents(events);
+  const answers = collectOpenPAnswersFromAssistantEvents(extracted.length > 0 ? extracted : events);
+  const joined = answers.join('\n\n');
+  // When already-emitted answer segments form a strict segment-boundary prefix
+  // of the result answer text, the fallback must carry only the missing
+  // remainder; repeating the full text would duplicate the prefix segments.
+  if (joined.length > 0 && text.startsWith(`${joined}\n\n`)) {
+    return text.slice(joined.length + 2);
+  }
+  return text;
 }
 
 function collectOpenPReasoningFromAssistantEvents(events: readonly Record<string, unknown>[]): string[] {
@@ -2237,7 +2268,7 @@ function buildTerminalAssistantEventRecords(event: {
       output.push(...buildResultTextAssistantEventRecords({
         turnId: event.turnId,
         sessionId: event.sessionId,
-        answerText: event.text,
+        answerText: resultTextFallbackAnswerText(event.existingAssistantEvents, event.text),
         reasoningText: fallbackReasoningText,
         emitAnswer: true,
         requestId: event.requestId,
