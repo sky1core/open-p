@@ -347,6 +347,7 @@ async function appendStreamingResultDiagnostic(
   if (issues.length === 0) {
     return issues;
   }
+  // Streaming diagnostics are non-fatal; a write failure must not discard the confirmed result.
   await appendDebugLog(debugLogPath, {
     event: 'streaming_result_diagnostic',
     severity: 'warning',
@@ -355,7 +356,7 @@ async function appendStreamingResultDiagnostic(
     sessionId: input.sessionId,
     issueCount: issues.length,
     issues,
-  });
+  }).catch(() => undefined);
   return issues;
 }
 

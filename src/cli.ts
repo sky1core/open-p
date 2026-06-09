@@ -280,12 +280,13 @@ async function main(argv: readonly string[]): Promise<number> {
     if (signalHandlers.signal.aborted) {
       throw createAbortError();
     }
+    // The backend turn already completed; a diagnostics write failure must not discard the result.
     await appendDebugLog(debugLogPath, {
       event: 'success',
       backendSessionId: options.backendSessionId,
       turnId: result.turnId,
       diagnostics: result.diagnostics,
-    });
+    }).catch(() => undefined);
     if (options.resume && result.sessionId && result.sessionId !== options.backendSessionId) {
       throw new OpenPError('backend returned a different session id for a resumed turn', EXIT_CODES.protocolViolation);
     }
@@ -448,6 +449,7 @@ async function appendStreamingResultDiagnostic(
   if (issues.length === 0) {
     return issues;
   }
+  // Streaming diagnostics are non-fatal; a write failure must not discard the confirmed result.
   await appendDebugLog(debugLogPath, {
     event: 'streaming_result_diagnostic',
     severity: 'warning',
@@ -456,7 +458,7 @@ async function appendStreamingResultDiagnostic(
     sessionId: input.sessionId,
     issueCount: issues.length,
     issues,
-  });
+  }).catch(() => undefined);
   return issues;
 }
 
