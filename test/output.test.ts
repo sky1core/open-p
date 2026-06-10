@@ -1182,6 +1182,16 @@ test('json result emits no fallback when snapshots already cover the answer text
   assert.deepEqual(resultAnswerArray(output), ['A', 'B']);
 });
 
+test('stream-json result fallback appends only the missing answer remainder after suppressed prefix snapshot', () => {
+  const snapshot = answerSnapshot('msg-1', 'A');
+  const output = formatTurnResult(prefixResult('A\n\nB', [snapshot]), {
+    outputFormat: 'stream-json',
+    backendSessionId: '33333333-3333-4333-8333-333333333333',
+    suppressAssistantSnapshots: [snapshot],
+  });
+  assert.deepEqual(resultAnswerArray(output), ['A', 'B']);
+});
+
 test('worker result fallback appends only the missing answer remainder after prefix snapshots', () => {
   const workerResult: WorkerTurnResult = {
     content: 'A\n\nB',
@@ -1206,4 +1216,65 @@ test('worker result fallback appends only the missing answer remainder after pre
   };
   const output = formatWorkerTurnResult(workerResult, { turnId: 'turn-prefix' });
   assert.deepEqual(resultAnswerArray(output), ['A', 'B']);
+});
+
+test('worker result fallback appends only the missing answer remainder after suppressed prefix snapshot', () => {
+  const snapshot = answerSnapshot('msg-1', 'A');
+  const workerResult: WorkerTurnResult = {
+    content: 'A\n\nB',
+    reasoningContent: null,
+    requestId: null,
+    sessionId: '33333333-3333-4333-8333-333333333333',
+    assistantEvents: [snapshot],
+    diagnostics: {
+      numTurns: null,
+      inputTokens: null,
+      outputTokens: null,
+      cacheReadInputTokens: null,
+      contextWindow: null,
+      lastSubturnContextTokens: null,
+      durationMs: null,
+      totalCostUsd: null,
+      stopReason: null,
+      toolsUsed: [],
+      autoCompacted: false,
+      intermediateTextCount: null,
+    },
+  };
+  const output = formatWorkerTurnResult(workerResult, {
+    turnId: 'turn-prefix',
+    suppressAssistantSnapshots: [snapshot],
+  });
+  assert.deepEqual(resultAnswerArray(output), ['A', 'B']);
+});
+
+test('worker result fallback appends only the missing answer remainder after multiple suppressed prefix snapshots', () => {
+  const firstSnapshot = answerSnapshot('msg-1', 'A');
+  const secondSnapshot = answerSnapshot('msg-2', 'B');
+  const workerResult: WorkerTurnResult = {
+    content: 'A\n\nB\n\nC',
+    reasoningContent: null,
+    requestId: null,
+    sessionId: '33333333-3333-4333-8333-333333333333',
+    assistantEvents: [firstSnapshot, secondSnapshot],
+    diagnostics: {
+      numTurns: null,
+      inputTokens: null,
+      outputTokens: null,
+      cacheReadInputTokens: null,
+      contextWindow: null,
+      lastSubturnContextTokens: null,
+      durationMs: null,
+      totalCostUsd: null,
+      stopReason: null,
+      toolsUsed: [],
+      autoCompacted: false,
+      intermediateTextCount: null,
+    },
+  };
+  const output = formatWorkerTurnResult(workerResult, {
+    turnId: 'turn-prefix',
+    suppressAssistantSnapshots: [firstSnapshot, secondSnapshot],
+  });
+  assert.deepEqual(resultAnswerArray(output), ['A', 'B', 'C']);
 });

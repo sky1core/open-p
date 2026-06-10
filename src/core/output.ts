@@ -146,6 +146,10 @@ export function formatTurnResult(result: TurnResult, options: OutputOptions): st
   )
     ? null
     : fallbackReasoningContent;
+  const resultTextFallbackSourceEvents = [
+    ...assistantEvents,
+    ...suppressedResultSnapshotOpenPEvents,
+  ];
   const assistantSnapshotsContainResultText =
     snapshotsContainAssistantText(assistantSnapshots, result.text) ||
     openPAnswerEventsContainResultText(assistantEvents, result.text) ||
@@ -161,6 +165,7 @@ export function formatTurnResult(result: TurnResult, options: OutputOptions): st
   ) && !suppressedSnapshotsContainResultText;
   const terminalAssistantEvents = buildTerminalAssistantEventRecords({
     existingAssistantEvents: assistantEvents,
+    resultTextFallbackSourceEvents,
     assistantSnapshotsContainResultText,
     text: result.text,
     fallbackReasoningContent: effectiveFallbackReasoningContent,
@@ -505,6 +510,10 @@ export function formatWorkerTurnResult(result: WorkerTurnResult, event: {
   const missingFallbackReasoningContent = openPEventsContainReasoningText(assistantEvents, effectiveFallbackReasoningContent)
     ? null
     : effectiveFallbackReasoningContent;
+  const resultTextFallbackSourceEvents = [
+    ...assistantEvents,
+    ...suppressedResultSnapshotOpenPEvents,
+  ];
   const shouldEmitFallbackAssistant = result.structuredOutput !== undefined && fallbackStructuredOutput === undefined
     ? false
     : Boolean(effectiveFallbackReasoningContent)
@@ -527,7 +536,7 @@ export function formatWorkerTurnResult(result: WorkerTurnResult, event: {
     ? buildResultTextAssistantEventRecords({
         turnId: event.turnId,
         sessionId: result.sessionId,
-        answerText: resultTextFallbackAnswerText(assistantEvents, result.content),
+        answerText: resultTextFallbackAnswerText(resultTextFallbackSourceEvents, result.content),
         reasoningText: missingFallbackReasoningContent,
         emitAnswer: true,
         requestId: result.requestId,
@@ -571,7 +580,7 @@ export function formatWorkerTurnResult(result: WorkerTurnResult, event: {
             ...buildResultTextAssistantEventRecords({
               turnId: event.turnId,
               sessionId: result.sessionId,
-              answerText: result.content,
+              answerText: resultTextFallbackAnswerText(resultTextFallbackSourceEvents, result.content),
               reasoningText: effectiveFallbackReasoningContent,
               emitAnswer: shouldEmitResultTextFallback(
                 result.content,
@@ -2235,6 +2244,7 @@ function openPEventsContainReasoningText(events: readonly Record<string, unknown
 
 function buildTerminalAssistantEventRecords(event: {
   readonly existingAssistantEvents: readonly Record<string, unknown>[];
+  readonly resultTextFallbackSourceEvents: readonly Record<string, unknown>[];
   readonly assistantSnapshotsContainResultText: boolean;
   readonly text: string;
   readonly fallbackReasoningContent?: string | null;
@@ -2268,7 +2278,7 @@ function buildTerminalAssistantEventRecords(event: {
       output.push(...buildResultTextAssistantEventRecords({
         turnId: event.turnId,
         sessionId: event.sessionId,
-        answerText: resultTextFallbackAnswerText(event.existingAssistantEvents, event.text),
+        answerText: resultTextFallbackAnswerText(event.resultTextFallbackSourceEvents, event.text),
         reasoningText: fallbackReasoningText,
         emitAnswer: true,
         requestId: event.requestId,
@@ -2317,7 +2327,7 @@ function buildTerminalAssistantEventRecords(event: {
   const output = buildResultTextAssistantEventRecords({
     turnId: event.turnId,
     sessionId: event.sessionId,
-    answerText: event.text,
+    answerText: resultTextFallbackAnswerText(event.resultTextFallbackSourceEvents, event.text),
     reasoningText: event.fallbackReasoningContent,
     emitAnswer: event.shouldEmitTextFallback &&
       event.fallbackStructuredOutput === undefined &&
