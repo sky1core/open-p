@@ -17,13 +17,6 @@ type KiroTurnResultRead = {
   readonly toolsUsed: readonly string[];
 };
 
-type KiroPromptAssistantRead = {
-  readonly logFound: boolean;
-  readonly size: number | null;
-  readonly promptFound: boolean;
-  readonly texts: readonly string[];
-};
-
 export function resolveKiroSessionLogPath(
   sessionId: string,
   env: NodeJS.ProcessEnv = process.env,
@@ -107,55 +100,6 @@ export async function waitForKiroTurnResult(options: {
         );
       }
       return lastResult;
-    }
-    await new Promise((resolve) => setTimeout(resolve, Math.min(intervalMs, options.deadlineMs - now)));
-  }
-}
-
-export async function waitForKiroPromptScopedAssistantTexts(options: {
-  readonly sessionId: string;
-  readonly fromOffset: number;
-  readonly env?: NodeJS.ProcessEnv;
-  readonly deadlineMs: number;
-  readonly intervalMs?: number;
-  readonly throwIfStopped?: () => void;
-}): Promise<readonly string[]> {
-  const intervalMs = options.intervalMs ?? 50;
-  let sawLog = false;
-  let sawPrompt = false;
-  let lastTexts: readonly string[] = [];
-
-  for (;;) {
-    options.throwIfStopped?.();
-    const snapshot = await readKiroPromptScopedAssistantText(
-      options.sessionId,
-      options.fromOffset,
-      options.env,
-    );
-    sawLog ||= snapshot.logFound;
-    sawPrompt ||= snapshot.promptFound;
-    if (snapshot.texts.length > 0) {
-      lastTexts = snapshot.texts;
-    }
-    options.throwIfStopped?.();
-    const now = Date.now();
-    if (now >= options.deadlineMs) {
-      if (lastTexts.length > 0) {
-        return lastTexts;
-      }
-      if (!sawLog) {
-        throw new OpenPError(
-          `Kiro session log not found for session ${options.sessionId}`,
-          EXIT_CODES.sessionLogNotFound,
-          ARTIFACT_REJECTION_REASONS.noCandidate,
-        );
-      }
-      throw new OpenPError(
-        sawPrompt
-          ? 'Kiro session log did not flush assistant text for setup prompt'
-          : 'Kiro session log did not contain setup prompt',
-        EXIT_CODES.protocolViolation,
-      );
     }
     await new Promise((resolve) => setTimeout(resolve, Math.min(intervalMs, options.deadlineMs - now)));
   }
@@ -268,59 +212,6 @@ export function extractKiroTurnResult(rawLogSegment: string): {
     text: assistantMessages.length > 0 ? assistantMessages.join('\n\n') : null,
     assistantEvents,
     toolsUsed: [...toolsUsed],
-  };
-}
-
-export function extractKiroPromptScopedAssistantText(rawLogSegment: string): {
-  readonly promptFound: boolean;
-  readonly text: string | null;
-  readonly texts: readonly string[];
-} {
-  const assistantMessages: string[] = [];
-  let collecting = false;
-  let promptFound = false;
-
-  for (const rawLine of rawLogSegment.split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (!line) {
-      continue;
-    }
-
-    let event: JsonObject;
-    try {
-      const parsed: unknown = JSON.parse(line);
-      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-        continue;
-      }
-      event = parsed as JsonObject;
-    } catch {
-      continue;
-    }
-
-    const promptClassification = classifyKiroPromptEvent(event);
-    if (promptClassification === 'unsupported') {
-      throwUnsupportedKiroPromptShape();
-    }
-    if (promptClassification === 'caller') {
-      collecting = !promptFound;
-      promptFound = true;
-      assistantMessages.length = 0;
-      continue;
-    }
-    if (!collecting || event.kind !== 'AssistantMessage') {
-      continue;
-    }
-
-    const text = extractAssistantMessageText(asObject(event.data));
-    if (text) {
-      assistantMessages.push(text);
-    }
-  }
-
-  return {
-    promptFound,
-    text: assistantMessages.length > 0 ? assistantMessages.join('\n\n') : null,
-    texts: assistantMessages,
   };
 }
 
@@ -513,33 +404,3 @@ function readTextFromOffset(path: string, offset: number, size: number): Promise
   });
 }
 
-async function readKiroPromptScopedAssistantText(
-  sessionId: string,
-  fromOffset: number,
-  env: NodeJS.ProcessEnv = process.env,
-): Promise<KiroPromptAssistantRead> {
-  const logPath = resolveKiroSessionLogPath(sessionId, env);
-  if (!logPath) {
-    return { logFound: false, size: null, promptFound: false, texts: [] };
-  }
-
-  let size: number;
-  try {
-    size = (await stat(logPath)).size;
-  } catch {
-    return { logFound: false, size: null, promptFound: false, texts: [] };
-  }
-  if (size <= fromOffset) {
-    return { logFound: true, size, promptFound: false, texts: [] };
-  }
-
-  const extracted = extractKiroPromptScopedAssistantText(
-    await readTextFromOffset(logPath, fromOffset, size),
-  );
-  return {
-    logFound: true,
-    size,
-    promptFound: extracted.promptFound,
-    texts: extracted.texts,
-  };
-}

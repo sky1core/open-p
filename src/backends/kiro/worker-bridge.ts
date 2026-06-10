@@ -15,6 +15,7 @@ export class KiroWorkerBridge implements BackendWorkerBridge {
     const isFirstTurn = readRequiredFirstTurnFlag(request);
     const { args, trustAllTools } = buildKiroAcpArgs({
       model: request.model,
+      reasoningEffort: request.reasoningEffort,
       executionMode: request.executionMode,
       tools: request.tools,
       backendArgs: request.binArgs ?? [],
@@ -26,7 +27,6 @@ export class KiroWorkerBridge implements BackendWorkerBridge {
       prompt: request.message,
       sessionId: isFirstTurn ? null : request.sessionId,
       isFirstTurn,
-      reasoningEffort: request.reasoningEffort,
       timeoutMs: request.timeoutMs ?? 0,
       trustAllTools,
       env: request.env ? { ...process.env, ...request.env } : undefined,

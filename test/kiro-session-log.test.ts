@@ -8,7 +8,6 @@ import {
   OpenPError,
 } from '../src/core/errors.js';
 import {
-  extractKiroPromptScopedAssistantText,
   extractKiroTurnResult,
   extractKiroTurnResultText,
   resolveKiroSessionLogPath,
@@ -414,7 +413,7 @@ test('extractKiroTurnResultText fails closed without a prompt-scoped assistant m
   assert.equal(extractKiroTurnResultText(log), null);
 });
 
-test('extractKiroTurnResultText keeps active answer even when it matches setup assistant text', () => {
+test('extractKiroTurnResultText keeps active answer even when it matches a prior assistant text', () => {
   const log = [
     JSON.stringify({
       version: 'v1',
@@ -436,27 +435,6 @@ test('extractKiroTurnResultText keeps active answer even when it matches setup a
   assert.equal(extractKiroTurnResultText(log), 'Effort set to high.\n\nactual answer');
 });
 
-test('extractKiroPromptScopedAssistantText reads the first setup prompt response after offset', () => {
-  const log = [
-    JSON.stringify({
-      version: 'v1',
-      kind: 'Prompt',
-      data: { content: [{ kind: 'text', data: '/effort high' }], meta: { timestamp: 1 } },
-    }),
-    JSON.stringify({
-      version: 'v1',
-      kind: 'AssistantMessage',
-      data: { content: [{ kind: 'text', data: 'effort changed' }] },
-    }),
-  ].join('\n');
-
-  assert.deepEqual(extractKiroPromptScopedAssistantText(log), {
-    promptFound: true,
-    text: 'effort changed',
-    texts: ['effort changed'],
-  });
-});
-
 function assertUnsupportedPromptShapeThrows(log: string): void {
   const isUnsupportedPromptShape = (error: unknown): boolean => (
     error instanceof OpenPError &&
@@ -466,24 +444,5 @@ function assertUnsupportedPromptShapeThrows(log: string): void {
   );
 
   assert.throws(() => extractKiroTurnResult(log), isUnsupportedPromptShape);
-  assert.throws(() => extractKiroPromptScopedAssistantText(log), isUnsupportedPromptShape);
 }
 
-test('extractKiroPromptScopedAssistantText reports missing assistant text separately from missing prompt', () => {
-  const log = JSON.stringify({
-    version: 'v1',
-    kind: 'Prompt',
-    data: { content: [{ kind: 'text', data: '/effort high' }], meta: { timestamp: 1 } },
-  });
-
-  assert.deepEqual(extractKiroPromptScopedAssistantText(log), {
-    promptFound: true,
-    text: null,
-    texts: [],
-  });
-  assert.deepEqual(extractKiroPromptScopedAssistantText(''), {
-    promptFound: false,
-    text: null,
-    texts: [],
-  });
-});

@@ -7,17 +7,14 @@ import { DEFAULT_TERMINATE_GRACE_MS, GracefulInterrupt, shouldTerminateOnAbort }
 import { isSafeSessionId } from '../../core/session-id.js';
 import type { AssistantEventSnapshot } from '../../core/types.js';
 import { getOpenPVersion } from '../../core/version.js';
-import { validateKiroReasoningEffort } from './effort.js';
 import {
   readKiroSessionLogOffset,
-  waitForKiroPromptScopedAssistantTexts,
   waitForKiroTurnResult,
 } from './session-log.js';
 
 type JsonObject = Record<string, unknown>;
 type JsonRpcId = string | number;
 const KIRO_SESSION_LOG_FLUSH_GRACE_MS = 1000;
-const KIRO_SETUP_COMMAND_LOG_FLUSH_GRACE_MS = 500;
 
 export interface KiroAcpRunOptions {
   readonly bin: string;
@@ -26,7 +23,6 @@ export interface KiroAcpRunOptions {
   readonly prompt: string;
   readonly sessionId: string | null;
   readonly isFirstTurn: boolean;
-  readonly reasoningEffort?: string | null;
   readonly timeoutMs: number;
   readonly trustAllTools: boolean;
   readonly env?: NodeJS.ProcessEnv;
@@ -51,7 +47,6 @@ export interface KiroAcpRunResult {
 }
 
 export async function runKiroAcp(options: KiroAcpRunOptions): Promise<KiroAcpRunResult> {
-  validateKiroReasoningEffort(options.reasoningEffort);
   const client = new KiroAcpClient(options);
   try {
     return await client.run();
@@ -66,9 +61,7 @@ class KiroAcpClient {
   private nextId = 1;
   private readonly pending = new Map<JsonRpcId, PendingRequest>();
   private assistantText = '';
-  private setupCommandText = '';
   private activePrompt = false;
-  private activeSetupCommand = false;
   private completed = false;
   private shuttingDown = false;
   private timeoutTimer: NodeJS.Timeout | undefined;
@@ -146,9 +139,6 @@ class KiroAcpClient {
     if (!promptSessionId) {
       throw new OpenPError('Kiro ACP session id was not resolved before prompt', EXIT_CODES.protocolViolation);
     }
-
-    await this.applyReasoningEffort(promptSessionId);
-    this.throwIfInterruptedOrTimedOut();
 
     const promptLogOffset = await readKiroSessionLogOffset(promptSessionId, this.options.env);
     this.throwIfInterruptedOrTimedOut();
@@ -416,39 +406,6 @@ class KiroAcpClient {
     });
   }
 
-  private async applyReasoningEffort(sessionId: string): Promise<void> {
-    const effort = validateKiroReasoningEffort(this.options.reasoningEffort);
-    if (!effort) {
-      return;
-    }
-
-    const commandText = `/effort ${effort}`;
-    const commandLogOffset = await readKiroSessionLogOffset(sessionId, this.options.env);
-    this.setupCommandText = '';
-    this.activeSetupCommand = true;
-    try {
-      await this.raceFatal<JsonObject>(this.sendRequest('session/prompt', {
-        sessionId,
-        prompt: [{ type: 'text', text: commandText }],
-      }));
-    } finally {
-      this.activeSetupCommand = false;
-    }
-
-    this.throwIfInterruptedOrTimedOut();
-    const setupLogTexts = await waitForKiroPromptScopedAssistantTexts({
-      sessionId,
-      fromOffset: commandLogOffset,
-      env: this.options.env,
-      deadlineMs: Date.now() + KIRO_SETUP_COMMAND_LOG_FLUSH_GRACE_MS,
-      throwIfStopped: () => this.throwIfInterruptedOrTimedOut(),
-    });
-    const failedSetupLogText = setupLogTexts.find(isKiroEffortCommandFailure);
-    if (failedSetupLogText) {
-      throw buildKiroEffortSetupFailureError(sessionId, failedSetupLogText);
-    }
-  }
-
   private raceFatal<T>(operation: Promise<T>): Promise<T> {
     return Promise.race([operation, this.fatalPromise]);
   }
@@ -549,7 +506,7 @@ class KiroAcpClient {
     if (method !== 'session/update' && method !== '_kiro.dev/session/update') {
       return;
     }
-    if ((!this.activePrompt && !this.activeSetupCommand) || !params || params.sessionId !== this.resolvedSessionId) {
+    if (!this.activePrompt || !params || params.sessionId !== this.resolvedSessionId) {
       return;
     }
     const update = asObject(params.update);
@@ -560,17 +517,12 @@ class KiroAcpClient {
     if (update.sessionUpdate === 'agent_message_chunk') {
       const content = asObject(update.content);
       if (content?.type === 'text' && typeof content.text === 'string') {
-        if (this.activeSetupCommand) {
-          this.setupCommandText += content.text;
-          return;
-        }
         this.assistantText += content.text;
         this.intermediateTextCount += 1;
         this.options.onAssistantText?.(this.assistantText);
       }
       return;
     }
-
   }
 
   private handleMetadata(params: JsonObject | null): void {
@@ -655,23 +607,4 @@ function asObject(value: unknown): JsonObject | null {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? value as JsonObject
     : null;
-}
-
-function isKiroEffortCommandFailure(text: string): boolean {
-  const normalized = text.trim().toLowerCase();
-  return normalized.includes('not available')
-    || normalized.includes('not supported')
-    || normalized.includes('does not support')
-    || normalized.includes('do not support')
-    || normalized.includes('unsupported')
-    || normalized.includes('unknown command')
-    || normalized.includes('invalid effort');
-}
-
-function buildKiroEffortSetupFailureError(sessionId: string, text: string): OpenPError {
-  const marker = text.trim().replace(/\s+/g, ' ').slice(0, 200);
-  return new OpenPError(
-    `Kiro effort setup failed: reasonCode=kiro_setup_effort_unsupported setupCommand=effort setupSessionId=${sessionId} matchedMarker=${JSON.stringify(marker)}`,
-    EXIT_CODES.unsupportedOption,
-  );
 }

@@ -37,6 +37,7 @@ export class KiroBackend implements Backend {
     const startMs = Date.now();
     const { args, trustAllTools } = buildKiroAcpArgs({
       model: options.model,
+      reasoningEffort: options.reasoningEffort,
       executionMode: options.permissionMode,
       tools: options.tools,
       backendArgs: options.backendArgs,
@@ -48,7 +49,6 @@ export class KiroBackend implements Backend {
       prompt: request.prompt,
       sessionId: options.resume ? options.backendSessionId : null,
       isFirstTurn: !options.resume,
-      reasoningEffort: options.reasoningEffort,
       timeoutMs: options.timeoutMs,
       trustAllTools,
       signal: options.signal,

@@ -1,7 +1,9 @@
 import { EXIT_CODES, OpenPError } from '../../core/errors.js';
+import { validateKiroReasoningEffort } from './effort.js';
 
 export interface KiroAcpArgsOptions {
   readonly model?: string | null;
+  readonly reasoningEffort?: string | null;
   readonly executionMode?: string | null;
   readonly tools?: string | null;
   readonly backendArgs?: readonly string[] | null;
@@ -17,6 +19,10 @@ export function buildKiroAcpArgs(options: KiroAcpArgsOptions): KiroAcpArgsResult
   const model = options.model?.trim() || null;
   if (model) {
     args.push('--model', model);
+  }
+  const effort = validateKiroReasoningEffort(options.reasoningEffort);
+  if (effort) {
+    args.push('--effort', effort);
   }
 
   const tools = options.tools;

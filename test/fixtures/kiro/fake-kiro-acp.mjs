@@ -10,7 +10,6 @@ const rpcLog = process.env.OPENP_FAKE_KIRO_RPC_LOG;
 const signalLog = process.env.OPENP_FAKE_KIRO_SIGNAL_LOG;
 const writeSessionLog = process.env.OPENP_FAKE_KIRO_WRITE_SESSION_LOG === '1';
 let pendingPromptId = null;
-let delayedEffortTexts = [];
 
 if (argsLog) {
   appendFileSync(argsLog, `${process.argv.slice(2).join('\t')}\n`);
@@ -133,73 +132,6 @@ for await (const line of input) {
         meta: { timestamp: Math.floor(Date.now() / 1000) },
       },
     });
-    if (promptText.startsWith('/effort ')) {
-      const effort = promptText.slice('/effort '.length).trim();
-      const text = behavior === 'effort-unavailable'
-        ? 'Effort configuration is currently not available on auto. Select a /model that supports effort to configure.'
-        : behavior === 'effort-does-not-support'
-          ? `The current model does not support effort ${effort}.`
-        : behavior === 'effort-unsupported'
-          ? `Unsupported effort: ${effort}.`
-        : behavior === 'effort-chunk-false-positive'
-          ? `Setup note: older models are not supported. Effort set to ${effort}.`
-        : `Effort set to ${effort}.`;
-      const logText = behavior === 'effort-chunk-false-positive'
-        ? `Effort set to ${effort}.`
-        : text;
-      if (behavior !== 'effort-late-output') {
-        send({
-          jsonrpc: '2.0',
-          method: 'session/update',
-          params: {
-            sessionId,
-            update: {
-              sessionUpdate: 'agent_message_chunk',
-              content: { type: 'text', text },
-            },
-          },
-        });
-        if (behavior === 'setup-metadata-only') {
-          send({
-            jsonrpc: '2.0',
-            method: '_kiro.dev/metadata',
-            params: {
-              sessionId,
-              contextUsagePercentage: 9.5,
-              meteringUsage: [{ value: 9.9, unit: 'credit', unitPlural: 'credits' }],
-              turnDurationMs: 987,
-            },
-          });
-        }
-      } else {
-        const delayedText = `Effort setup settled for ${effort}.`;
-        delayedEffortTexts = [text, delayedText];
-        setTimeout(() => appendSessionLog(sessionId, {
-          version: 'v1',
-          kind: 'AssistantMessage',
-          data: {
-            message_id: `assistant-${Date.now()}-effort-tail`,
-            content: [{ kind: 'text', data: delayedText }],
-          },
-        }), 150);
-      }
-      if (behavior !== 'effort-log-missing') {
-        appendSessionLog(sessionId, {
-          version: 'v1',
-          kind: 'AssistantMessage',
-          data: {
-            message_id: `assistant-${Date.now()}`,
-            content: [{ kind: 'text', data: logText }],
-          },
-        });
-      }
-      send({
-        jsonrpc: '2.0',
-        id: message.id,
-        result: { stopReason: 'end_turn' },
-      });
-      continue;
-    }
     if (behavior === 'error-after-interrupt' || behavior === 'error-after-terminate') {
       pendingPromptId = message.id;
       setInterval(() => undefined, 1000);
@@ -228,30 +160,6 @@ for await (const line of input) {
       });
       setInterval(() => undefined, 1000);
       continue;
-    }
-    if (behavior === 'effort-late-output' && delayedEffortTexts.length > 0) {
-      for (const delayedEffortText of delayedEffortTexts) {
-        send({
-          jsonrpc: '2.0',
-          method: 'session/update',
-          params: {
-            sessionId,
-            update: {
-              sessionUpdate: 'agent_message_chunk',
-              content: { type: 'text', text: delayedEffortText },
-            },
-          },
-        });
-        appendSessionLog(sessionId, {
-          version: 'v1',
-          kind: 'AssistantMessage',
-          data: {
-            message_id: `assistant-${Date.now()}-late-effort`,
-            content: [{ kind: 'text', data: delayedEffortText }],
-          },
-        });
-      }
-      delayedEffortTexts = [];
     }
     if (behavior === 'tool-only') {
       appendSessionLog(sessionId, {
@@ -304,8 +212,6 @@ for await (const line of input) {
         ? ['alpha ', 'beta ', 'gamma']
         : behavior === 'log-final-diff'
           ? ['draft ']
-        : behavior === 'effort-answer-same'
-          ? ['Effort set to high.']
         : [message.params.prompt[0].text === 'follow up' ? 'fresh ' : 'partial ', 'answer'];
       const finalLogText = behavior === 'log-final-diff'
         ? 'authoritative final'
@@ -376,18 +282,16 @@ for await (const line of input) {
         appendSessionLog(sessionId, assistantLogEvent);
       }
     }
-    if (behavior !== 'setup-metadata-only') {
-      send({
-        jsonrpc: '2.0',
-        method: '_kiro.dev/metadata',
-        params: {
-          sessionId,
-          contextUsagePercentage: 2.5,
-          meteringUsage: [{ value: 0.1, unit: 'credit', unitPlural: 'credits' }],
-          turnDurationMs: 123,
-        },
-      });
-    }
+    send({
+      jsonrpc: '2.0',
+      method: '_kiro.dev/metadata',
+      params: {
+        sessionId,
+        contextUsagePercentage: 2.5,
+        meteringUsage: [{ value: 0.1, unit: 'credit', unitPlural: 'credits' }],
+        turnDurationMs: 123,
+      },
+    });
     send({
       jsonrpc: '2.0',
       id: message.id,

@@ -68,3 +68,32 @@ test('buildKiroAcpArgs rejects unsupported backend args', () => {
     (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.unsupportedOption,
   );
 });
+
+test('buildKiroAcpArgs passes reasoning effort as the --effort launch flag', () => {
+  const result = buildKiroAcpArgs({ reasoningEffort: 'high' });
+  assert.deepEqual(result.args, ['acp', '--effort', 'high']);
+});
+
+test('buildKiroAcpArgs places --effort after --model', () => {
+  const result = buildKiroAcpArgs({ model: 'claude-haiku-4.5', reasoningEffort: 'max' });
+  assert.deepEqual(result.args, ['acp', '--model', 'claude-haiku-4.5', '--effort', 'max']);
+});
+
+test('buildKiroAcpArgs omits --effort when no effort is requested', () => {
+  const result = buildKiroAcpArgs({ model: 'claude-haiku-4.5' });
+  assert.equal(result.args.includes('--effort'), false);
+});
+
+test('buildKiroAcpArgs rejects an unsupported effort before building args', () => {
+  assert.throws(
+    () => buildKiroAcpArgs({ reasoningEffort: 'bogus' }),
+    (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.unsupportedOption,
+  );
+});
+
+test('buildKiroAcpArgs accepts every supported effort level', () => {
+  for (const level of ['low', 'medium', 'high', 'xhigh', 'max']) {
+    const result = buildKiroAcpArgs({ reasoningEffort: level });
+    assert.deepEqual(result.args, ['acp', '--effort', level]);
+  }
+});
