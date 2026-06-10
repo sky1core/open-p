@@ -10,6 +10,8 @@ import {
 } from '../src/core/cli-args.js';
 import { EXIT_CODES, OpenPError } from '../src/core/errors.js';
 
+const KNOWN_BACKENDS = new Set(['claude', 'codex']);
+
 test('parses supported options and prompt args', () => {
   const options = parseCliArgs([
     '--timeout',
@@ -20,9 +22,10 @@ test('parses supported options and prompt args', () => {
     'high',
     '--tools',
     'Read,Bash',
+    'claude',
     'hello',
     'world',
-  ]);
+  ], KNOWN_BACKENDS);
 
   assert.equal(options.backend, 'claude');
   assert.match(options.backendSessionId, /^[0-9a-f-]{36}$/);
@@ -41,14 +44,14 @@ test('parses supported options and prompt args', () => {
 });
 
 test('parses debug log as default log request without consuming prompt text', () => {
-  const options = parseCliArgs(['--debug-log', 'hello']);
+  const options = parseCliArgs(['--debug-log', 'claude', 'hello'], KNOWN_BACKENDS);
 
   assert.deepEqual(options.debugLog, { kind: 'default' });
   assert.equal(options.promptArg, 'hello');
 });
 
 test('parses debug log without a path after other options', () => {
-  const options = parseCliArgs(['--timeout', '0', '--debug-log']);
+  const options = parseCliArgs(['--timeout', '0', '--debug-log', 'claude'], KNOWN_BACKENDS);
 
   assert.equal(options.timeoutMs, 0);
   assert.deepEqual(options.debugLog, { kind: 'default' });
@@ -81,7 +84,7 @@ test('pre-scans debug log option for parse-time failures', () => {
 });
 
 test('parses verbose as an open-p diagnostic option', () => {
-  const options = parseCliArgs(['--verbose', 'hello']);
+  const options = parseCliArgs(['--verbose', 'claude', 'hello'], KNOWN_BACKENDS);
 
   assert.equal(options.verbose, true);
   assert.deepEqual(options.backendArgs, []);
@@ -103,7 +106,7 @@ test('rejects caller-selected first-turn session ids', () => {
 });
 
 test('defaults turn timeout to disabled', () => {
-  const options = parseCliArgs(['hello']);
+  const options = parseCliArgs(['claude', 'hello'], KNOWN_BACKENDS);
 
   assert.equal(options.timeoutMs, 0);
 });
@@ -162,9 +165,13 @@ test('backend-like option after -- separator remains prompt text', () => {
   assert.equal(options.promptArg, 'hello --backend codex');
 });
 
-test('defaults to claude when knownBackends not provided', () => {
-  const options = parseCliArgs(['hello']);
-  assert.equal(options.backend, 'claude');
+test('rejects missing backend when knownBackends not provided', () => {
+  assert.throws(
+    () => parseCliArgs(['hello']),
+    (error) => error instanceof OpenPError &&
+      error.exitCode === EXIT_CODES.usage &&
+      error.message.includes('backend is required'),
+  );
 });
 
 test('rejects unsupported options explicitly', () => {
@@ -182,8 +189,8 @@ test('rejects missing reasoning effort value', () => {
 });
 
 test('parses public tool allowlist including empty disable-all value', () => {
-  assert.equal(parseCliArgs(['--tools', 'Read,Grep', 'hello']).tools, 'Read,Grep');
-  assert.equal(parseCliArgs(['--tools', '', 'hello']).tools, '');
+  assert.equal(parseCliArgs(['--tools', 'Read,Grep', 'claude', 'hello'], KNOWN_BACKENDS).tools, 'Read,Grep');
+  assert.equal(parseCliArgs(['--tools', '', 'claude', 'hello'], KNOWN_BACKENDS).tools, '');
   assert.throws(
     () => parseCliArgs(['--tools']),
     (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.usage,
@@ -192,8 +199,8 @@ test('parses public tool allowlist including empty disable-all value', () => {
 
 test('parses structured output formats explicitly', () => {
   const schema = '{"type":"object"}';
-  const options = parseCliArgs(['--output-format', 'json', '--json-schema', schema, 'hello']);
-  const streamOptions = parseCliArgs(['--output-format', 'stream-json', '--streaming', 'hello']);
+  const options = parseCliArgs(['--output-format', 'json', '--json-schema', schema, 'claude', 'hello'], KNOWN_BACKENDS);
+  const streamOptions = parseCliArgs(['--output-format', 'stream-json', '--streaming', 'claude', 'hello'], KNOWN_BACKENDS);
 
   assert.equal(options.outputFormat, 'json');
   assert.equal(options.jsonSchema, schema);
@@ -206,7 +213,15 @@ test('parses structured output formats explicitly', () => {
 
 test('parses streaming together with structured output because streaming and result are separate', () => {
   const schema = '{"type":"object"}';
-  const options = parseCliArgs(['--output-format', 'stream-json', '--streaming', '--json-schema', schema, 'hello']);
+  const options = parseCliArgs([
+    '--output-format',
+    'stream-json',
+    '--streaming',
+    '--json-schema',
+    schema,
+    'claude',
+    'hello',
+  ], KNOWN_BACKENDS);
 
   assert.equal(options.outputFormat, 'stream-json');
   assert.equal(options.streaming, true);
@@ -240,7 +255,7 @@ test('rejects malformed json schema before launching backend', () => {
 });
 
 test('parses stream-json input format explicitly', () => {
-  const options = parseCliArgs(['--input-format', 'stream-json']);
+  const options = parseCliArgs(['--input-format', 'stream-json', 'claude'], KNOWN_BACKENDS);
 
   assert.equal(options.inputFormat, 'stream-json');
   assert.equal(options.promptArg, null);
@@ -321,7 +336,7 @@ test('resolves prompt text according to input format', () => {
 });
 
 test('preserves timeout zero as disabled timeout', () => {
-  const options = parseCliArgs(['--timeout', '0', 'hello']);
+  const options = parseCliArgs(['--timeout', '0', 'claude', 'hello'], KNOWN_BACKENDS);
 
   assert.equal(options.timeoutMs, 0);
 });
@@ -341,7 +356,8 @@ test('parses command-shim Claude adapter command shape without Claude-only passt
     '--dangerously-skip-permissions',
     '--json-schema',
     schema,
-  ]);
+    'claude',
+  ], KNOWN_BACKENDS);
 
   assert.equal(options.promptArg, null);
   assert.equal(options.outputFormat, 'stream-json');
@@ -385,7 +401,7 @@ test('rejects path-unsafe resume ids before they are used as state paths', () =>
 });
 
 test('accepts opaque resume ids generated by backends', () => {
-  const options = parseCliArgs(['--resume', 'agent-session_01:opaque', 'hello']);
+  const options = parseCliArgs(['--resume', 'agent-session_01:opaque', 'claude', 'hello'], KNOWN_BACKENDS);
 
   assert.equal(options.resume, true);
   assert.equal(options.backendSessionId, 'agent-session_01:opaque');

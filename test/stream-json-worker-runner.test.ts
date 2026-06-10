@@ -7,11 +7,64 @@ import { runStreamJsonWorkerLines, type StreamJsonWorkerBridge } from '../src/co
 import type { ResolvedCliOptions } from '../src/core/cli-args.js';
 import { SessionLockStore } from '../src/core/session-lock.js';
 import { SessionStateStore } from '../src/core/session-state.js';
-import { parseStreamJsonLines } from '../src/core/stream-json-parser.js';
 import type { AssistantEventSnapshot } from '../src/core/types.js';
 import type { WorkerTurnRequest, WorkerTurnResult } from '../src/core/worker-types.js';
 
 const SESSION_ID = '11111111-1111-4111-8111-111111111111';
+
+function parseWorkerResultRecords(lines: readonly string[], options: {
+  readonly onIntermediateText?: (text: string) => void;
+} = {}): {
+  readonly content: string;
+  readonly diagnostics: {
+    readonly inputTokens: number | null;
+    readonly cacheReadInputTokens: number | null;
+    readonly outputTokens: number | null;
+    readonly stopReason: string | null;
+  };
+} | null {
+  let result: {
+    readonly content: string;
+    readonly diagnostics: {
+      readonly inputTokens: number | null;
+      readonly cacheReadInputTokens: number | null;
+      readonly outputTokens: number | null;
+      readonly stopReason: string | null;
+    };
+  } | null = null;
+  for (const line of lines) {
+    if (!line.trim()) {
+      continue;
+    }
+    const parsed = JSON.parse(line) as { openp?: Record<string, any> };
+    const openp = parsed.openp;
+    if (!openp) {
+      continue;
+    }
+    if (openp.form === 'streaming') {
+      const answer = (openp.output as Record<string, unknown>).answer;
+      if (typeof answer === 'string') {
+        options.onIntermediateText?.(answer);
+      }
+      continue;
+    }
+    if (openp.form === 'result') {
+      const output = openp.output as { answer?: string[] };
+      const metadata = openp.metadata as Record<string, any>;
+      const usage = metadata.usage as Record<string, number | null>;
+      result = {
+        content: output.answer?.join('\n\n') ?? '',
+        diagnostics: {
+          inputTokens: usage.inputTokens,
+          cacheReadInputTokens: usage.cacheReadInputTokens,
+          outputTokens: usage.outputTokens,
+          stopReason: metadata.stopReason,
+        },
+      };
+    }
+  }
+  return result;
+}
 
 class FakeBridge implements StreamJsonWorkerBridge {
   readonly requests: WorkerTurnRequest[] = [];
@@ -345,7 +398,7 @@ test('stream-json worker parser keeps result assistant output out of intermediat
     write: (chunk) => output.push(chunk),
   });
 
-  const result = parseStreamJsonLines(output.join('').trim().split('\n'), {
+  const result = parseWorkerResultRecords(output.join('').trim().split('\n'), {
     onIntermediateText: (text) => parsedIntermediate.push(text),
   });
 
@@ -394,7 +447,7 @@ test('stream-json worker parser keeps preserved result snapshots out of intermed
   assertNoTopLevelResultFormEvents(events);
   assert.deepEqual(terminalAssistantTexts(events), ['worker final']);
 
-  const result = parseStreamJsonLines(output.join('').trim().split('\n'), {
+  const result = parseWorkerResultRecords(output.join('').trim().split('\n'), {
     onIntermediateText: (text) => parsedIntermediate.push(text),
   });
 

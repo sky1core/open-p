@@ -170,7 +170,7 @@ export function parseCliArgs(argv: readonly string[], knownBackends?: ReadonlySe
       const available = [...knownBackends].join(', ');
       throw new OpenPError(`backend is required: specify as first argument (available: ${available})`, EXIT_CODES.usage);
     }
-    backend = 'claude';
+    throw new OpenPError('backend is required: specify as first argument', EXIT_CODES.usage);
   }
 
   return {
