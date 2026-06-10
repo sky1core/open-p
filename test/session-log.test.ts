@@ -2157,47 +2157,61 @@ test('does not pace timestamp replay when intermediate streaming is disabled', a
 });
 
 test('timestamp replay pacing does not outlive the turn timeout', async () => {
+  const originalDateNow = Date.now;
+  const timeoutMs = 50;
+  let nowMs = 1_000_000;
   const dir = await mkdtemp(join(tmpdir(), 'openp-session-log-'));
   const logPath = join(dir, 'session.jsonl');
-  await writeFile(logPath, [
-    line({
-      type: 'user',
-      message: {
-        content: 'hello',
-      },
-    }),
-    line({
-      type: 'assistant',
-      timestamp: '2026-05-17T20:24:01.000Z',
-      message: {
-        content: [{ type: 'thinking', thinking: 'thinking' }],
-      },
-    }),
-    line({
-      type: 'assistant',
-      timestamp: '2026-05-17T20:24:01.100Z',
-      message: {
-        content: [{ type: 'text', text: 'final' }],
-        stop_reason: 'end_turn',
-      },
-    }),
-    line({ type: 'system', subtype: 'turn_duration', durationMs: 12 }),
-  ].join(''));
+  const callbacks: string[] = [];
 
-  await assert.rejects(
-    () => waitForClaudeCodeTurnResult({
-      sessionId: '11111111-1111-4111-8111-111111111111',
-      turnId: 'turn-1',
-      timeoutMs: 10,
-      initialOffset: 0,
-      knownLogPath: logPath,
-      paceIntermediateEvents: true,
-      isBackendAlive: async () => true,
-      onIntermediateReasoning: () => undefined,
-      onIntermediateText: () => undefined,
-    }),
-    (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.timeout,
-  );
+  try {
+    Date.now = () => nowMs;
+    await writeFile(logPath, [
+      line({
+        type: 'user',
+        message: {
+          content: 'hello',
+        },
+      }),
+      line({
+        type: 'assistant',
+        timestamp: '2026-05-17T20:24:01.000Z',
+        message: {
+          content: [{ type: 'thinking', thinking: 'thinking' }],
+        },
+      }),
+      line({
+        type: 'assistant',
+        timestamp: '2026-05-17T20:24:01.100Z',
+        message: {
+          content: [{ type: 'text', text: 'final' }],
+          stop_reason: 'end_turn',
+        },
+      }),
+      line({ type: 'system', subtype: 'turn_duration', durationMs: 12 }),
+    ].join(''));
+
+    await assert.rejects(
+      () => waitForClaudeCodeTurnResult({
+        sessionId: '11111111-1111-4111-8111-111111111111',
+        turnId: 'turn-1',
+        timeoutMs,
+        initialOffset: 0,
+        knownLogPath: logPath,
+        paceIntermediateEvents: true,
+        isBackendAlive: async () => true,
+        onIntermediateReasoning: () => {
+          callbacks.push('reasoning');
+          nowMs += timeoutMs;
+        },
+        onIntermediateText: () => callbacks.push('text'),
+      }),
+      (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.timeout,
+    );
+  } finally {
+    Date.now = originalDateNow;
+  }
+  assert.deepEqual(callbacks, ['reasoning']);
 });
 
 function sleep(ms: number): Promise<void> {

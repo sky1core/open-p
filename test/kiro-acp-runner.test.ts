@@ -636,23 +636,36 @@ test('runKiroAcp keeps abort classified when backend returns an error after inte
 test('runKiroAcp keeps user abort classified as abort even when timeout is near', async () => {
   const ac = new AbortController();
   const signalLog = await tempSignalLog();
-  setTimeout(() => ac.abort(), 300);
+  const rpcLog = await tempSignalLog();
+  const timeoutMs = 2000;
+  const abortBeforeTimeoutMs = 150;
+  const startedAt = Date.now();
+
+  const running = runKiroAcp({
+    bin: FIXTURE,
+    args: ['acp'],
+    cwd: process.cwd(),
+    prompt: 'hello',
+    sessionId: null,
+    isFirstTurn: true,
+    timeoutMs,
+    trustAllTools: false,
+    env: {
+      ...env('ignore-interrupt'),
+      OPENP_FAKE_KIRO_SIGNAL_LOG: signalLog,
+      OPENP_FAKE_KIRO_RPC_LOG: rpcLog,
+    },
+    signal: ac.signal,
+    interruptGraceMs: 100,
+    terminateGraceMs: 50,
+  });
+
+  await waitForRpcMethod(rpcLog, 'session/prompt');
+  const elapsedMs = Date.now() - startedAt;
+  setTimeout(() => ac.abort(), Math.max(0, timeoutMs - elapsedMs - abortBeforeTimeoutMs));
 
   await assert.rejects(
-    runKiroAcp({
-      bin: FIXTURE,
-      args: ['acp'],
-      cwd: process.cwd(),
-      prompt: 'hello',
-      sessionId: null,
-      isFirstTurn: true,
-      timeoutMs: 450,
-      trustAllTools: false,
-      env: { ...env('ignore-interrupt'), OPENP_FAKE_KIRO_SIGNAL_LOG: signalLog },
-      signal: ac.signal,
-      interruptGraceMs: 100,
-      terminateGraceMs: 50,
-    }),
+    running,
     isAbortError,
   );
   assert.deepEqual(await readSignalLog(signalLog, 2), ['SIGINT', 'SIGTERM']);
@@ -771,27 +784,38 @@ test('runKiroAcp repeated abort signal escalates before interrupt grace expires'
   const force = new AbortController();
   const kill = new AbortController();
   const signalLog = await tempSignalLog();
-  setTimeout(() => ac.abort(), 300);
-  setTimeout(() => force.abort(), 400);
-  setTimeout(() => kill.abort(), 500);
+  const rpcLog = await tempSignalLog();
+
+  const running = runKiroAcp({
+    bin: FIXTURE,
+    args: ['acp'],
+    cwd: process.cwd(),
+    prompt: 'hello',
+    sessionId: null,
+    isFirstTurn: true,
+    timeoutMs: 30000,
+    trustAllTools: false,
+    env: {
+      ...env('ignore-interrupt'),
+      OPENP_FAKE_KIRO_SIGNAL_LOG: signalLog,
+      OPENP_FAKE_KIRO_RPC_LOG: rpcLog,
+    },
+    signal: ac.signal,
+    forceSignal: force.signal,
+    killSignal: kill.signal,
+    interruptGraceMs: 10000,
+    terminateGraceMs: 10000,
+  });
+
+  await waitForRpcMethod(rpcLog, 'session/prompt');
+  ac.abort();
+  assert.deepEqual(await readSignalLog(signalLog), ['SIGINT']);
+  force.abort();
+  assert.deepEqual(await readSignalLog(signalLog, 2), ['SIGINT', 'SIGTERM']);
+  kill.abort();
 
   await assert.rejects(
-    runKiroAcp({
-      bin: FIXTURE,
-      args: ['acp'],
-      cwd: process.cwd(),
-      prompt: 'hello',
-      sessionId: null,
-      isFirstTurn: true,
-      timeoutMs: 30000,
-      trustAllTools: false,
-      env: { ...env('ignore-interrupt'), OPENP_FAKE_KIRO_SIGNAL_LOG: signalLog },
-      signal: ac.signal,
-      forceSignal: force.signal,
-      killSignal: kill.signal,
-      interruptGraceMs: 10000,
-      terminateGraceMs: 10000,
-    }),
+    running,
     isAbortError,
   );
   assert.deepEqual(await readSignalLog(signalLog, 2), ['SIGINT', 'SIGTERM']);
