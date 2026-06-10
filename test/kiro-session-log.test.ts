@@ -4,6 +4,10 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { formatWorkerTurnResult } from '../src/core/output.js';
 import {
+  EXIT_CODES,
+  OpenPError,
+} from '../src/core/errors.js';
+import {
   extractKiroPromptScopedAssistantText,
   extractKiroTurnResult,
   extractKiroTurnResultText,
@@ -45,6 +49,17 @@ function openPOutputForKiroResult(result: ReturnType<typeof extractKiroTurnResul
   return JSON.parse(output).openp.output;
 }
 
+const KIRO_COMPACTION_DATA = {
+  summary: 'dummy summary',
+  strategy: {
+    message_pairs_to_exclude: 1,
+    context_window_percent_to_exclude: 1,
+    truncate_large_messages: false,
+    max_message_length: 25000,
+  },
+  messages_snapshot: [],
+};
+
 test('resolveKiroSessionLogPath resolves the Kiro cli session jsonl path', () => {
   assert.equal(
     resolveKiroSessionLogPath('33333333-3333-4333-8333-333333333333', { HOME: '/tmp/openp-home' }),
@@ -61,7 +76,7 @@ test('extractKiroTurnResultText reads assistant text after the scoped prompt', (
     JSON.stringify({
       version: 'v1',
       kind: 'Prompt',
-      data: { content: [{ kind: 'text', data: 'hello' }] },
+      data: { content: [{ kind: 'text', data: 'hello' }], meta: { timestamp: 1 } },
     }),
     JSON.stringify({
       version: 'v1',
@@ -143,7 +158,7 @@ test('extractKiroTurnResult preserves json tool result content', () => {
     JSON.stringify({
       version: 'v1',
       kind: 'Prompt',
-      data: { content: [{ kind: 'text', data: 'read json' }] },
+      data: { content: [{ kind: 'text', data: 'read json' }], meta: { timestamp: 1 } },
     }),
     JSON.stringify({
       version: 'v1',
@@ -173,31 +188,218 @@ test('extractKiroTurnResult preserves json tool result content', () => {
   assert.equal(toolResult[0].content, '{"ok":true,"items":[1,2]}');
 });
 
-test('extractKiroTurnResultText uses the last prompt in a log segment', () => {
+test('extractKiroTurnResult preserves artifacts across compaction and non-caller prompt continuations', () => {
   const log = [
     JSON.stringify({
       version: 'v1',
       kind: 'Prompt',
-      data: { content: [{ kind: 'text', data: 'old prompt' }] },
+      data: { content: [{ kind: 'text', data: 'caller prompt' }], meta: { timestamp: 1 } },
     }),
     JSON.stringify({
       version: 'v1',
       kind: 'AssistantMessage',
-      data: { content: [{ kind: 'text', data: 'old answer' }] },
+      data: {
+        content: [
+          { kind: 'text', data: 'answer A' },
+          { kind: 'toolUse', data: { toolUseId: 'tooluse_read', name: 'read' } },
+        ],
+      },
+    }),
+    JSON.stringify({
+      version: 'v1',
+      kind: 'ToolResults',
+      data: {
+        content: [{
+          kind: 'toolResult',
+          data: {
+            toolUseId: 'tooluse_read',
+            content: [{ kind: 'text', data: 'read output' }],
+          },
+        }],
+      },
+    }),
+    JSON.stringify({
+      version: 'v1',
+      kind: 'Compaction',
+      data: KIRO_COMPACTION_DATA,
     }),
     JSON.stringify({
       version: 'v1',
       kind: 'Prompt',
-      data: { content: [{ kind: 'text', data: 'new prompt' }] },
+      data: {
+        message_id: 'tool-result-prompt',
+        content: [{
+          kind: 'toolResult',
+          data: {
+            toolUseId: 'tooluse_cancelled',
+            content: [{ kind: 'text', data: 'Tool use was cancelled by the user' }],
+          },
+        }],
+      },
+    }),
+    JSON.stringify({
+      version: 'v1',
+      kind: 'ToolResults',
+      data: {
+        content: [{
+          kind: 'toolResult',
+          data: {
+            toolUseId: 'tooluse_after_compaction',
+            content: [{ kind: 'text', data: 'post-compaction tool output' }],
+          },
+        }],
+      },
     }),
     JSON.stringify({
       version: 'v1',
       kind: 'AssistantMessage',
-      data: { content: [{ kind: 'text', data: 'new answer' }] },
+      data: {
+        content: [
+          { kind: 'text', data: 'answer B' },
+          { kind: 'toolUse', data: { toolUseId: 'tooluse_write', name: 'write' } },
+        ],
+      },
     }),
   ].join('\n');
 
-  assert.equal(extractKiroTurnResultText(log), 'new answer');
+  const result = extractKiroTurnResult(log);
+  const blocks = firstBlocks(result.assistantEvents);
+
+  assert.equal(result.text, 'answer A\n\nanswer B');
+  assert.deepEqual(result.toolsUsed, ['read', 'write']);
+  assert.deepEqual(blocks.map((block) => block.type), ['tool_use', 'tool_result', 'tool_result', 'tool_use']);
+  assert.equal(blocks[0].name, 'read');
+  assert.equal(blocks[1].tool_use_id, 'tooluse_read');
+  assert.equal(blocks[2].tool_use_id, 'tooluse_after_compaction');
+  assert.equal(blocks[3].name, 'write');
+});
+
+test('extractKiroTurnResult continues when compaction is followed by ToolResults without a prompt', () => {
+  const log = [
+    JSON.stringify({
+      version: 'v1',
+      kind: 'Prompt',
+      data: { content: [{ kind: 'text', data: 'caller prompt' }], meta: { timestamp: 1 } },
+    }),
+    JSON.stringify({
+      version: 'v1',
+      kind: 'AssistantMessage',
+      data: { content: [{ kind: 'toolUse', data: { toolUseId: 'tooluse_read', name: 'read' } }] },
+    }),
+    JSON.stringify({
+      version: 'v1',
+      kind: 'Compaction',
+      data: KIRO_COMPACTION_DATA,
+    }),
+    JSON.stringify({
+      version: 'v1',
+      kind: 'ToolResults',
+      data: {
+        content: [{
+          kind: 'toolResult',
+          data: {
+            toolUseId: 'tooluse_read',
+            content: [{ kind: 'text', data: 'read output after compaction' }],
+          },
+        }],
+      },
+    }),
+    JSON.stringify({
+      version: 'v1',
+      kind: 'AssistantMessage',
+      data: { content: [{ kind: 'text', data: 'answer after compaction' }] },
+    }),
+  ].join('\n');
+
+  const result = extractKiroTurnResult(log);
+  const blocks = firstBlocks(result.assistantEvents);
+
+  assert.equal(result.text, 'answer after compaction');
+  assert.deepEqual(result.toolsUsed, ['read']);
+  assert.deepEqual(blocks.map((block) => block.type), ['tool_use', 'tool_result']);
+  assert.equal(blocks[1].tool_use_id, 'tooluse_read');
+});
+
+test('extractKiroTurnResult fails closed on multiple caller prompt boundaries', () => {
+  const log = [
+    JSON.stringify({
+      version: 'v1',
+      kind: 'Prompt',
+      data: { content: [{ kind: 'text', data: 'first caller prompt' }], meta: { timestamp: 1 } },
+    }),
+    JSON.stringify({
+      version: 'v1',
+      kind: 'AssistantMessage',
+      data: { content: [{ kind: 'text', data: 'first answer' }] },
+    }),
+    JSON.stringify({
+      version: 'v1',
+      kind: 'Prompt',
+      data: { content: [{ kind: 'text', data: 'second caller prompt' }], meta: { timestamp: 2 } },
+    }),
+    JSON.stringify({
+      version: 'v1',
+      kind: 'AssistantMessage',
+      data: { content: [{ kind: 'text', data: 'second answer' }] },
+    }),
+  ].join('\n');
+
+  assert.throws(
+    () => extractKiroTurnResult(log),
+    (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.protocolViolation,
+  );
+});
+
+test('Kiro prompt parsers fail closed on mixed prompt content blocks', () => {
+  assertUnsupportedPromptShapeThrows(JSON.stringify({
+    version: 'v1',
+    kind: 'Prompt',
+    data: {
+      content: [
+        { kind: 'text', data: 'text block' },
+        {
+          kind: 'toolResult',
+          data: {
+            toolUseId: 'tooluse_mixed',
+            content: [{ kind: 'text', data: 'tool result block' }],
+          },
+        },
+      ],
+      meta: { timestamp: 1 },
+    },
+  }));
+});
+
+test('Kiro prompt parsers fail closed on text-only prompt content without meta', () => {
+  assertUnsupportedPromptShapeThrows(JSON.stringify({
+    version: 'v1',
+    kind: 'Prompt',
+    data: {
+      content: [{ kind: 'text', data: 'text block without meta' }],
+    },
+  }));
+});
+
+test('Kiro prompt parsers fail closed on empty prompt content', () => {
+  assertUnsupportedPromptShapeThrows(JSON.stringify({
+    version: 'v1',
+    kind: 'Prompt',
+    data: {
+      content: [],
+      meta: { timestamp: 1 },
+    },
+  }));
+});
+
+test('Kiro prompt parsers fail closed on non-array prompt content', () => {
+  assertUnsupportedPromptShapeThrows(JSON.stringify({
+    version: 'v1',
+    kind: 'Prompt',
+    data: {
+      content: { kind: 'text', data: 'not an array' },
+      meta: { timestamp: 1 },
+    },
+  }));
 });
 
 test('extractKiroTurnResultText fails closed without a prompt-scoped assistant message', () => {
@@ -215,7 +417,7 @@ test('extractKiroTurnResultText keeps active answer even when it matches setup a
     JSON.stringify({
       version: 'v1',
       kind: 'Prompt',
-      data: { content: [{ kind: 'text', data: 'hello' }] },
+      data: { content: [{ kind: 'text', data: 'hello' }], meta: { timestamp: 1 } },
     }),
     JSON.stringify({
       version: 'v1',
@@ -237,7 +439,7 @@ test('extractKiroPromptScopedAssistantText reads the first setup prompt response
     JSON.stringify({
       version: 'v1',
       kind: 'Prompt',
-      data: { content: [{ kind: 'text', data: '/effort high' }] },
+      data: { content: [{ kind: 'text', data: '/effort high' }], meta: { timestamp: 1 } },
     }),
     JSON.stringify({
       version: 'v1',
@@ -253,11 +455,22 @@ test('extractKiroPromptScopedAssistantText reads the first setup prompt response
   });
 });
 
+function assertUnsupportedPromptShapeThrows(log: string): void {
+  const isUnsupportedPromptShape = (error: unknown): boolean => (
+    error instanceof OpenPError &&
+    error.exitCode === EXIT_CODES.protocolViolation &&
+    /unsupported prompt shape/.test(error.message)
+  );
+
+  assert.throws(() => extractKiroTurnResult(log), isUnsupportedPromptShape);
+  assert.throws(() => extractKiroPromptScopedAssistantText(log), isUnsupportedPromptShape);
+}
+
 test('extractKiroPromptScopedAssistantText reports missing assistant text separately from missing prompt', () => {
   const log = JSON.stringify({
     version: 'v1',
     kind: 'Prompt',
-    data: { content: [{ kind: 'text', data: '/effort high' }] },
+    data: { content: [{ kind: 'text', data: '/effort high' }], meta: { timestamp: 1 } },
   });
 
   assert.deepEqual(extractKiroPromptScopedAssistantText(log), {

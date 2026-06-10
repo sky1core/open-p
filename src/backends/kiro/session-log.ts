@@ -8,6 +8,7 @@ import { isSafeSessionId } from '../../core/session-id.js';
 import type { AssistantEventSnapshot } from '../../core/types.js';
 
 type JsonObject = Record<string, unknown>;
+type KiroPromptEventClassification = 'caller' | 'continuation' | 'unsupported' | 'not_prompt';
 type KiroTurnResultRead = {
   readonly logFound: boolean;
   readonly size: number | null;
@@ -199,7 +200,7 @@ export function extractKiroTurnResult(rawLogSegment: string): {
   const assistantMessages: string[] = [];
   const assistantEvents: AssistantEventSnapshot[] = [];
   const toolsUsed = new Set<string>();
-  let sawPrompt = false;
+  let sawCallerPrompt = false;
 
   for (const rawLine of rawLogSegment.split(/\r?\n/)) {
     const line = rawLine.trim();
@@ -218,14 +219,21 @@ export function extractKiroTurnResult(rawLogSegment: string): {
       continue;
     }
 
-    if (event.kind === 'Prompt') {
-      sawPrompt = true;
-      assistantMessages.length = 0;
-      assistantEvents.length = 0;
-      toolsUsed.clear();
+    const promptClassification = classifyKiroPromptEvent(event);
+    if (promptClassification === 'unsupported') {
+      throwUnsupportedKiroPromptShape();
+    }
+    if (promptClassification === 'caller') {
+      if (sawCallerPrompt) {
+        throw new OpenPError(
+          'Kiro session log contains multiple caller prompt boundaries in one active turn segment',
+          EXIT_CODES.protocolViolation,
+        );
+      }
+      sawCallerPrompt = true;
       continue;
     }
-    if (!sawPrompt) {
+    if (!sawCallerPrompt) {
       continue;
     }
     if (event.kind === 'ToolResults') {
@@ -286,7 +294,11 @@ export function extractKiroPromptScopedAssistantText(rawLogSegment: string): {
       continue;
     }
 
-    if (event.kind === 'Prompt') {
+    const promptClassification = classifyKiroPromptEvent(event);
+    if (promptClassification === 'unsupported') {
+      throwUnsupportedKiroPromptShape();
+    }
+    if (promptClassification === 'caller') {
       collecting = !promptFound;
       promptFound = true;
       assistantMessages.length = 0;
@@ -307,6 +319,37 @@ export function extractKiroPromptScopedAssistantText(rawLogSegment: string): {
     text: assistantMessages.length > 0 ? assistantMessages.join('\n\n') : null,
     texts: assistantMessages,
   };
+}
+
+function classifyKiroPromptEvent(event: JsonObject): KiroPromptEventClassification {
+  if (event.kind !== 'Prompt') {
+    return 'not_prompt';
+  }
+  const data = asObject(event.data);
+  if (!data || !Array.isArray(data.content) || data.content.length === 0) {
+    return 'unsupported';
+  }
+  const content = data.content;
+  const hasMeta = Object.prototype.hasOwnProperty.call(data, 'meta');
+  const textBlockCount = content.filter(isKiroTextContentBlock).length;
+  if (textBlockCount === content.length) {
+    return hasMeta ? 'caller' : 'unsupported';
+  }
+  if (textBlockCount === 0) {
+    return 'continuation';
+  }
+  return 'unsupported';
+}
+
+function throwUnsupportedKiroPromptShape(): never {
+  throw new OpenPError(
+    'Kiro session log contains unsupported prompt shape in active turn segment',
+    EXIT_CODES.protocolViolation,
+  );
+}
+
+function isKiroTextContentBlock(block: unknown): boolean {
+  return asObject(block)?.kind === 'text';
 }
 
 function extractAssistantMessageText(data: JsonObject | null): string {
