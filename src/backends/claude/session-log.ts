@@ -19,6 +19,8 @@ const ACTIVE_TURN_LOG_POLL_INTERVAL_MS = 25;
 const MAX_ASSISTANT_REPLAY_DELAY_MS = 100;
 const MISSING_CALLER_LOG_IDLE_GRACE_MS = 1_000;
 const SESSION_LOG_IDLE_DIAGNOSTIC_INTERVAL_MS = 30_000;
+const CLAUDE_POST_COMPLETION_GRACE_MS = 15_000;
+const CLAUDE_SESSION_LOG_DISCOVERY_TIMEOUT_MS = 120_000;
 
 export interface ClaudeCodeSessionLogIdleDiagnostic {
   readonly turnId: string;
@@ -154,6 +156,8 @@ export async function waitForClaudeCodeTurnResult(options: {
   readonly structuredOutputJsonSchema?: unknown;
   readonly isBackendAlive?: () => Promise<boolean>;
   readonly sessionLogIdleDiagnosticIntervalMs?: number;
+  readonly postCompletionGraceMs?: number;
+  readonly sessionLogDiscoveryTimeoutMs?: number;
   readonly onIntermediateText?: (text: string, source: IntermediateTextSource) => void;
   readonly onIntermediateReasoning?: (
     text: string,
@@ -168,6 +172,12 @@ export async function waitForClaudeCodeTurnResult(options: {
   readonly onSessionLogIdle?: (diagnostic: ClaudeCodeSessionLogIdleDiagnostic) => Promise<void> | void;
 }): Promise<TurnResult> {
   const deadline = options.timeoutMs === 0 ? null : Date.now() + options.timeoutMs;
+  const discoveryDeadline = resolveDiscoveryDeadlineMs(
+    deadline,
+    options.sessionLogDiscoveryTimeoutMs ?? CLAUDE_SESSION_LOG_DISCOVERY_TIMEOUT_MS,
+    options.knownLogPath,
+  );
+  const postCompletionGraceMs = options.postCompletionGraceMs ?? CLAUDE_POST_COMPLETION_GRACE_MS;
   let logPath = options.knownLogPath;
   let offset = options.initialOffset;
   let remainder = '';
@@ -185,6 +195,7 @@ export async function waitForClaudeCodeTurnResult(options: {
   let timeoutNotified = false;
   let lastSessionLogProgressAtMs = Date.now();
   let lastSessionLogIdleDiagnosticAtMs = Date.now();
+  let completionWithoutResultObserved = false;
   const sessionLogIdleDiagnosticIntervalMs =
     options.sessionLogIdleDiagnosticIntervalMs ?? SESSION_LOG_IDLE_DIAGNOSTIC_INTERVAL_MS;
   const notifyTimeout = async (): Promise<void> => {
@@ -265,11 +276,26 @@ export async function waitForClaudeCodeTurnResult(options: {
       sawCallerUserTurn,
     });
   };
+  const assertPostCompletionIdleGrace = (): void => {
+    if (!completionWithoutResultObserved || postCompletionGraceMs < 0) {
+      return;
+    }
+    if (Date.now() - lastSessionLogProgressAtMs >= postCompletionGraceMs) {
+      throw new OpenPError(
+        `Claude Code session log completed turn ${options.turnId} without a scoped result artifact`,
+        EXIT_CODES.protocolViolation,
+      );
+    }
+  };
 
   while (deadline === null || Date.now() < deadline) {
     if (!logPath) {
       logPath = await discoverClaudeCodeSessionLog(options);
       if (!logPath) {
+        if (discoveryDeadline !== null && Date.now() >= discoveryDeadline) {
+          const sessionLabel = options.sessionId ? `session ${options.sessionId}` : 'a backend-generated session id';
+          throw new OpenPError(`Claude Code session log not found for ${sessionLabel}. The interactive CLI may be waiting for workspace trust or startup input. Open the workspace once with Claude Code and trust it before running openp unattended.`, EXIT_CODES.sessionLogNotFound);
+        }
         if (options.expectedLogPath) {
           logPath = options.expectedLogPath;
           offset = 0;
@@ -286,7 +312,7 @@ export async function waitForClaudeCodeTurnResult(options: {
           }
           assertCallerUserTurnDidNotDisappear();
           await reportSessionLogIdleIfNeeded();
-          await sleep(SESSION_LOG_DISCOVERY_POLL_INTERVAL_MS);
+          await sleepUntilDiscoveryDeadline(SESSION_LOG_DISCOVERY_POLL_INTERVAL_MS, discoveryDeadline);
           continue;
         }
       } else {
@@ -318,9 +344,13 @@ export async function waitForClaudeCodeTurnResult(options: {
       for (const line of parts) {
         const event = parseLineObject(line);
         if (event) {
+          if (isTurnCompletionMetadata(event)) {
+            completionWithoutResultObserved = true;
+          }
           rememberLocalCommandTranscriptPromptId(activeTurnLocalCommandPromptIds, event);
           if (isCallerUserTurn(event, line, activeTurnLocalCommandPromptIds)) {
             sawCallerUserTurn = true;
+            completionWithoutResultObserved = false;
             preCallerTerminalLocalCommandObservedAtMs = null;
           } else if (!sawCallerUserTurn) {
             if (isPreCallerTerminalLocalCommandEvent(event, activeTurnLocalCommandPromptIds)) {
@@ -369,6 +399,7 @@ export async function waitForClaudeCodeTurnResult(options: {
       throw new OpenPError(`backend exited during active turn ${options.turnId}`, EXIT_CODES.backendExited);
     }
     assertCallerUserTurnDidNotDisappear();
+    assertPostCompletionIdleGrace();
     await reportSessionLogIdleIfNeeded();
     await waitForLogChange(logPath, ACTIVE_TURN_LOG_POLL_INTERVAL_MS);
   }
@@ -379,6 +410,30 @@ export async function waitForClaudeCodeTurnResult(options: {
   }
   await notifyTimeout();
   throw new OpenPError(`timed out waiting for turn ${options.turnId}`, EXIT_CODES.timeout);
+}
+
+function resolveDiscoveryDeadlineMs(
+  turnDeadlineMs: number | null,
+  discoveryTimeoutMs: number,
+  knownLogPath: string | null,
+): number | null {
+  if (knownLogPath !== null || discoveryTimeoutMs === 0) {
+    return null;
+  }
+  const discoveryDeadlineMs = Date.now() + discoveryTimeoutMs;
+  return turnDeadlineMs === null ? discoveryDeadlineMs : Math.min(turnDeadlineMs, discoveryDeadlineMs);
+}
+
+async function sleepUntilDiscoveryDeadline(ms: number, discoveryDeadlineMs: number | null): Promise<void> {
+  if (discoveryDeadlineMs === null) {
+    await sleep(ms);
+    return;
+  }
+  const remainingMs = discoveryDeadlineMs - Date.now();
+  if (remainingMs <= 0) {
+    return;
+  }
+  await sleep(Math.min(ms, remainingMs));
 }
 
 function resolveSessionLogWaitStage(
@@ -805,6 +860,10 @@ function rememberLocalCommandTranscriptPromptId(
 
 function stringOrNull(value: unknown): string | null {
   return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+function isTurnCompletionMetadata(event: Record<string, unknown>): boolean {
+  return event.type === 'system' && event.subtype === 'turn_duration';
 }
 
 export async function readNewText(path: string, offset: number): Promise<{ text: string; nextOffset: number }> {

@@ -1,8 +1,13 @@
 import { EXIT_CODES, OpenPError } from '../../core/errors.js';
 import type { PtySession } from '../../runners/types.js';
 
-export async function waitForClaudeCodeInputReady(pty: PtySession, timeoutMs: number): Promise<void> {
+export async function waitForClaudeCodeInputReady(
+  pty: PtySession,
+  timeoutMs: number,
+  options: { readonly confirmTrustPrompt?: boolean } = {},
+): Promise<void> {
   const deadline = timeoutMs === 0 ? null : Date.now() + timeoutMs;
+  const confirmTrustPrompt = options.confirmTrustPrompt ?? true;
   let trustConfirmed = false;
   let lastScreenText = '';
   while (deadline === null || Date.now() < deadline) {
@@ -11,7 +16,7 @@ export async function waitForClaudeCodeInputReady(pty: PtySession, timeoutMs: nu
     }
     const text = await pty.captureText().catch(() => '');
     lastScreenText = text;
-    if (/Quick safety check|trust this folder/i.test(text)) {
+    if (confirmTrustPrompt && /Quick safety check|trust this folder/i.test(text)) {
       if (!trustConfirmed) {
         trustConfirmed = true;
         await pty.submit();

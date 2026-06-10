@@ -230,6 +230,25 @@ test('reports missing expected session log as session log not found', async () =
   );
 });
 
+test('fails first-turn discovery with session-log-not-found when no log appears before startup deadline', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'openp-session-log-cwd-'));
+
+  await assert.rejects(
+    () => waitForClaudeCodeTurnResult({
+      sessionId: null,
+      turnId: 'turn-1',
+      timeoutMs: 0,
+      initialOffset: 0,
+      knownLogPath: null,
+      cwd,
+      discoveryStartedAtMs: Date.now(),
+      isBackendAlive: async () => true,
+      sessionLogDiscoveryTimeoutMs: 25,
+    }),
+    (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.sessionLogNotFound,
+  );
+});
+
 test('discovers backend-generated first-turn session log without reusing preexisting recent logs', async () => {
   await withClaudeProjectsRoot(async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'openp-session-log-cwd-'));
@@ -1331,6 +1350,119 @@ test('publishes active assistant intermediate text while waiting for turn result
 
   assert.equal(result.text, 'working\n\nfinal');
   assert.deepEqual(intermediate, ['working', 'working\n\nfinal']);
+});
+
+test('fails closed after completion metadata stays idle without a scoped result artifact', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-session-log-complete-no-result-'));
+  const logPath = join(dir, 'session.jsonl');
+  await writeFile(logPath, [
+    line({
+      type: 'user',
+      message: {
+        content: 'hello',
+      },
+    }),
+    line({ type: 'system', subtype: 'turn_duration', durationMs: 12 }),
+  ].join(''));
+
+  await assert.rejects(
+    () => waitForClaudeCodeTurnResult({
+      sessionId: '11111111-1111-4111-8111-111111111111',
+      turnId: 'turn-1',
+      timeoutMs: 0,
+      initialOffset: 0,
+      knownLogPath: logPath,
+      postCompletionGraceMs: 25,
+      isBackendAlive: async () => true,
+    }),
+    (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.protocolViolation,
+  );
+});
+
+test('resets post-completion grace when a stale completion precedes the caller turn in the read window', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-session-log-stale-completion-'));
+  const logPath = join(dir, 'session.jsonl');
+  const sessionId = randomUUID();
+  await writeFile(logPath, [
+    line({ type: 'system', subtype: 'turn_duration', sessionId, durationMs: 1 }),
+    line({
+      type: 'user',
+      sessionId,
+      message: {
+        content: 'hello',
+      },
+    }),
+    line({
+      type: 'assistant',
+      sessionId,
+      message: {
+        content: [{ type: 'text', text: 'working' }],
+      },
+    }),
+  ].join(''));
+
+  const pendingResult = waitForClaudeCodeTurnResult({
+    sessionId,
+    turnId: 'turn-1',
+    timeoutMs: 10_000,
+    initialOffset: 0,
+    knownLogPath: logPath,
+    postCompletionGraceMs: 25,
+    isBackendAlive: async () => true,
+  });
+
+  await sleep(60);
+  await appendFile(logPath, [
+    line({
+      type: 'assistant',
+      sessionId,
+      message: {
+        content: [{ type: 'text', text: 'final' }],
+        stop_reason: 'end_turn',
+      },
+    }),
+    line({ type: 'system', subtype: 'turn_duration', sessionId, durationMs: 12 }),
+  ].join(''));
+
+  const result = await pendingResult;
+
+  assert.equal(result.text, 'working\n\nfinal');
+});
+
+test('resets post-completion grace when late session-log bytes arrive before the result', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-session-log-complete-late-result-'));
+  const logPath = join(dir, 'session.jsonl');
+  await writeFile(logPath, [
+    line({
+      type: 'user',
+      message: {
+        content: 'hello',
+      },
+    }),
+    line({ type: 'system', subtype: 'turn_duration', durationMs: 12 }),
+  ].join(''));
+
+  const pendingResult = waitForClaudeCodeTurnResult({
+    sessionId: '11111111-1111-4111-8111-111111111111',
+    turnId: 'turn-1',
+    timeoutMs: 0,
+    initialOffset: 0,
+    knownLogPath: logPath,
+    postCompletionGraceMs: 200,
+    isBackendAlive: async () => true,
+  });
+
+  await sleep(60);
+  await appendFile(logPath, line({
+    type: 'assistant',
+    message: {
+      content: [{ type: 'text', text: 'late final' }],
+      stop_reason: 'end_turn',
+    },
+  }));
+
+  const result = await pendingResult;
+  assert.equal(result.text, 'late final');
 });
 
 test('does not report session log idle while JSONL progress keeps arriving', async () => {

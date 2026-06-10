@@ -848,6 +848,34 @@ test('readiness uses the cursor line instead of Claude footer layout', async () 
   await waitForClaudeCodeInputReady(session, 1_000);
 });
 
+test('turn readiness does not auto-confirm stale workspace trust text after startup', async () => {
+  const session: PtySession = {
+    id: 'stale-trust-ready-session',
+    async write() {},
+    async submit() {
+      throw new Error('turn readiness must not submit stale trust text');
+    },
+    async interrupt() {},
+    async terminate() {},
+    async exit() {},
+    async isAlive() {
+      return true;
+    },
+    async captureText() {
+      return [
+        'previous assistant text includes trust this folder',
+        '────────────────────────────────',
+        '❯',
+      ].join('\n');
+    },
+    async captureCursorLine() {
+      return '❯';
+    },
+  };
+
+  await waitForClaudeCodeInputReady(session, 1_000, { confirmTrustPrompt: false });
+});
+
 test('readiness rejects stale prompt text even when screen footer filtering would leave it last', async () => {
   const session: PtySession = {
     id: 'cursor-line-not-ready-session',
@@ -1219,6 +1247,7 @@ test('persistent turn keeps newer JSONL draft when stale screen preview arrives 
   const session = new JsonlThenStaleScreenSession(logPath);
   const process = new PersistentClaudeCodeProcess(sessionId, signature(), dir, session, logPath, logPath, 0);
   const controller = new AbortController();
+  const intermediate: string[] = [];
 
   setTimeout(() => controller.abort(), 1_200);
   try {
@@ -1227,13 +1256,47 @@ test('persistent turn keeps newer JSONL draft when stale screen preview arrives 
         timeoutMs: 5_000,
         paceIntermediateEvents: true,
         signal: controller.signal,
+        onIntermediateText: (text) => {
+          intermediate.push(text);
+        },
+      }),
+      (error) => {
+        assert.equal((error as { readonly code?: unknown }).code, 'ABORT_ERR');
+        assert.equal(
+          (error as { readonly interruptedReasoningContent?: unknown }).interruptedReasoningContent,
+          null,
+        );
+        return true;
+      },
+    );
+    assert.deepEqual(intermediate, ['jsonl newer and longer draft']);
+  } finally {
+    await process.shutdown();
+  }
+});
+
+test('persistent turn does not copy answer draft into interrupted reasoning content', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-answer-abort-'));
+  const logPath = join(dir, 'session.jsonl');
+  await writeFile(logPath, '');
+  const sessionId = randomUUID();
+  const session = new JsonlThenStaleScreenSession(logPath);
+  const process = new PersistentClaudeCodeProcess(sessionId, signature(), dir, session, logPath, logPath, 0);
+  const controller = new AbortController();
+
+  setTimeout(() => controller.abort(), 1_200);
+  try {
+    await assert.rejects(
+      () => process.sendTurn('hello', {
+        timeoutMs: 5_000,
+        signal: controller.signal,
         onIntermediateText: () => undefined,
       }),
       (error) => {
         assert.equal((error as { readonly code?: unknown }).code, 'ABORT_ERR');
         assert.equal(
           (error as { readonly interruptedReasoningContent?: unknown }).interruptedReasoningContent,
-          'jsonl newer and longer draft',
+          null,
         );
         return true;
       },

@@ -160,7 +160,7 @@ export class PersistentClaudeCodeProcess implements ManagedBackendProcess {
           }
           interrupter.requestGracefulStop();
         },
-        getInterruptedDraft: () => this.lastIntermediateReasoningText ?? this.lastIntermediateText,
+        getInterruptedDraft: () => this.lastIntermediateReasoningText,
         operation: async () => {
           const turnDeadlineMs = options.timeoutMs === 0 ? null : Date.now() + options.timeoutMs;
           let retryLogPath: string | null = null;
@@ -173,7 +173,11 @@ export class PersistentClaudeCodeProcess implements ManagedBackendProcess {
                 interrupter.requestGracefulStop();
               },
             );
-            await waitForClaudeCodeInputReady(this.pty, readinessTimeoutMs(readinessAttemptTimeoutMs));
+            await waitForClaudeCodeInputReady(
+              this.pty,
+              readinessTimeoutMs(readinessAttemptTimeoutMs),
+              { confirmTrustPrompt: false },
+            );
             if (!this.nativeSessionId && retryLogPath) {
               this.sessionLogPath = retryLogPath;
             }
