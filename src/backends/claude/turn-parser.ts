@@ -5,7 +5,7 @@ import type {
   TurnDiagnostics,
   TurnResult,
 } from '../../core/types.js';
-import { EXIT_CODES, OpenPError } from '../../core/errors.js';
+import { ARTIFACT_REJECTION_REASONS, EXIT_CODES, OpenPError } from '../../core/errors.js';
 import { validateStructuredOutput } from '../../core/json-schema.js';
 import { isSafeSessionId } from '../../core/session-id.js';
 
@@ -144,13 +144,21 @@ export function parseClaudeCodeJsonlTurn(
     }
   }
   if (state.completed && state.callerUserTurnCount === 0) {
-    throw new OpenPError(`missing caller user-turn boundary for turn ${turnId}`, EXIT_CODES.protocolViolation);
+    throw new OpenPError(
+      `missing caller user-turn boundary for turn ${turnId}`,
+      EXIT_CODES.protocolViolation,
+      ARTIFACT_REJECTION_REASONS.missingTurnBoundary,
+    );
   }
   if (!state.completed || state.resultText === null) {
     return null;
   }
   if (state.resultText.trim().length === 0) {
-    throw new OpenPError(`empty result content for turn ${turnId}`, EXIT_CODES.protocolViolation);
+    throw new OpenPError(
+      `empty result content for turn ${turnId}`,
+      EXIT_CODES.protocolViolation,
+      ARTIFACT_REJECTION_REASONS.unsupportedArtifactShape,
+    );
   }
   const structuredOutput = state.structuredOutput !== undefined
     ? state.structuredOutput
@@ -348,7 +356,11 @@ function consumeEvent(state: ParserState, event: JsonObject, turnId: string): vo
   if (isCallerUserTurn(event, state.localCommandTranscriptPromptIds)) {
     state.callerUserTurnCount += 1;
     if (state.callerUserTurnCount > 1) {
-      throw new OpenPError(`multiple caller user-turn boundaries for turn ${turnId}`, EXIT_CODES.protocolViolation);
+      throw new OpenPError(
+        `multiple caller user-turn boundaries for turn ${turnId}`,
+        EXIT_CODES.protocolViolation,
+        ARTIFACT_REJECTION_REASONS.multipleTurnBoundaries,
+      );
     }
     state.resultText = null;
     state.completed = false;
@@ -589,7 +601,11 @@ function normalizeAssistantMessage(message: JsonObject): Record<string, unknown>
 
 function consumeTurnDuration(state: ParserState, event: JsonObject, turnId: string): void {
   if (state.ambiguousTaskNotificationText) {
-    throw new OpenPError(`ambiguous task-notification interleave for turn ${turnId}`, EXIT_CODES.protocolViolation);
+    throw new OpenPError(
+      `ambiguous task-notification interleave for turn ${turnId}`,
+      EXIT_CODES.protocolViolation,
+      ARTIFACT_REJECTION_REASONS.unsupportedArtifactShape,
+    );
   }
   state.completed = true;
   state.durationMs = typeof event.durationMs === 'number' ? event.durationMs : null;

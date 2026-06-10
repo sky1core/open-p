@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { createAbortError } from './abort.js';
 import { resolveInitialTurnSessionId } from './backend-session-policy.js';
 import { appendDebugLog, type DebugLogEntry } from './debug-log.js';
-import { EXIT_CODES, OpenPError } from './errors.js';
+import { EXIT_CODES, OpenPError, toExitCode } from './errors.js';
 import { parseStreamJsonUserEventLine, type ResolvedCliOptions } from './cli-args.js';
 import { SessionLockStore, type SessionLock } from './session-lock.js';
 import { SessionStateStore, validateSessionStateCompatibility, type SessionState } from './session-state.js';
@@ -298,6 +298,7 @@ async function runStreamJsonWorkerLinesWithLock(input: {
     }
   } catch (error) {
     primaryError = error;
+    await appendDebugLog(input.options.debugLog, errorDebugLogEntry(error)).catch(() => undefined);
     throw error;
   } finally {
     try {
@@ -362,6 +363,16 @@ async function appendStreamingResultDiagnostic(
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function errorDebugLogEntry(error: unknown): DebugLogEntry {
+  const reasonCode = error instanceof OpenPError ? error.reasonCode : undefined;
+  return {
+    event: 'error',
+    message: errorMessage(error),
+    exitCode: toExitCode(error),
+    ...(reasonCode ? { reasonCode } : {}),
+  };
 }
 
 function streamingIssuesToWarnings(

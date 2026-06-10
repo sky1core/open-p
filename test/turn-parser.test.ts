@@ -208,6 +208,18 @@ test('returns null until completion metadata is present', () => {
   ], TURN_ID), null);
 });
 
+test('exposes stable rejection reason code for missing Claude caller turn boundary', () => {
+  assert.throws(
+    () => parseClaudeCodeJsonlTurn([
+      assistantLine([{ type: 'text', text: 'stale answer' }], undefined, 'end_turn'),
+      durationLine(100),
+    ], TURN_ID),
+    (error) => error instanceof OpenPError &&
+      error.exitCode === EXIT_CODES.protocolViolation &&
+      error.reasonCode === 'missing_turn_boundary',
+  );
+});
+
 test('parses result assistant text appended after completion metadata', () => {
   const result = parseClaudeCodeJsonlTurn([
     userLine('hello'),
@@ -498,7 +510,9 @@ test('fails closed when task-notification ordering is ambiguous without uuid lin
       assistantLine([{ type: 'text', text: 'maybe active result' }], undefined, 'end_turn'),
       durationLine(100),
     ], TURN_ID),
-    (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.protocolViolation,
+    (error) => error instanceof OpenPError &&
+      error.exitCode === EXIT_CODES.protocolViolation &&
+      error.reasonCode === 'unsupported_artifact_shape',
   );
 });
 
@@ -920,7 +934,9 @@ test('fails when one scoped Claude segment contains multiple caller user turns',
       assistantLine([{ type: 'text', text: 'partial answer' }], undefined, 'end_turn'),
       durationLine(10),
     ], TURN_ID),
-    (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.protocolViolation,
+    (error) => error instanceof OpenPError &&
+      error.exitCode === EXIT_CODES.protocolViolation &&
+      error.reasonCode === 'multiple_turn_boundaries',
   );
 });
 

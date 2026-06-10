@@ -74,6 +74,32 @@ async function writeCodexPreviousTurnLog(): Promise<void> {
   ].join('\n'));
 }
 
+async function writeCodexIncompleteCurrentLog(): Promise<void> {
+  const codexHome = process.env.CODEX_HOME;
+  assert.ok(codexHome);
+  const sessionsDir = join(codexHome, 'sessions', '2026', '05', '23');
+  await mkdir(sessionsDir, { recursive: true });
+  await writeFile(codexTestLogPath(codexHome), [
+    JSON.stringify({ type: 'turn_context', payload: { model: 'codex-incomplete-model' } }),
+    codexUserTurn(),
+    JSON.stringify({
+      type: 'event_msg',
+      payload: {
+        type: 'token_count',
+        info: {
+          model_context_window: 200000,
+          last_token_usage: {
+            input_tokens: 1500,
+            cached_input_tokens: 800,
+            output_tokens: 300,
+          },
+        },
+      },
+    }),
+    '',
+  ].join('\n'));
+}
+
 async function writeCodexTokenLogForSession(sessionId: string): Promise<void> {
   const codexHome = process.env.CODEX_HOME;
   assert.ok(codexHome);
@@ -379,6 +405,24 @@ test('CodexWorkerBridge.runTurn diagnoses a first-turn Codex completion with no 
   );
 }));
 
+test('CodexWorkerBridge.runTurn rejects incomplete readable session log with stable reason code', withFakeBin('fake-codex-tool-stdout.mjs', async () => {
+  await writeCodexIncompleteCurrentLog();
+  const bridge = new CodexWorkerBridge();
+
+  await assert.rejects(
+    bridge.runTurn({
+      sessionId: null,
+      isFirstTurn: true,
+      projectRoot: process.cwd(),
+      message: 'hello',
+      timeoutMs: 10000,
+    }),
+    (error) => error instanceof OpenPError &&
+      error.exitCode === EXIT_CODES.protocolViolation &&
+      error.reasonCode === 'missing_completion',
+  );
+}));
+
 test('CodexWorkerBridge.runTurn throws on timeout', withFakeBin('fake-codex-slow.sh', async () => {
   const bridge = new CodexWorkerBridge();
 
@@ -405,7 +449,10 @@ test('CodexWorkerBridge.runTurn throws on empty response', withFakeBin('fake-cod
       message: 'hello',
       timeoutMs: 10000,
     }),
-    (err: Error) => err.message.includes('did not return a session id'),
+    (error) => error instanceof OpenPError
+      && error.exitCode === EXIT_CODES.protocolViolation
+      && error.reasonCode === 'unsupported_artifact_shape'
+      && error.message.includes('Codex CLI returned an empty response'),
   );
 }));
 
@@ -524,6 +571,7 @@ test('CodexWorkerBridge.runTurn rejects resume when the known session log disapp
     }),
     (error) => error instanceof OpenPError
       && error.exitCode === EXIT_CODES.protocolViolation
+      && error.reasonCode === undefined
       && error.message.includes('became unavailable'),
   );
 }));
@@ -542,6 +590,7 @@ test('CodexWorkerBridge.runTurn rejects resume when the known session log is rep
     }),
     (error) => error instanceof OpenPError
       && error.exitCode === EXIT_CODES.protocolViolation
+      && error.reasonCode === undefined
       && error.message.includes('became unavailable'),
   );
 }));
@@ -586,6 +635,7 @@ test('CodexWorkerBridge.runTurn rejects resume when a newly created session log 
     }),
     (error) => error instanceof OpenPError
       && error.exitCode === EXIT_CODES.protocolViolation
+      && error.reasonCode === undefined
       && error.message.includes('became unavailable'),
   );
 }));

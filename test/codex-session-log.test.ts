@@ -327,7 +327,10 @@ test('findCodexSessionLogPath rejects duplicate session id log paths', async () 
     await writeFile(join(sessionDir, 'rollout-b-dup.jsonl'), '{}\n');
     await assert.rejects(
       () => findCodexSessionLogPath('dup'),
-      /ambiguous Codex session log paths/,
+      (error) => error instanceof OpenPError &&
+        error.exitCode === EXIT_CODES.protocolViolation &&
+        error.reasonCode === 'ambiguous_candidate' &&
+        error.message.includes('ambiguous Codex session log paths'),
     );
   } finally {
     if (prev === undefined) {
@@ -666,7 +669,10 @@ test('extractSessionLogResult rejects malformed non-empty JSONL lines', () => {
 
   assert.throws(
     () => extractSessionLogResult(log),
-    /Codex session log contains malformed JSONL/,
+    (error) => error instanceof OpenPError &&
+      error.exitCode === EXIT_CODES.protocolViolation &&
+      error.reasonCode === 'unsupported_artifact_shape' &&
+      error.message.includes('Codex session log contains malformed JSONL'),
   );
 });
 
@@ -905,7 +911,10 @@ test('extractSessionLogResult rejects missing active turn boundary', () => {
 
   assert.throws(
     () => extractSessionLogResult(log),
-    /Codex session log is missing active turn boundary/,
+    (error) => error instanceof OpenPError &&
+      error.exitCode === EXIT_CODES.protocolViolation &&
+      error.reasonCode === 'missing_turn_boundary' &&
+      error.message.includes('Codex session log is missing active turn boundary'),
   );
 });
 
@@ -918,6 +927,9 @@ test('extractSessionLogResult rejects multiple active turn boundaries', () => {
 
   assert.throws(
     () => extractSessionLogResult(log),
-    /Codex session log contains multiple active turn boundaries/,
+    (error) => error instanceof OpenPError &&
+      error.exitCode === EXIT_CODES.protocolViolation &&
+      error.reasonCode === 'multiple_turn_boundaries' &&
+      error.message.includes('Codex session log contains multiple active turn boundaries'),
   );
 });

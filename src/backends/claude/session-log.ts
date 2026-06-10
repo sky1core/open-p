@@ -3,7 +3,7 @@ import { basename, dirname, join } from 'node:path';
 import { opendir, stat, readFile, realpath } from 'node:fs/promises';
 import { createReadStream, watch } from 'node:fs';
 import { createInterface } from 'node:readline';
-import { EXIT_CODES, OpenPError } from '../../core/errors.js';
+import { ARTIFACT_REJECTION_REASONS, EXIT_CODES, OpenPError } from '../../core/errors.js';
 import { isSafeSessionId } from '../../core/session-id.js';
 import { extractClaudeCodeIntermediateContent, isLocalCommandTranscriptText, parseClaudeCodeJsonlTurn } from './turn-parser.js';
 import { isClaudeCodeTaskNotificationLine } from './background-parser.js';
@@ -41,6 +41,7 @@ export class MissingCallerAfterLocalCommandError extends OpenPError {
     super(
       `Claude Code session log became idle after local command output before logging caller user turn for turn ${turnId}`,
       EXIT_CODES.protocolViolation,
+      ARTIFACT_REJECTION_REASONS.missingTurnBoundary,
     );
     this.name = 'MissingCallerAfterLocalCommandError';
   }
@@ -111,7 +112,11 @@ export async function findRecentClaudeCodeSessionLog(
     return null;
   }
   if (candidates.length > 1) {
-    throw new OpenPError('ambiguous Claude Code session log discovery for backend-generated first-turn session id', EXIT_CODES.protocolViolation);
+    throw new OpenPError(
+      'ambiguous Claude Code session log discovery for backend-generated first-turn session id',
+      EXIT_CODES.protocolViolation,
+      ARTIFACT_REJECTION_REASONS.ambiguousCandidate,
+    );
   }
   return candidates[0]!.path;
 }
@@ -136,7 +141,11 @@ async function findRecentClaudeCodePreCallerIdleLog(
     return null;
   }
   if (candidates.length > 1) {
-    throw new OpenPError('ambiguous Claude Code pre-caller local-command session log discovery for backend-generated first-turn session id', EXIT_CODES.protocolViolation);
+    throw new OpenPError(
+      'ambiguous Claude Code pre-caller local-command session log discovery for backend-generated first-turn session id',
+      EXIT_CODES.protocolViolation,
+      ARTIFACT_REJECTION_REASONS.ambiguousCandidate,
+    );
   }
   return candidates[0]!.path;
 }
@@ -284,6 +293,7 @@ export async function waitForClaudeCodeTurnResult(options: {
       throw new OpenPError(
         `Claude Code session log completed turn ${options.turnId} without a scoped result artifact`,
         EXIT_CODES.protocolViolation,
+        ARTIFACT_REJECTION_REASONS.missingCompletion,
       );
     }
   };
@@ -294,7 +304,11 @@ export async function waitForClaudeCodeTurnResult(options: {
       if (!logPath) {
         if (discoveryDeadline !== null && Date.now() >= discoveryDeadline) {
           const sessionLabel = options.sessionId ? `session ${options.sessionId}` : 'a backend-generated session id';
-          throw new OpenPError(`Claude Code session log not found for ${sessionLabel}. The interactive CLI may be waiting for workspace trust or startup input. Open the workspace once with Claude Code and trust it before running openp unattended.`, EXIT_CODES.sessionLogNotFound);
+          throw new OpenPError(
+            `Claude Code session log not found for ${sessionLabel}. The interactive CLI may be waiting for workspace trust or startup input. Open the workspace once with Claude Code and trust it before running openp unattended.`,
+            EXIT_CODES.sessionLogNotFound,
+            ARTIFACT_REJECTION_REASONS.noCandidate,
+          );
         }
         if (options.expectedLogPath) {
           logPath = options.expectedLogPath;
@@ -406,7 +420,11 @@ export async function waitForClaudeCodeTurnResult(options: {
 
   if (!logPath || !observedLogFile) {
     const sessionLabel = options.sessionId ? `session ${options.sessionId}` : 'a backend-generated session id';
-    throw new OpenPError(`Claude Code session log not found for ${sessionLabel}. The interactive CLI may be waiting for workspace trust or startup input. Open the workspace once with Claude Code and trust it before running openp unattended.`, EXIT_CODES.sessionLogNotFound);
+    throw new OpenPError(
+      `Claude Code session log not found for ${sessionLabel}. The interactive CLI may be waiting for workspace trust or startup input. Open the workspace once with Claude Code and trust it before running openp unattended.`,
+      EXIT_CODES.sessionLogNotFound,
+      ARTIFACT_REJECTION_REASONS.noCandidate,
+    );
   }
   await notifyTimeout();
   throw new OpenPError(`timed out waiting for turn ${options.turnId}`, EXIT_CODES.timeout);
@@ -583,12 +601,20 @@ async function findRecentJsonlLogs(
       }
       if (candidate.callerUserTurnCount === 0) {
         if (candidate.otherWorkspaceCallerUserTurnCount > 0) {
-          throw new OpenPError('Claude Code session log caller user turn does not match the requested workspace', EXIT_CODES.protocolViolation);
+          throw new OpenPError(
+            'Claude Code session log caller user turn does not match the requested workspace',
+            EXIT_CODES.protocolViolation,
+            ARTIFACT_REJECTION_REASONS.missingTurnBoundary,
+          );
         }
         continue;
       }
       if (candidate.callerUserTurnCount > 1) {
-        throw new OpenPError('Claude Code session log contains multiple caller user turns for one open-p turn', EXIT_CODES.protocolViolation);
+        throw new OpenPError(
+          'Claude Code session log contains multiple caller user turns for one open-p turn',
+          EXIT_CODES.protocolViolation,
+          ARTIFACT_REJECTION_REASONS.multipleTurnBoundaries,
+        );
       }
       candidates.push({ path, mtimeMs: pathStat.mtimeMs });
       continue;
@@ -705,7 +731,11 @@ async function assertDiscoveredLogStillUnambiguous(
     options.excludedLogPaths,
   );
   if (discoveredLogPath && discoveredLogPath !== selectedLogPath) {
-    throw new OpenPError('Claude Code session log discovery changed during backend-generated first-turn session resolution', EXIT_CODES.protocolViolation);
+    throw new OpenPError(
+      'Claude Code session log discovery changed during backend-generated first-turn session resolution',
+      EXIT_CODES.protocolViolation,
+      ARTIFACT_REJECTION_REASONS.ambiguousCandidate,
+    );
   }
 }
 

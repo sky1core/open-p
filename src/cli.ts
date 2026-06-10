@@ -359,14 +359,16 @@ async function main(argv: readonly string[]): Promise<number> {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const exitCode = toExitCode(error);
+    const reasonCode = error instanceof OpenPError ? error.reasonCode : undefined;
     await appendDebugLog(debugLogPath, {
       event: 'error',
       message,
       exitCode,
+      ...(reasonCode ? { reasonCode } : {}),
     }).catch(() => undefined);
     process.stderr.write(`${message}\n`);
     if (verbose) {
-      process.stderr.write(formatVerboseError(exitCode, debugLogPath));
+      process.stderr.write(formatVerboseError(exitCode, debugLogPath, reasonCode));
     }
     return exitCode;
   }
@@ -493,9 +495,10 @@ function isStreamingAssistantTextEvent(event: Record<string, unknown>): boolean 
       typeof (output as Record<string, unknown>).reasoning === 'string');
 }
 
-function formatVerboseError(exitCode: number, debugLogPath: string | null): string {
+function formatVerboseError(exitCode: number, debugLogPath: string | null, reasonCode?: string): string {
+  const reason = reasonCode ? `\n[openp error] reason_code: ${reasonCode}` : '';
   const debugLog = debugLogPath ? `\n[openp error] debug_log: ${debugLogPath}` : '';
-  return `[openp error] exit_code: ${exitCode}${debugLog}\n`;
+  return `[openp error] exit_code: ${exitCode}${reason}${debugLog}\n`;
 }
 
 function buildOutputMetadata(options: ResolvedCliOptions, cwd: string): {

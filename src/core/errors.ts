@@ -16,13 +16,38 @@ export const EXIT_CODES = {
 
 export type ExitCode = typeof EXIT_CODES[keyof typeof EXIT_CODES];
 
+export const ARTIFACT_REJECTION_REASONS = {
+  noCandidate: 'no_candidate',
+  ambiguousCandidate: 'ambiguous_candidate',
+  missingTurnBoundary: 'missing_turn_boundary',
+  multipleTurnBoundaries: 'multiple_turn_boundaries',
+  missingCompletion: 'missing_completion',
+  unsupportedArtifactShape: 'unsupported_artifact_shape',
+} as const;
+
+export type ArtifactRejectionReasonCode =
+  typeof ARTIFACT_REJECTION_REASONS[keyof typeof ARTIFACT_REJECTION_REASONS];
+
+export interface OpenPErrorOptions {
+  readonly reasonCode?: ArtifactRejectionReasonCode | null;
+}
+
 export class OpenPError extends Error {
+  readonly reasonCode?: ArtifactRejectionReasonCode;
+
   constructor(
     message: string,
     readonly exitCode: ExitCode,
+    reasonCodeOrOptions?: ArtifactRejectionReasonCode | OpenPErrorOptions,
   ) {
     super(message);
     this.name = 'OpenPError';
+    const reasonCode = typeof reasonCodeOrOptions === 'string'
+      ? reasonCodeOrOptions
+      : reasonCodeOrOptions?.reasonCode;
+    if (reasonCode) {
+      this.reasonCode = reasonCode;
+    }
   }
 }
 

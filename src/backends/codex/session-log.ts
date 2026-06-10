@@ -2,7 +2,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { readdir, readFile, stat } from 'node:fs/promises';
 
-import { EXIT_CODES, OpenPError } from '../../core/errors.js';
+import { ARTIFACT_REJECTION_REASONS, EXIT_CODES, OpenPError } from '../../core/errors.js';
 import { isSafeSessionId } from '../../core/session-id.js';
 import type { AssistantEventSnapshot } from '../../core/types.js';
 import { buildAssistantAnswerSnapshot, buildAssistantSnapshot, buildCodexToolSnapshot } from './jsonl-parser.js';
@@ -79,7 +79,10 @@ export async function getCodexSessionLogBaseline(sessionId: string): Promise<Cod
     const st = await stat(logPath);
     return { offsetBytes: st.size, preexisting: true, logPath };
   } catch {
-    throw new OpenPError('Codex session log became unavailable before resume launch', EXIT_CODES.protocolViolation);
+    throw new OpenPError(
+      'Codex session log became unavailable before resume launch',
+      EXIT_CODES.protocolViolation,
+    );
   }
 }
 
@@ -116,7 +119,11 @@ async function findMatchingLog(dir: string, sessionId: string): Promise<string |
   }
 
   if (candidates.length > 1) {
-    throw new OpenPError(`ambiguous Codex session log paths for session ${sessionId}`, EXIT_CODES.protocolViolation);
+    throw new OpenPError(
+      `ambiguous Codex session log paths for session ${sessionId}`,
+      EXIT_CODES.protocolViolation,
+      ARTIFACT_REJECTION_REASONS.ambiguousCandidate,
+    );
   }
   return candidates[0] ?? null;
 }
@@ -167,7 +174,10 @@ async function readCodexSessionLogResultAtPath(
     buf = await readFile(logPath);
   } catch {
     if (readFailureMessage) {
-      throw new OpenPError(readFailureMessage, EXIT_CODES.protocolViolation);
+      throw new OpenPError(
+        readFailureMessage,
+        EXIT_CODES.protocolViolation,
+      );
     }
     return null;
   }
@@ -212,7 +222,11 @@ export function extractSessionLogResult(rawLog: string): CodexSessionLogResult {
     try {
       event = JSON.parse(line) as Record<string, unknown>;
     } catch {
-      throw new OpenPError('Codex session log contains malformed JSONL', EXIT_CODES.protocolViolation);
+      throw new OpenPError(
+        'Codex session log contains malformed JSONL',
+        EXIT_CODES.protocolViolation,
+        ARTIFACT_REJECTION_REASONS.unsupportedArtifactShape,
+      );
     }
 
     const type = event.type as string | undefined;
@@ -361,10 +375,18 @@ export function extractSessionLogResult(rawLog: string): CodexSessionLogResult {
   }
 
   if (callerUserTurnCount === 0) {
-    throw new OpenPError('Codex session log is missing active turn boundary', EXIT_CODES.protocolViolation);
+    throw new OpenPError(
+      'Codex session log is missing active turn boundary',
+      EXIT_CODES.protocolViolation,
+      ARTIFACT_REJECTION_REASONS.missingTurnBoundary,
+    );
   }
   if (callerUserTurnCount > 1) {
-    throw new OpenPError('Codex session log contains multiple active turn boundaries', EXIT_CODES.protocolViolation);
+    throw new OpenPError(
+      'Codex session log contains multiple active turn boundaries',
+      EXIT_CODES.protocolViolation,
+      ARTIFACT_REJECTION_REASONS.multipleTurnBoundaries,
+    );
   }
 
   if (!content) {

@@ -346,7 +346,9 @@ test('extractKiroTurnResult fails closed on multiple caller prompt boundaries', 
 
   assert.throws(
     () => extractKiroTurnResult(log),
-    (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.protocolViolation,
+    (error) => error instanceof OpenPError &&
+      error.exitCode === EXIT_CODES.protocolViolation &&
+      error.reasonCode === 'multiple_turn_boundaries',
   );
 });
 
@@ -459,6 +461,7 @@ function assertUnsupportedPromptShapeThrows(log: string): void {
   const isUnsupportedPromptShape = (error: unknown): boolean => (
     error instanceof OpenPError &&
     error.exitCode === EXIT_CODES.protocolViolation &&
+    error.reasonCode === 'unsupported_artifact_shape' &&
     /unsupported prompt shape/.test(error.message)
   );
 

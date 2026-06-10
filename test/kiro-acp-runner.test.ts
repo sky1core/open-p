@@ -418,7 +418,10 @@ test('runKiroAcp rejects empty response', async () => {
       trustAllTools: false,
       env: env('empty'),
     }),
-    /session log did not contain a scoped turn result/,
+    (error) => error instanceof OpenPError &&
+      error.exitCode === EXIT_CODES.protocolViolation &&
+      error.reasonCode === 'missing_completion' &&
+      error.message.includes('session log did not contain a scoped turn result'),
   );
 });
 
@@ -495,7 +498,9 @@ test('runKiroAcp reports missing Kiro session log with the session-log exit code
       trustAllTools: false,
       env: { ...env('success'), OPENP_FAKE_KIRO_WRITE_SESSION_LOG: '0' },
     }),
-    (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.sessionLogNotFound,
+    (error) => error instanceof OpenPError &&
+      error.exitCode === EXIT_CODES.sessionLogNotFound &&
+      error.reasonCode === 'no_candidate',
   );
 });
 

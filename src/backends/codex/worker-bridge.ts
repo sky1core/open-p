@@ -5,7 +5,7 @@ import { join } from 'node:path';
 
 import type { BackendWorkerBridge } from '../../core/backend.js';
 import { createAbortError } from '../../core/abort.js';
-import { EXIT_CODES, OpenPError } from '../../core/errors.js';
+import { ARTIFACT_REJECTION_REASONS, EXIT_CODES, OpenPError } from '../../core/errors.js';
 import { isSafeSessionId } from '../../core/session-id.js';
 import type { AssistantEventSnapshot } from '../../core/types.js';
 import type { WorkerTurnRequest, WorkerTurnResult, WorkerTurnDiagnostics } from '../../core/worker-types.js';
@@ -153,7 +153,10 @@ export class CodexWorkerBridge implements BackendWorkerBridge {
 
       const sessionLog = await readCodexSessionLogResultSinceBaseline(resultSessionId, resumeLogBaseline);
       if (!isFirstTurn && resumeLogBaseline?.preexisting && !sessionLog) {
-        throw new OpenPError('Codex session log became unavailable for resume turn', EXIT_CODES.protocolViolation);
+        throw new OpenPError(
+          'Codex session log became unavailable for resume turn',
+          EXIT_CODES.protocolViolation,
+        );
       }
 
       const resultSource = selectCodexResultSource(sessionLog, stdoutParsed);
@@ -161,7 +164,11 @@ export class CodexWorkerBridge implements BackendWorkerBridge {
       const commentaryEvents = resultSource.assistantEvents;
       const resultContent = resultSource.content;
       if (!resultContent && !reasoningContent && !hasCodexResultArtifacts(commentaryEvents)) {
-        throw new OpenPError('Codex CLI returned an empty response', EXIT_CODES.protocolViolation);
+        throw new OpenPError(
+          'Codex CLI returned an empty response',
+          EXIT_CODES.protocolViolation,
+          ARTIFACT_REJECTION_REASONS.unsupportedArtifactShape,
+        );
       }
       const structuredOutput = parseCodexStructuredOutputFallback(
         resultContent,
@@ -254,7 +261,11 @@ function selectCodexResultSource(
 } {
   if (sessionLog) {
     if (!sessionLog.hasCompletionEvidence) {
-      throw new OpenPError('Codex session log is missing completion evidence for the active turn', EXIT_CODES.protocolViolation);
+      throw new OpenPError(
+        'Codex session log is missing completion evidence for the active turn',
+        EXIT_CODES.protocolViolation,
+        ARTIFACT_REJECTION_REASONS.missingCompletion,
+      );
     }
     return {
       content: sessionLog.content ?? '',

@@ -227,7 +227,10 @@ test('CodexBackend.runTurn throws on empty response', withFakeBin('fake-codex-em
       { turnId: 'turn-1', prompt: 'hello' },
       BASE_OPTIONS,
     ),
-    (err: Error) => err.message.includes('did not return a session id'),
+    (error) => error instanceof OpenPError
+      && error.exitCode === EXIT_CODES.protocolViolation
+      && error.reasonCode === 'unsupported_artifact_shape'
+      && error.message.includes('Codex CLI returned an empty response'),
   );
 }));
 
@@ -535,7 +538,9 @@ test('CodexBackend.runTurn rejects incomplete readable session log instead of fa
       { turnId: 'turn-1', prompt: 'hello' },
       BASE_OPTIONS,
     ),
-    (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.protocolViolation,
+    (error) => error instanceof OpenPError &&
+      error.exitCode === EXIT_CODES.protocolViolation &&
+      error.reasonCode === 'missing_completion',
   );
 }));
 
@@ -548,7 +553,9 @@ test('CodexBackend.runTurn rejects malformed readable session log instead of fal
       { turnId: 'turn-1', prompt: 'hello' },
       BASE_OPTIONS,
     ),
-    (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.protocolViolation,
+    (error) => error instanceof OpenPError &&
+      error.exitCode === EXIT_CODES.protocolViolation &&
+      error.reasonCode === 'unsupported_artifact_shape',
   );
 }));
 
@@ -687,6 +694,7 @@ test('CodexBackend.runTurn rejects resume when the known session log disappears 
     ),
     (error) => error instanceof OpenPError
       && error.exitCode === EXIT_CODES.protocolViolation
+      && error.reasonCode === undefined
       && error.message.includes('became unavailable'),
   );
 }));
@@ -702,6 +710,7 @@ test('CodexBackend.runTurn rejects resume when the known session log is replaced
     ),
     (error) => error instanceof OpenPError
       && error.exitCode === EXIT_CODES.protocolViolation
+      && error.reasonCode === undefined
       && error.message.includes('became unavailable'),
   );
 }));
@@ -742,6 +751,7 @@ test('CodexBackend.runTurn rejects resume when a newly created session log is un
     ),
     (error) => error instanceof OpenPError
       && error.exitCode === EXIT_CODES.protocolViolation
+      && error.reasonCode === undefined
       && error.message.includes('became unavailable'),
   );
 }));

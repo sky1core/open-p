@@ -2,7 +2,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { createInterface, type Interface } from 'node:readline';
 
 import { createAbortError } from '../../core/abort.js';
-import { EXIT_CODES, OpenPError } from '../../core/errors.js';
+import { ARTIFACT_REJECTION_REASONS, EXIT_CODES, OpenPError } from '../../core/errors.js';
 import { DEFAULT_TERMINATE_GRACE_MS, GracefulInterrupt, shouldTerminateOnAbort } from '../../core/graceful-interrupt.js';
 import { isSafeSessionId } from '../../core/session-id.js';
 import type { AssistantEventSnapshot } from '../../core/types.js';
@@ -177,7 +177,11 @@ class KiroAcpClient {
 
     const hasResultArtifacts = hasToolArtifacts(turnResult.assistantEvents);
     if (!turnResult.text && !hasResultArtifacts) {
-      throw new OpenPError('Kiro session log did not contain a scoped turn result', EXIT_CODES.protocolViolation);
+      throw new OpenPError(
+        'Kiro session log did not contain a scoped turn result',
+        EXIT_CODES.protocolViolation,
+        ARTIFACT_REJECTION_REASONS.missingCompletion,
+      );
     }
 
     return {

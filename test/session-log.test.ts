@@ -226,7 +226,9 @@ test('reports missing expected session log as session log not found', async () =
       cwd: dir,
       isBackendAlive: async () => true,
     }),
-    (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.sessionLogNotFound,
+    (error) => error instanceof OpenPError &&
+      error.exitCode === EXIT_CODES.sessionLogNotFound &&
+      error.reasonCode === 'no_candidate',
   );
 });
 
@@ -245,8 +247,59 @@ test('fails first-turn discovery with session-log-not-found when no log appears 
       isBackendAlive: async () => true,
       sessionLogDiscoveryTimeoutMs: 25,
     }),
-    (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.sessionLogNotFound,
+    (error) => error instanceof OpenPError &&
+      error.exitCode === EXIT_CODES.sessionLogNotFound &&
+      error.reasonCode === 'no_candidate',
   );
+});
+
+test('exposes stable rejection reason code for ambiguous Claude first-turn log candidates', async () => {
+  await withClaudeProjectsRoot(async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'openp-session-log-cwd-'));
+    const logDir = resolveClaudeCodeProjectLogDir(cwd);
+    await mkdir(logDir, { recursive: true });
+
+    try {
+      for (const sessionId of [randomUUID(), randomUUID()]) {
+        await writeFile(join(logDir, `${sessionId}.jsonl`), [
+          line({
+            type: 'user',
+            cwd,
+            sessionId,
+            message: { content: 'candidate prompt' },
+          }),
+          line({
+            type: 'assistant',
+            cwd,
+            sessionId,
+            message: {
+              content: [{ type: 'text', text: 'candidate result' }],
+              stop_reason: 'end_turn',
+            },
+          }),
+          line({ type: 'system', subtype: 'turn_duration', cwd, sessionId, durationMs: 1 }),
+        ].join(''));
+      }
+
+      await assert.rejects(
+        () => waitForClaudeCodeTurnResult({
+          sessionId: null,
+          turnId: 'turn-ambiguous',
+          timeoutMs: 10_000,
+          initialOffset: 0,
+          knownLogPath: null,
+          cwd,
+          discoveryStartedAtMs: Date.now() - 1000,
+          isBackendAlive: async () => true,
+        }),
+        (error) => error instanceof OpenPError &&
+          error.exitCode === EXIT_CODES.protocolViolation &&
+          error.reasonCode === 'ambiguous_candidate',
+      );
+    } finally {
+      await rm(logDir, { recursive: true, force: true });
+    }
+  });
 });
 
 test('discovers backend-generated first-turn session log without reusing preexisting recent logs', async () => {
@@ -1375,7 +1428,9 @@ test('fails closed after completion metadata stays idle without a scoped result 
       postCompletionGraceMs: 25,
       isBackendAlive: async () => true,
     }),
-    (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.protocolViolation,
+    (error) => error instanceof OpenPError &&
+      error.exitCode === EXIT_CODES.protocolViolation &&
+      error.reasonCode === 'missing_completion',
   );
 });
 

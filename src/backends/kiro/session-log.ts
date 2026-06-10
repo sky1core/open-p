@@ -3,7 +3,7 @@ import { stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-import { EXIT_CODES, OpenPError } from '../../core/errors.js';
+import { ARTIFACT_REJECTION_REASONS, EXIT_CODES, OpenPError } from '../../core/errors.js';
 import { isSafeSessionId } from '../../core/session-id.js';
 import type { AssistantEventSnapshot } from '../../core/types.js';
 
@@ -103,6 +103,7 @@ export async function waitForKiroTurnResult(options: {
         throw new OpenPError(
           `Kiro session log not found for session ${options.sessionId}`,
           EXIT_CODES.sessionLogNotFound,
+          ARTIFACT_REJECTION_REASONS.noCandidate,
         );
       }
       return lastResult;
@@ -146,6 +147,7 @@ export async function waitForKiroPromptScopedAssistantTexts(options: {
         throw new OpenPError(
           `Kiro session log not found for session ${options.sessionId}`,
           EXIT_CODES.sessionLogNotFound,
+          ARTIFACT_REJECTION_REASONS.noCandidate,
         );
       }
       throw new OpenPError(
@@ -228,6 +230,7 @@ export function extractKiroTurnResult(rawLogSegment: string): {
         throw new OpenPError(
           'Kiro session log contains multiple caller prompt boundaries in one active turn segment',
           EXIT_CODES.protocolViolation,
+          ARTIFACT_REJECTION_REASONS.multipleTurnBoundaries,
         );
       }
       sawCallerPrompt = true;
@@ -345,6 +348,7 @@ function throwUnsupportedKiroPromptShape(): never {
   throw new OpenPError(
     'Kiro session log contains unsupported prompt shape in active turn segment',
     EXIT_CODES.protocolViolation,
+    ARTIFACT_REJECTION_REASONS.unsupportedArtifactShape,
   );
 }
 

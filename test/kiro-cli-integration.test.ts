@@ -172,6 +172,39 @@ test('kiro keeps session-log result and logs streaming snapshot outside result',
   assert.equal(diagnostic?.issues?.[0]?.kind, 'streaming-answer-outside-result');
 });
 
+test('kiro CLI debug log records artifact rejection reason code on error', async () => {
+  const repoRoot = process.cwd();
+  const tsxBin = join(repoRoot, 'node_modules', '.bin', 'tsx');
+  const projectRoot = await realpath(await mkdtemp(join(tmpdir(), 'openp-cli-')));
+  const stateRoot = await mkdtemp(join(tmpdir(), 'openp-cli-state-'));
+  const kiroHome = await mkdtemp(join(tmpdir(), 'openp-kiro-home-'));
+  const debugLogPath = join(
+    resolveOpenPStateRoot(projectRoot, { XDG_STATE_HOME: stateRoot }),
+    'logs',
+    'debug.jsonl',
+  );
+  const env = await withFakeCommandEnv('kiro-cli', join(repoRoot, 'test', 'fixtures', 'kiro', 'fake-kiro-acp.mjs'), {
+    XDG_STATE_HOME: stateRoot,
+    HOME: kiroHome,
+    OPENP_FAKE_KIRO_BEHAVIOR: 'success',
+    OPENP_FAKE_KIRO_WRITE_SESSION_LOG: '0',
+  });
+
+  const result = await runCommand(tsxBin, [
+    join(repoRoot, 'src/cli.ts'),
+    'kiro',
+    '--debug-log',
+    'hello',
+  ], projectRoot, env);
+  const entries = await readDebugEntries(debugLogPath);
+  const errorEntry = entries.find((entry) => entry.event === 'error');
+
+  assert.equal(result.code, 41);
+  assert.equal(result.stdout, '');
+  assert.match(result.stderr, /Kiro session log not found/);
+  assert.equal(errorEntry?.reasonCode, 'no_candidate');
+});
+
 test('text CLI maps SIGINT to backend graceful interrupt before exiting 130', async () => {
   const repoRoot = process.cwd();
   const tsxBin = join(repoRoot, 'node_modules', '.bin', 'tsx');

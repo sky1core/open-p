@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { runStreamJsonWorkerLines, type StreamJsonWorkerBridge } from '../src/core/stream-json-worker-runner.js';
 import type { ResolvedCliOptions } from '../src/core/cli-args.js';
+import { EXIT_CODES, OpenPError } from '../src/core/errors.js';
 import { SessionLockStore } from '../src/core/session-lock.js';
 import { SessionStateStore } from '../src/core/session-state.js';
 import type { AssistantEventSnapshot } from '../src/core/types.js';
@@ -2511,6 +2512,36 @@ test('stream-json worker does not save resumable state when the first turn fails
   );
 
   assert.equal(await state.stateStore.load(SESSION_ID), null);
+});
+
+test('stream-json worker debug log records artifact rejection reason code on error', async () => {
+  const bridge: StreamJsonWorkerBridge = {
+    async runTurn() {
+      throw new OpenPError(
+        'artifact candidate rejected',
+        EXIT_CODES.protocolViolation,
+        'missing_completion',
+      );
+    },
+  };
+  const state = await stateContext('/work/open-p');
+  const debugLogPath = join(await mkdtemp(join(tmpdir(), 'openp-debug-')), 'debug.jsonl');
+
+  await assert.rejects(
+    () => runStreamJsonWorkerLines({
+      options: options({ debugLog: debugLogPath }),
+      lines: lines([userEvent('turn-a', 'prompt')]),
+      bridge,
+      ...state,
+      outputMetadata: metadata(),
+      write: () => undefined,
+    }),
+    /artifact candidate rejected/,
+  );
+
+  const entries = await readDebugEntries(debugLogPath);
+  const errorEntry = entries.find((entry) => entry.event === 'error');
+  assert.equal(errorEntry?.reasonCode, 'missing_completion');
 });
 
 test('stream-json worker does not emit terminal success when state save fails', async () => {
