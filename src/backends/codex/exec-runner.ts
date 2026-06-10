@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { createAbortError } from '../../core/abort.js';
+import { EXIT_CODES, OpenPError } from '../../core/errors.js';
 import { GracefulInterrupt, shouldTerminateOnAbort } from '../../core/graceful-interrupt.js';
 
 export interface CodexExecOptions {
@@ -120,6 +121,13 @@ export function runCodexExec(options: CodexExecOptions): Promise<CodexExecResult
         options.signal?.removeEventListener('abort', onAbort);
         options.forceSignal?.removeEventListener('abort', onForce);
         options.killSignal?.removeEventListener('abort', onKill);
+        if (isErrorCode(err, 'ENOENT')) {
+          reject(new OpenPError(
+            `backend executable not found: ${options.bin}`,
+            EXIT_CODES.backendNotFound,
+          ));
+          return;
+        }
         reject(err);
       }
     });
@@ -183,4 +191,8 @@ export function runCodexExec(options: CodexExecOptions): Promise<CodexExecResult
       }
     }
   });
+}
+
+function isErrorCode(error: unknown, code: string): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && error.code === code;
 }

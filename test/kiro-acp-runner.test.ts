@@ -499,6 +499,30 @@ test('runKiroAcp throws on non-zero exit', async () => {
   );
 });
 
+test('runKiroAcp maps missing backend executable to backendNotFound', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-kiro-missing-bin-'));
+  const missingBin = join(dir, 'missing-kiro-cli');
+
+  await assert.rejects(
+    runKiroAcp({
+      bin: missingBin,
+      args: ['acp'],
+      cwd: process.cwd(),
+      prompt: 'hello',
+      sessionId: null,
+      isFirstTurn: true,
+      timeoutMs: 5000,
+      trustAllTools: false,
+      env: env(),
+    }),
+    (error) => (
+      error instanceof OpenPError &&
+      error.exitCode === EXIT_CODES.backendNotFound &&
+      error.message === `backend executable not found: ${missingBin}`
+    ),
+  );
+});
+
 test('runKiroAcp throws on timeout', async () => {
   const signalLog = await tempSignalLog();
   await assert.rejects(

@@ -265,6 +265,13 @@ class KiroAcpClient {
       if (this.completed || this.shuttingDown) {
         return;
       }
+      if (isErrorCode(error, 'ENOENT')) {
+        this.fail(new OpenPError(
+          `backend executable not found: ${this.options.bin}`,
+          EXIT_CODES.backendNotFound,
+        ));
+        return;
+      }
       this.fail(error);
     });
     child.on('close', (code, signal) => {
@@ -621,6 +628,10 @@ function hasToolArtifacts(events: readonly AssistantEventSnapshot[]): boolean {
       return type === 'tool_use' || type === 'server_tool_use' || type === 'tool_result';
     });
   });
+}
+
+function isErrorCode(error: unknown, code: string): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && error.code === code;
 }
 
 function extractLoadSessionCapability(result: JsonObject): boolean {

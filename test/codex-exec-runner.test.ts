@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runCodexExec } from '../src/backends/codex/exec-runner.js';
 import { isAbortError } from '../src/core/abort.js';
+import { EXIT_CODES, OpenPError } from '../src/core/errors.js';
 
 const FIXTURES = join(import.meta.dirname, 'fixtures', 'codex');
 const READY_LINE = '{"type":"fixture.ready"}';
@@ -39,6 +40,25 @@ test('runCodexExec captures stderr and non-zero exit', async () => {
   assert.equal(result.exitCode, 1);
   assert.ok(result.stderr.includes('something went wrong'));
   assert.equal(result.timedOut, false);
+});
+
+test('runCodexExec maps missing backend executable to backendNotFound', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-codex-missing-bin-'));
+  const missingBin = join(dir, 'missing-codex-cli');
+
+  await assert.rejects(
+    runCodexExec({
+      bin: missingBin,
+      args: [],
+      cwd: process.cwd(),
+      timeoutMs: 10000,
+    }),
+    (error) => (
+      error instanceof OpenPError &&
+      error.exitCode === EXIT_CODES.backendNotFound &&
+      error.message === `backend executable not found: ${missingBin}`
+    ),
+  );
 });
 
 test('runCodexExec times out with SIGINT before escalation', async () => {
