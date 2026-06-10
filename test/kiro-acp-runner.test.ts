@@ -448,6 +448,40 @@ test('runKiroAcp succeeds when scoped result has tool artifacts but no answer te
   assert.equal(toolResult.content, 'file text');
 });
 
+test('runKiroAcp reports toolsUsed from session-log toolUse names, not live update labels', async () => {
+  const result = await runKiroAcp({
+    bin: FIXTURE,
+    args: ['acp'],
+    cwd: process.cwd(),
+    prompt: 'use tools',
+    sessionId: null,
+    isFirstTurn: true,
+    timeoutMs: 5000,
+    trustAllTools: false,
+    env: env('tool-live-labels'),
+  });
+
+  assert.deepEqual(result.toolsUsed, ['read', 'write']);
+});
+
+test('runKiroAcp does not leak setup metadata into active turn diagnostics', async () => {
+  const result = await runKiroAcp({
+    bin: FIXTURE,
+    args: ['acp'],
+    cwd: process.cwd(),
+    prompt: 'hello',
+    sessionId: null,
+    isFirstTurn: true,
+    reasoningEffort: 'high',
+    timeoutMs: 5000,
+    trustAllTools: false,
+    env: env('setup-metadata-only'),
+  });
+
+  assert.equal(result.durationMs, null);
+  assert.equal(result.rawUsage, null);
+});
+
 test('runKiroAcp reports missing Kiro session log with the session-log exit code', async () => {
   await assert.rejects(
     runKiroAcp({
@@ -597,7 +631,7 @@ test('runKiroAcp keeps abort classified when backend returns an error after inte
 test('runKiroAcp keeps user abort classified as abort even when timeout is near', async () => {
   const ac = new AbortController();
   const signalLog = await tempSignalLog();
-  setTimeout(() => ac.abort(), 100);
+  setTimeout(() => ac.abort(), 300);
 
   await assert.rejects(
     runKiroAcp({
@@ -607,7 +641,7 @@ test('runKiroAcp keeps user abort classified as abort even when timeout is near'
       prompt: 'hello',
       sessionId: null,
       isFirstTurn: true,
-      timeoutMs: 150,
+      timeoutMs: 450,
       trustAllTools: false,
       env: { ...env('ignore-interrupt'), OPENP_FAKE_KIRO_SIGNAL_LOG: signalLog },
       signal: ac.signal,
@@ -622,7 +656,7 @@ test('runKiroAcp keeps user abort classified as abort even when timeout is near'
 test('runKiroAcp keeps timeout classified as timeout when abort arrives after timeout', async () => {
   const ac = new AbortController();
   const signalLog = await tempSignalLog();
-  setTimeout(() => ac.abort(), 150);
+  setTimeout(() => ac.abort(), 450);
 
   await assert.rejects(
     runKiroAcp({
@@ -632,7 +666,7 @@ test('runKiroAcp keeps timeout classified as timeout when abort arrives after ti
       prompt: 'hello',
       sessionId: null,
       isFirstTurn: true,
-      timeoutMs: 100,
+      timeoutMs: 300,
       trustAllTools: false,
       env: { ...env('ignore-interrupt'), OPENP_FAKE_KIRO_SIGNAL_LOG: signalLog },
       signal: ac.signal,
@@ -655,7 +689,7 @@ test('runKiroAcp keeps timeout classified when backend returns an error after ti
       prompt: 'hello',
       sessionId: null,
       isFirstTurn: true,
-      timeoutMs: 100,
+      timeoutMs: 300,
       trustAllTools: false,
       env: { ...env('error-after-interrupt'), OPENP_FAKE_KIRO_SIGNAL_LOG: signalLog },
     }),
@@ -732,9 +766,9 @@ test('runKiroAcp repeated abort signal escalates before interrupt grace expires'
   const force = new AbortController();
   const kill = new AbortController();
   const signalLog = await tempSignalLog();
-  setTimeout(() => ac.abort(), 100);
-  setTimeout(() => force.abort(), 200);
-  setTimeout(() => kill.abort(), 300);
+  setTimeout(() => ac.abort(), 300);
+  setTimeout(() => force.abort(), 400);
+  setTimeout(() => kill.abort(), 500);
 
   await assert.rejects(
     runKiroAcp({

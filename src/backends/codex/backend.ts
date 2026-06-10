@@ -194,7 +194,7 @@ export class CodexBackend implements Backend {
         assistantEvents: commentaryEvents.length > 0 ? commentaryEvents : undefined,
         diagnostics: {
           durationMs,
-          stopReason: 'end_turn',
+          stopReason: null,
           toolsUsed: [],
           usage,
           rawUsage: null,

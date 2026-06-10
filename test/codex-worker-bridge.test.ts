@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
-import { mkdir, mkdtemp, symlink, writeFile } from 'node:fs/promises';
+import { access, chmod, mkdir, mkdtemp, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { CodexWorkerBridge } from '../src/backends/codex/worker-bridge.js';
 import { isAbortError } from '../src/core/abort.js';
@@ -150,8 +150,38 @@ test('CodexWorkerBridge.runTurn succeeds with fake codex', withFakeBin('fake-cod
     cacheReadInputTokens: 800,
   });
   assert.equal(result.diagnostics.lastSubturnContextTokens, 2300);
-  assert.equal(result.diagnostics.stopReason, 'end_turn');
+  assert.equal(result.diagnostics.stopReason, null);
 }));
+
+test('CodexWorkerBridge.runTurn rejects unsafe resume session ids before launching codex', async () => {
+  const binDir = await mkdtemp(join(tmpdir(), 'openp-codex-injection-bin-'));
+  const markerPath = join(binDir, 'spawned');
+  const fakeCodex = join(binDir, 'codex');
+  await writeFile(fakeCodex, [
+    '#!/usr/bin/env node',
+    'const { writeFileSync } = require("node:fs");',
+    `writeFileSync(${JSON.stringify(markerPath)}, "spawned");`,
+    'process.exit(0);',
+    '',
+  ].join('\n'));
+  await chmod(fakeCodex, 0o755);
+
+  const bridge = new CodexWorkerBridge();
+  await assert.rejects(
+    () => bridge.runTurn({
+      bin: fakeCodex,
+      sessionId: '-unsafe-session',
+      isFirstTurn: false,
+      projectRoot: process.cwd(),
+      message: 'follow up',
+      timeoutMs: 10000,
+    }),
+    (error) => error instanceof OpenPError &&
+      error.exitCode === EXIT_CODES.usage &&
+      error.message.includes('unsafe Codex resume session id'),
+  );
+  await assert.rejects(access(markerPath), { code: 'ENOENT' });
+});
 
 test('CodexWorkerBridge.runTurn streams intermediate text', withFakeBin('fake-codex-success.sh', async () => {
   const bridge = new CodexWorkerBridge();

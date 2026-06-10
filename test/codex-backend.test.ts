@@ -171,7 +171,7 @@ test('CodexBackend.runTurn succeeds on first turn', withFakeBin('fake-codex-succ
     cacheReadInputTokens: 800,
   });
   assert.equal(result.diagnostics.lastSubturnContextTokens, 2300);
-  assert.equal(result.diagnostics.stopReason, 'end_turn');
+  assert.equal(result.diagnostics.stopReason, null);
   assert.equal(result.sessionId, FAKE_CODEX_SESSION_ID);
   assert.ok(result.diagnostics.durationMs! >= 0);
 }));

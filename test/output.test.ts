@@ -124,6 +124,8 @@ test('formats json output as one top-level openp result record', () => {
       outputTokens: 3,
     },
   });
+  assert.equal(metadata(openp).stopReason, null);
+  assert.equal(metadata(openp).numTurns, null);
 });
 
 test('formats result metadata with derived last subturn context token usage', () => {
@@ -253,6 +255,8 @@ test('formats stream-json output as one terminal result record', () => {
   assert.equal(events[0]?.form, 'result');
   assert.deepEqual((events[0]?.output as Record<string, unknown>).answer, []);
   assert.ok(resultOutput(events[0]!).toolCall.length > 0);
+  assert.equal(metadata(events[0]!).stopReason, null);
+  assert.equal(metadata(events[0]!).numTurns, null);
 });
 
 test('formats intermediate answer as one streaming snapshot, not a delta field', () => {
@@ -410,6 +414,23 @@ test('formats worker result with full diagnostics in openp metadata', () => {
   assert.equal(metadata(openp).numTurns, 2);
   assert.equal(metadata(openp).durationMs, 456);
   assert.equal(metadata(openp).stopReason, 'end_turn');
+});
+
+test('formats worker result unknown diagnostics as null, not fabricated defaults', () => {
+  const openp = parseSingleOpenPRecord(formatWorkerTurnResult({
+    ...WORKER_RESULT,
+    diagnostics: {
+      ...WORKER_RESULT.diagnostics,
+      numTurns: null,
+      stopReason: null,
+    },
+  }, {
+    turnId: 'public-turn-null-diagnostics',
+    model: 'claude-test',
+  }));
+
+  assert.equal(metadata(openp).numTurns, null);
+  assert.equal(metadata(openp).stopReason, null);
 });
 
 test('formats worker result metadata with last subturn usage separate from aggregate usage', () => {

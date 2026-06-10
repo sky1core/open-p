@@ -159,6 +159,18 @@ for await (const line of input) {
             },
           },
         });
+        if (behavior === 'setup-metadata-only') {
+          send({
+            jsonrpc: '2.0',
+            method: '_kiro.dev/metadata',
+            params: {
+              sessionId,
+              contextUsagePercentage: 9.5,
+              meteringUsage: [{ value: 9.9, unit: 'credit', unitPlural: 'credits' }],
+              turnDurationMs: 987,
+            },
+          });
+        }
       } else {
         const delayedText = `Effort setup settled for ${effort}.`;
         delayedEffortTexts = [text, delayedText];
@@ -308,7 +320,8 @@ for await (const line of input) {
           update: {
             sessionUpdate: 'tool_call_chunk',
             toolCallId: 'tooluse_fake',
-            title: 'write',
+            rawInput: behavior === 'tool-live-labels' ? { command: 'create' } : undefined,
+            title: behavior === 'tool-live-labels' ? 'Reading input.txt:1' : 'write',
             kind: 'edit',
           },
         },
@@ -326,7 +339,20 @@ for await (const line of input) {
           },
         });
       }
-      const assistantLogEvent = {
+      const assistantLogEvent = behavior === 'tool-live-labels'
+        ? {
+            version: 'v1',
+            kind: 'AssistantMessage',
+            data: {
+              message_id: `assistant-${Date.now()}`,
+              content: [
+                { kind: 'text', data: finalLogText },
+                { kind: 'toolUse', data: { toolUseId: 'tooluse_read', name: 'read', input: { path: 'input.txt' } } },
+                { kind: 'toolUse', data: { toolUseId: 'tooluse_write', name: 'write', input: { path: 'output.txt' } } },
+              ],
+            },
+          }
+        : {
         version: 'v1',
         kind: 'AssistantMessage',
         data: {
@@ -350,16 +376,18 @@ for await (const line of input) {
         appendSessionLog(sessionId, assistantLogEvent);
       }
     }
-    send({
-      jsonrpc: '2.0',
-      method: '_kiro.dev/metadata',
-      params: {
-        sessionId,
-        contextUsagePercentage: 2.5,
-        meteringUsage: [{ value: 0.1, unit: 'credit', unitPlural: 'credits' }],
-        turnDurationMs: 123,
-      },
-    });
+    if (behavior !== 'setup-metadata-only') {
+      send({
+        jsonrpc: '2.0',
+        method: '_kiro.dev/metadata',
+        params: {
+          sessionId,
+          contextUsagePercentage: 2.5,
+          meteringUsage: [{ value: 0.1, unit: 'credit', unitPlural: 'credits' }],
+          turnDurationMs: 123,
+        },
+      });
+    }
     send({
       jsonrpc: '2.0',
       id: message.id,

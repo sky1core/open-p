@@ -65,7 +65,6 @@ class KiroAcpClient {
   private stdoutLines: Interface | null = null;
   private nextId = 1;
   private readonly pending = new Map<JsonRpcId, PendingRequest>();
-  private readonly toolsUsed = new Set<string>();
   private assistantText = '';
   private setupCommandText = '';
   private activePrompt = false;
@@ -153,6 +152,8 @@ class KiroAcpClient {
 
     const promptLogOffset = await readKiroSessionLogOffset(promptSessionId, this.options.env);
     this.throwIfInterruptedOrTimedOut();
+    this.latestMetadata = null;
+    this.metadataDurationMs = null;
     this.activePrompt = true;
     const promptResult = await this.raceFatal<JsonObject>(this.sendRequest('session/prompt', {
       sessionId: promptSessionId,
@@ -183,7 +184,7 @@ class KiroAcpClient {
       content: turnResult.text ?? '',
       sessionId: promptSessionId,
       stopReason: typeof promptResult.stopReason === 'string' ? promptResult.stopReason : null,
-      toolsUsed: [...new Set([...this.toolsUsed, ...turnResult.toolsUsed])],
+      toolsUsed: turnResult.toolsUsed,
       durationMs: this.metadataDurationMs,
       rawUsage: this.latestMetadata,
       rawEventCount: this.rawEventCount,
@@ -566,12 +567,6 @@ class KiroAcpClient {
       return;
     }
 
-    if (update.sessionUpdate.startsWith('tool_call')) {
-      const toolName = extractToolName(update);
-      if (toolName) {
-        this.toolsUsed.add(toolName);
-      }
-    }
   }
 
   private handleMetadata(params: JsonObject | null): void {
@@ -650,20 +645,6 @@ function extractId(message: JsonObject): JsonRpcId | null {
 function extractPermissionTitle(params: JsonObject | null): string | null {
   const toolCall = asObject(params?.toolCall);
   return typeof toolCall?.title === 'string' ? toolCall.title : null;
-}
-
-function extractToolName(update: JsonObject): string | null {
-  const rawInput = asObject(update.rawInput);
-  if (typeof rawInput?.command === 'string' && rawInput.command.trim()) {
-    return rawInput.command.trim();
-  }
-  if (typeof update.title === 'string' && update.title.trim()) {
-    return update.title.trim();
-  }
-  if (typeof update.kind === 'string' && update.kind.trim()) {
-    return update.kind.trim();
-  }
-  return null;
 }
 
 function asObject(value: unknown): JsonObject | null {

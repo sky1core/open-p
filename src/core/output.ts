@@ -48,7 +48,7 @@ export function formatTurnResult(result: TurnResult, options: OutputOptions): st
     const text = textOutput.endsWith('\n') ? textOutput : `${textOutput}\n`;
     return `${text}${formatVerboseTextMarker(options.verbose)}${formatTextWarnings(options.warnings)}`;
   }
-  const stopReason = result.diagnostics.stopReason ?? 'end_turn';
+  const stopReason = result.diagnostics.stopReason ?? null;
   const effectiveModel = result.diagnostics.model ?? options.model ?? null;
   const resultUsage = result.diagnostics.usage;
   const lastSubturnUsage = result.diagnostics.lastSubturnUsage ?? null;
@@ -212,7 +212,7 @@ export function formatTurnResult(result: TurnResult, options: OutputOptions): st
       assistantEventUsage,
       lastSubturnUsage,
       durationMs: result.diagnostics.durationMs,
-      numTurns: 1,
+      numTurns: null,
       totalCostUsd: null,
       stopReason,
       usage: {
@@ -245,7 +245,7 @@ export function formatTurnResult(result: TurnResult, options: OutputOptions): st
       assistantEventUsage,
       lastSubturnUsage,
       durationMs: result.diagnostics.durationMs,
-      numTurns: 1,
+      numTurns: null,
       totalCostUsd: null,
       stopReason,
       usage: {
@@ -695,7 +695,7 @@ function resultAnswerTextForTextOutput(result: TurnResult, options: OutputOption
       structuredOutputToolUseId,
       requestId: result.requestId ?? null,
       model: result.diagnostics.model ?? options.model ?? null,
-      stopReason: result.diagnostics.stopReason ?? 'end_turn',
+      stopReason: result.diagnostics.stopReason ?? null,
       usage: assistantEventUsage,
       form: 'result',
     },
@@ -1749,7 +1749,7 @@ function buildOpenPTurnResult(event: {
     usage: buildOpenPUsage(event.usage),
     lastSubturnUsage: event.lastSubturnUsage ? buildOpenPUsage(event.lastSubturnUsage) : undefined,
     rawUsage: event.rawUsage ?? undefined,
-    stopReason: event.stopReason ?? undefined,
+    stopReason: event.stopReason,
     numTurns: event.numTurns,
     durationMs: event.durationMs,
     totalCostUsd: event.totalCostUsd,
