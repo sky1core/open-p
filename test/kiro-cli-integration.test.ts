@@ -97,6 +97,37 @@ test('kiro stream-json first turn omits init session and returns generated resul
   await stat(join(workspaceStateRoot, 'sessions', `${KIRO_SESSION_ID}.json`));
 });
 
+test('kiro slash-command turn returns chunk text once as stream-json result answer', async () => {
+  const repoRoot = process.cwd();
+  const tsxBin = join(repoRoot, 'node_modules', '.bin', 'tsx');
+  const projectRoot = await realpath(await mkdtemp(join(tmpdir(), 'openp-cli-')));
+  const stateRoot = await mkdtemp(join(tmpdir(), 'openp-cli-state-'));
+  const kiroHome = await mkdtemp(join(tmpdir(), 'openp-kiro-home-'));
+  const env = await withFakeCommandEnv('kiro-cli', join(repoRoot, 'test', 'fixtures', 'kiro', 'fake-kiro-acp.mjs'), {
+    XDG_STATE_HOME: stateRoot,
+    HOME: kiroHome,
+    OPENP_FAKE_KIRO_BEHAVIOR: 'slash-command',
+    OPENP_FAKE_KIRO_WRITE_SESSION_LOG: '1',
+  });
+
+  const result = await runCommand(tsxBin, [
+    join(repoRoot, 'src/cli.ts'),
+    'kiro',
+    '--output-format',
+    'stream-json',
+    '/compact',
+  ], projectRoot, env);
+  const events = result.stdout.trimEnd().split('\n').map(parseOutputLine);
+  const terminalResult = terminalOpenPResult(events);
+
+  assert.equal(result.code, 0);
+  assert.equal(result.stderr, '');
+  assert.deepEqual(events.map((event) => event.openp.form), ['result']);
+  assert.deepEqual(terminalResult.output.answer, ['Conversation too short to compact.']);
+  assert.deepEqual(terminalResult.output.toolCall, []);
+  assert.deepEqual(terminalResult.output.toolResult, []);
+});
+
 test('kiro streaming snapshot accumulates chunks and result matches streamed answer', async () => {
   const repoRoot = process.cwd();
   const tsxBin = join(repoRoot, 'node_modules', '.bin', 'tsx');

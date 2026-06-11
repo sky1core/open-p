@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync } from 'node:fs';
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { runKiroAcp } from '../src/backends/kiro/acp-runner.js';
 import { isAbortError } from '../src/core/abort.js';
 import { EXIT_CODES, OpenPError } from '../src/core/errors.js';
@@ -18,6 +18,36 @@ function env(behavior = 'success'): NodeJS.ProcessEnv {
     OPENP_FAKE_KIRO_BEHAVIOR: behavior,
     OPENP_FAKE_KIRO_WRITE_SESSION_LOG: '1',
   };
+}
+
+async function writeExistingKiroSessionLog(testEnv: NodeJS.ProcessEnv): Promise<string> {
+  const home = testEnv.HOME;
+  if (!home) {
+    throw new Error('test HOME is required');
+  }
+  const logPath = join(home, '.kiro', 'sessions', 'cli', `${FAKE_KIRO_SESSION_ID}.jsonl`);
+  await mkdir(dirname(logPath), { recursive: true });
+  await writeFile(logPath, [
+    JSON.stringify({
+      version: 'v1',
+      kind: 'Prompt',
+      data: {
+        message_id: 'prompt-existing',
+        content: [{ kind: 'text', data: 'existing turn' }],
+        meta: { timestamp: 1 },
+      },
+    }),
+    JSON.stringify({
+      version: 'v1',
+      kind: 'AssistantMessage',
+      data: {
+        message_id: 'assistant-existing',
+        content: [{ kind: 'text', data: 'existing answer' }],
+      },
+    }),
+    '',
+  ].join('\n'));
+  return logPath;
 }
 
 test('runKiroAcp completes first turn and streams cumulative assistant text', async () => {
@@ -113,6 +143,146 @@ test('runKiroAcp returns result content from Kiro session log, not live streamin
 
   assert.deepEqual(intermediateTexts, ['draft ']);
   assert.equal(result.content, 'authoritative final');
+});
+
+test('runKiroAcp returns slash-command chunk result when Kiro writes no session log record', async () => {
+  const intermediateTexts: string[] = [];
+  const result = await runKiroAcp({
+    bin: FIXTURE,
+    args: ['acp'],
+    cwd: process.cwd(),
+    prompt: '  /compact now',
+    sessionId: null,
+    isFirstTurn: true,
+    timeoutMs: 5000,
+    trustAllTools: false,
+    env: env('slash-command'),
+    onAssistantText: (text) => intermediateTexts.push(text),
+  });
+
+  assert.equal(result.content, 'Conversation too short to compact.');
+  assert.equal(result.sessionId, FAKE_KIRO_SESSION_ID);
+  assert.equal(result.stopReason, 'end_turn');
+  assert.deepEqual(result.toolsUsed, []);
+  assert.equal(result.durationMs, null);
+  assert.equal(result.rawUsage, null);
+  assert.deepEqual(result.assistantEvents, []);
+  assert.deepEqual(intermediateTexts, ['Conversation too short to compact.']);
+});
+
+test('runKiroAcp returns resume slash-command chunk result when existing session log is unchanged', async () => {
+  const testEnv = env('slash-resume-command');
+  const logPath = await writeExistingKiroSessionLog(testEnv);
+  const beforeLog = await readFile(logPath, 'utf8');
+
+  const result = await runKiroAcp({
+    bin: FIXTURE,
+    args: ['acp'],
+    cwd: process.cwd(),
+    prompt: '/compact',
+    sessionId: FAKE_KIRO_SESSION_ID,
+    isFirstTurn: false,
+    timeoutMs: 5000,
+    trustAllTools: false,
+    env: testEnv,
+  });
+  const afterLog = await readFile(logPath, 'utf8');
+
+  assert.equal(result.content, 'Compacting conversation...');
+  assert.equal(result.sessionId, FAKE_KIRO_SESSION_ID);
+  assert.equal(afterLog, beforeLog);
+});
+
+test('runKiroAcp rejects resume slash-command chunk when no session log file exists', async () => {
+  await assert.rejects(
+    runKiroAcp({
+      bin: FIXTURE,
+      args: ['acp'],
+      cwd: process.cwd(),
+      prompt: '/compact',
+      sessionId: FAKE_KIRO_SESSION_ID,
+      isFirstTurn: false,
+      timeoutMs: 5000,
+      trustAllTools: false,
+      env: env('slash-resume-command'),
+    }),
+    (error) => error instanceof OpenPError &&
+      error.exitCode === EXIT_CODES.sessionLogNotFound &&
+      error.reasonCode === 'no_candidate',
+  );
+});
+
+test('runKiroAcp does not promote non-slash chunks when session log exists but has no scoped result', async () => {
+  await assert.rejects(
+    runKiroAcp({
+      bin: FIXTURE,
+      args: ['acp'],
+      cwd: process.cwd(),
+      prompt: 'compact now',
+      sessionId: null,
+      isFirstTurn: true,
+      timeoutMs: 5000,
+      trustAllTools: false,
+      env: env('chunk-without-log-result'),
+    }),
+    (error) => error instanceof OpenPError &&
+      error.exitCode === EXIT_CODES.protocolViolation &&
+      error.reasonCode === 'missing_completion',
+  );
+});
+
+test('runKiroAcp uses session-log result before slash-command chunk result', async () => {
+  const result = await runKiroAcp({
+    bin: FIXTURE,
+    args: ['acp'],
+    cwd: process.cwd(),
+    prompt: '/compact',
+    sessionId: null,
+    isFirstTurn: true,
+    timeoutMs: 5000,
+    trustAllTools: false,
+    env: env('slash-log-result'),
+  });
+
+  assert.equal(result.content, 'log sourced slash result');
+});
+
+test('runKiroAcp rejects slash-command chunk when scoped log has a record without a usable result', async () => {
+  await assert.rejects(
+    runKiroAcp({
+      bin: FIXTURE,
+      args: ['acp'],
+      cwd: process.cwd(),
+      prompt: '/compact',
+      sessionId: null,
+      isFirstTurn: true,
+      timeoutMs: 5000,
+      trustAllTools: false,
+      env: env('slash-record-no-result'),
+    }),
+    (error) => error instanceof OpenPError &&
+      error.exitCode === EXIT_CODES.protocolViolation &&
+      error.reasonCode === 'missing_completion',
+  );
+});
+
+test('runKiroAcp rejects slash-command turn when Kiro writes no log and no chunk', async () => {
+  await assert.rejects(
+    runKiroAcp({
+      bin: FIXTURE,
+      args: ['acp'],
+      cwd: process.cwd(),
+      prompt: '/compact',
+      sessionId: null,
+      isFirstTurn: true,
+      timeoutMs: 5000,
+      trustAllTools: false,
+      env: env('slash-empty-chunk'),
+    }),
+    (error) => error instanceof OpenPError &&
+      error.exitCode === EXIT_CODES.protocolViolation &&
+      error.reasonCode === 'missing_completion',
+  );
 });
 
 test('runKiroAcp waits for delayed Kiro session log within the turn timeout', async () => {

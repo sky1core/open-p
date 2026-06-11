@@ -123,6 +123,33 @@ for await (const line of input) {
   if (message.method === 'session/prompt') {
     const sessionId = message.params.sessionId;
     const promptText = message.params.prompt?.[0]?.text ?? '';
+    const slashPrompt = isSlashShapedPrompt(promptText);
+    if (slashPrompt && behavior === 'slash-command') {
+      sendAgentMessageChunk(sessionId, 'Conversation too short to compact.');
+      send({
+        jsonrpc: '2.0',
+        id: message.id,
+        result: { stopReason: 'end_turn' },
+      });
+      continue;
+    }
+    if (slashPrompt && behavior === 'slash-resume-command') {
+      sendAgentMessageChunk(sessionId, 'Compacting conversation...');
+      send({
+        jsonrpc: '2.0',
+        id: message.id,
+        result: { stopReason: 'end_turn' },
+      });
+      continue;
+    }
+    if (slashPrompt && behavior === 'slash-empty-chunk') {
+      send({
+        jsonrpc: '2.0',
+        id: message.id,
+        result: { stopReason: 'end_turn' },
+      });
+      continue;
+    }
     appendSessionLog(sessionId, {
       version: 'v1',
       kind: 'Prompt',
@@ -132,6 +159,32 @@ for await (const line of input) {
         meta: { timestamp: Math.floor(Date.now() / 1000) },
       },
     });
+    if (slashPrompt && behavior === 'slash-log-result') {
+      sendAgentMessageChunk(sessionId, 'Conversation too short to compact.');
+      appendSessionLog(sessionId, {
+        version: 'v1',
+        kind: 'AssistantMessage',
+        data: {
+          message_id: `assistant-${Date.now()}-slash-log`,
+          content: [{ kind: 'text', data: 'log sourced slash result' }],
+        },
+      });
+      send({
+        jsonrpc: '2.0',
+        id: message.id,
+        result: { stopReason: 'end_turn' },
+      });
+      continue;
+    }
+    if (slashPrompt && behavior === 'slash-record-no-result') {
+      sendAgentMessageChunk(sessionId, 'Conversation too short to compact.');
+      send({
+        jsonrpc: '2.0',
+        id: message.id,
+        result: { stopReason: 'end_turn' },
+      });
+      continue;
+    }
     if (behavior === 'error-after-interrupt' || behavior === 'error-after-terminate') {
       pendingPromptId = message.id;
       setInterval(() => undefined, 1000);
@@ -207,6 +260,15 @@ for await (const line of input) {
       });
       continue;
     }
+    if (behavior === 'chunk-without-log-result') {
+      sendAgentMessageChunk(sessionId, 'partial answer');
+      send({
+        jsonrpc: '2.0',
+        id: message.id,
+        result: { stopReason: 'end_turn' },
+      });
+      continue;
+    }
     if (behavior !== 'empty') {
       const assistantChunks = behavior === 'multi-chunk'
         ? ['alpha ', 'beta ', 'gamma']
@@ -233,17 +295,7 @@ for await (const line of input) {
         },
       });
       for (const chunk of assistantChunks) {
-        send({
-          jsonrpc: '2.0',
-          method: 'session/update',
-          params: {
-            sessionId,
-            update: {
-              sessionUpdate: 'agent_message_chunk',
-              content: { type: 'text', text: chunk },
-            },
-          },
-        });
+        sendAgentMessageChunk(sessionId, chunk);
       }
       const assistantLogEvent = behavior === 'tool-live-labels'
         ? {
@@ -321,6 +373,26 @@ function logSignal(signal) {
   if (signalLog) {
     appendFileSync(signalLog, `${signal}\n`);
   }
+}
+
+function sendAgentMessageChunk(sessionId, text) {
+  send({
+    jsonrpc: '2.0',
+    method: 'session/update',
+    params: {
+      sessionId,
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text },
+      },
+    },
+  });
+}
+
+function isSlashShapedPrompt(prompt) {
+  const firstLine = prompt.split(/\r?\n/, 1)[0] ?? '';
+  const firstToken = firstLine.trimStart().split(/\s+/, 1)[0] ?? '';
+  return firstToken.startsWith('/');
 }
 
 function appendSessionLog(sessionId, event) {

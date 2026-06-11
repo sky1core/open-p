@@ -11,6 +11,7 @@ import {
   readKiroSessionLogOffset,
   waitForKiroTurnResult,
 } from './session-log.js';
+import { isKiroSlashCommandPrompt } from './prompt-command.js';
 
 type JsonObject = Record<string, unknown>;
 type JsonRpcId = string | number;
@@ -139,6 +140,7 @@ class KiroAcpClient {
     if (!promptSessionId) {
       throw new OpenPError('Kiro ACP session id was not resolved before prompt', EXIT_CODES.protocolViolation);
     }
+    const isSlashCommandTurn = isKiroSlashCommandPrompt(this.options.prompt);
 
     const promptLogOffset = await readKiroSessionLogOffset(promptSessionId, this.options.env);
     this.throwIfInterruptedOrTimedOut();
@@ -153,25 +155,37 @@ class KiroAcpClient {
     this.throwIfInterruptedOrTimedOut();
     this.completed = true;
 
-    const turnResult = await waitForKiroTurnResult({
-      sessionId: promptSessionId,
-      fromOffset: promptLogOffset,
-      env: this.options.env,
-      deadlineMs: Math.min(
-        timeoutDeadlineMs ?? Number.POSITIVE_INFINITY,
-        Date.now() + KIRO_SESSION_LOG_FLUSH_GRACE_MS,
-      ),
-      throwIfStopped: () => this.throwIfInterruptedOrTimedOut(),
-    });
+    let turnResult: Awaited<ReturnType<typeof waitForKiroTurnResult>>;
+    try {
+      turnResult = await waitForKiroTurnResult({
+        sessionId: promptSessionId,
+        fromOffset: promptLogOffset,
+        env: this.options.env,
+        deadlineMs: Math.min(
+          timeoutDeadlineMs ?? Number.POSITIVE_INFINITY,
+          Date.now() + KIRO_SESSION_LOG_FLUSH_GRACE_MS,
+        ),
+        throwIfStopped: () => this.throwIfInterruptedOrTimedOut(),
+      });
+    } catch (error: unknown) {
+      // The missing-log-file relay leg is fresh-turn-only: a loaded session's log must already exist,
+      // so a resume turn without any log file is an abnormal state and keeps the existing failure.
+      if (isSlashCommandTurn && this.options.isFirstTurn && isMissingKiroTurnResultCandidate(error)) {
+        const slashResult = this.buildSlashCommandTurnResult(promptSessionId, promptResult);
+        if (slashResult) return slashResult;
+        throw this.buildMissingScopedTurnResultError();
+      }
+      throw error;
+    }
     this.throwIfInterruptedOrTimedOut();
 
     const hasResultArtifacts = hasToolArtifacts(turnResult.assistantEvents);
     if (!turnResult.text && !hasResultArtifacts) {
-      throw new OpenPError(
-        'Kiro session log did not contain a scoped turn result',
-        EXIT_CODES.protocolViolation,
-        ARTIFACT_REJECTION_REASONS.missingCompletion,
-      );
+      const slashResult = isSlashCommandTurn && !turnResult.sawScopedRecords
+        ? this.buildSlashCommandTurnResult(promptSessionId, promptResult)
+        : null;
+      if (slashResult) return slashResult;
+      throw this.buildMissingScopedTurnResultError();
     }
 
     return {
@@ -555,6 +569,34 @@ class KiroAcpClient {
     return null;
   }
 
+  private buildSlashCommandTurnResult(
+    sessionId: string,
+    promptResult: JsonObject,
+  ): KiroAcpRunResult | null {
+    if (!this.completed || this.assistantText.length === 0) {
+      return null;
+    }
+    return {
+      content: this.assistantText,
+      sessionId,
+      stopReason: typeof promptResult.stopReason === 'string' ? promptResult.stopReason : null,
+      toolsUsed: [],
+      durationMs: this.metadataDurationMs,
+      rawUsage: this.latestMetadata,
+      rawEventCount: this.rawEventCount,
+      intermediateTextCount: this.intermediateTextCount,
+      assistantEvents: [],
+    };
+  }
+
+  private buildMissingScopedTurnResultError(): OpenPError {
+    return new OpenPError(
+      'Kiro session log did not contain a scoped turn result',
+      EXIT_CODES.protocolViolation,
+      ARTIFACT_REJECTION_REASONS.missingCompletion,
+    );
+  }
+
 }
 
 interface PendingRequest {
@@ -579,6 +621,12 @@ function hasToolArtifacts(events: readonly AssistantEventSnapshot[]): boolean {
       return type === 'tool_use' || type === 'server_tool_use' || type === 'tool_result';
     });
   });
+}
+
+function isMissingKiroTurnResultCandidate(error: unknown): boolean {
+  return error instanceof OpenPError &&
+    error.exitCode === EXIT_CODES.sessionLogNotFound &&
+    error.reasonCode === ARTIFACT_REJECTION_REASONS.noCandidate;
 }
 
 function isErrorCode(error: unknown, code: string): boolean {
