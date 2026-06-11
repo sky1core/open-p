@@ -12,6 +12,7 @@ type KiroPromptEventClassification = 'caller' | 'continuation' | 'unsupported' |
 type KiroTurnResultRead = {
   readonly logFound: boolean;
   readonly size: number | null;
+  readonly sawScopedRecords: boolean;
   readonly text: string | null;
   readonly assistantEvents: readonly AssistantEventSnapshot[];
   readonly toolsUsed: readonly string[];
@@ -63,24 +64,34 @@ export async function waitForKiroTurnResult(options: {
   readonly intervalMs?: number;
   readonly throwIfStopped?: () => void;
 }): Promise<{
+  readonly sawScopedRecords: boolean;
   readonly text: string | null;
   readonly assistantEvents: readonly AssistantEventSnapshot[];
   readonly toolsUsed: readonly string[];
 }> {
   const intervalMs = options.intervalMs ?? 50;
-  let lastResult: { text: string | null; assistantEvents: readonly AssistantEventSnapshot[]; toolsUsed: readonly string[] } = {
+  let lastResult: {
+    sawScopedRecords: boolean;
+    text: string | null;
+    assistantEvents: readonly AssistantEventSnapshot[];
+    toolsUsed: readonly string[];
+  } = {
+    sawScopedRecords: false,
     text: null,
     assistantEvents: [],
     toolsUsed: [],
   };
   let sawLog = false;
+  let sawScopedRecords = false;
 
   for (;;) {
     options.throwIfStopped?.();
     const snapshot = await readKiroTurnResultText(options.sessionId, options.fromOffset, options.env);
     sawLog ||= snapshot.logFound;
+    sawScopedRecords ||= snapshot.sawScopedRecords;
     if (snapshot.text !== null || snapshot.assistantEvents.length > 0) {
       lastResult = {
+        sawScopedRecords,
         text: snapshot.text,
         assistantEvents: snapshot.assistantEvents,
         toolsUsed: snapshot.toolsUsed,
@@ -99,7 +110,10 @@ export async function waitForKiroTurnResult(options: {
           ARTIFACT_REJECTION_REASONS.noCandidate,
         );
       }
-      return lastResult;
+      return {
+        ...lastResult,
+        sawScopedRecords,
+      };
     }
     await new Promise((resolve) => setTimeout(resolve, Math.min(intervalMs, options.deadlineMs - now)));
   }
@@ -112,21 +126,44 @@ async function readKiroTurnResultText(
 ): Promise<KiroTurnResultRead> {
   const logPath = resolveKiroSessionLogPath(sessionId, env);
   if (!logPath) {
-    return { logFound: false, size: null, text: null, assistantEvents: [], toolsUsed: [] };
+    return {
+      logFound: false,
+      size: null,
+      sawScopedRecords: false,
+      text: null,
+      assistantEvents: [],
+      toolsUsed: [],
+    };
   }
 
   let size: number;
   try {
     size = (await stat(logPath)).size;
   } catch {
-    return { logFound: false, size: null, text: null, assistantEvents: [], toolsUsed: [] };
+    return {
+      logFound: false,
+      size: null,
+      sawScopedRecords: false,
+      text: null,
+      assistantEvents: [],
+      toolsUsed: [],
+    };
   }
   if (size <= fromOffset) {
-    return { logFound: true, size, text: null, assistantEvents: [], toolsUsed: [] };
+    return {
+      logFound: true,
+      size,
+      sawScopedRecords: false,
+      text: null,
+      assistantEvents: [],
+      toolsUsed: [],
+    };
   }
-  const result = extractKiroTurnResult(await readTextFromOffset(logPath, fromOffset, size));
+  const rawLogSegment = await readTextFromOffset(logPath, fromOffset, size);
+  const result = extractKiroTurnResult(rawLogSegment);
   return {
     logFound: true,
+    sawScopedRecords: containsParsedKiroRecord(rawLogSegment),
     text: result.text,
     assistantEvents: result.assistantEvents,
     toolsUsed: result.toolsUsed,
@@ -213,6 +250,24 @@ export function extractKiroTurnResult(rawLogSegment: string): {
     assistantEvents,
     toolsUsed: [...toolsUsed],
   };
+}
+
+function containsParsedKiroRecord(rawLogSegment: string): boolean {
+  for (const rawLine of rawLogSegment.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line) {
+      continue;
+    }
+    try {
+      const parsed: unknown = JSON.parse(line);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return true;
+      }
+    } catch {
+      continue;
+    }
+  }
+  return false;
 }
 
 function classifyKiroPromptEvent(event: JsonObject): KiroPromptEventClassification {
@@ -403,4 +458,3 @@ function readTextFromOffset(path: string, offset: number, size: number): Promise
     });
   });
 }
-
