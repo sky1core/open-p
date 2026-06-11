@@ -1008,6 +1008,50 @@ test('does not treat tool_result, meta, or local command user events as caller t
   assert.equal(toolResultContent[0].content, 'tool output');
 });
 
+test('keeps seeded local-command prompt ids after the caller user turn', () => {
+  const lines = [
+    userLine('real prompt'),
+    JSON.stringify({
+      type: 'user',
+      promptId: 'compact-command',
+      message: {
+        role: 'user',
+        content: '<local-command-stderr>late compact diagnostic</local-command-stderr>',
+      },
+    }),
+    assistantLine([{ type: 'text', text: 'answer after late transcript' }], undefined, 'end_turn'),
+    durationLine(10),
+  ];
+
+  const result = parseClaudeCodeJsonlTurn(lines, TURN_ID, {
+    initialLocalCommandTranscriptPromptIds: new Set(['compact-command']),
+  });
+
+  assert.equal(result?.text, 'answer after late transcript');
+});
+
+test('keeps intermediate assistant content across late seeded local-command transcript events', () => {
+  const lines = [
+    userLine('real prompt'),
+    assistantLine([{ type: 'text', text: 'stream before late transcript' }]),
+    JSON.stringify({
+      type: 'user',
+      promptId: 'compact-command',
+      message: {
+        role: 'user',
+        content: '<local-command-stderr>late compact diagnostic</local-command-stderr>',
+      },
+    }),
+  ];
+
+  const content = extractClaudeCodeIntermediateContent(lines, {
+    includeTerminalAssistant: true,
+    initialLocalCommandTranscriptPromptIds: new Set(['compact-command']),
+  });
+
+  assert.equal(content.text, 'stream before late transcript');
+});
+
 test('treats local-command-looking prompt text as caller input without local-command caveat linkage', () => {
   const result = parseClaudeCodeJsonlTurn([
     userLine('<command-name>/compact</command-name>\n<command-message>compact</command-message>'),

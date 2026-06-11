@@ -240,7 +240,7 @@ test('single-turn backend rejects open-p claude command before starting PTY', as
   assert.equal(providerStarted, false);
 });
 
-test('single-turn backend retries prompt submission after pre-caller local command consumes the first submit', async () => {
+test('single-turn backend returns local command output without retrying submission', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'openp-claude-adapter-retry-'));
   const fakeClaude = join(dir, 'claude');
   const stateRoot = join(dir, 'state');
@@ -266,7 +266,7 @@ test('single-turn backend retries prompt submission after pre-caller local comma
     const result = await backend.runTurn(
       {
         turnId: '22222222-2222-4222-8222-222222222222',
-        prompt: 'hello after compact',
+        prompt: '/compact',
         jsonSchema: null,
       },
       {
@@ -283,15 +283,39 @@ test('single-turn backend retries prompt submission after pre-caller local comma
       },
     );
 
-    assert.equal(result.text, 'single-turn retry result');
+    assert.equal(result.text, 'Compacted (ctrl+o to see full summary)');
     assert.equal(result.sessionId, sessionId);
-    assert.equal(session.submitCount, 2);
-    assert.deepEqual(session.writes, ['hello after compact', 'hello after compact']);
+    assert.equal(session.submitCount, 1);
+    assert.deepEqual(session.writes, ['/compact']);
   } finally {
     restoreEnv('PATH', previousPath);
     restoreEnv('XDG_STATE_HOME', previousStateRoot);
     restoreEnv('HOME', previousHome);
   }
+});
+
+test('single-turn recovery fails closed instead of retyping when no input draft is visible', async () => {
+  await withSingleTurnBackend(
+    'openp-claude-adapter-retry-no-draft-',
+    (logPath, cwd, sessionId) => new PreCallerLocalCommandThenTurnSession(logPath, cwd, sessionId),
+    async ({ backend, cwd, session, sessionId }) => {
+      await assert.rejects(
+        () => backend.runTurn(
+          {
+            turnId: '22222222-2222-4222-8222-222222222227',
+            prompt: 'hello after compact',
+            jsonSchema: null,
+          },
+          adapterRunOptions(cwd, sessionId, 12_000),
+        ),
+        (error) => error instanceof OpenPError &&
+          error.exitCode === EXIT_CODES.protocolViolation &&
+          error.reasonCode === 'missing_turn_boundary',
+      );
+      assert.equal(session.submitCount, 1);
+      assert.deepEqual(session.writes, ['hello after compact']);
+    },
+  );
 });
 
 test('single-turn retry submits an existing input draft instead of writing the prompt twice', async () => {
@@ -315,7 +339,29 @@ test('single-turn retry submits an existing input draft instead of writing the p
       );
 
       assert.equal(result.text, 'single-turn retry result');
-      assert.equal(session.submitCount, 2);
+      assert.equal(session.submitCount >= 1, true);
+      assert.equal(session.submitCount <= 2, true);
+      assert.deepEqual(session.writes, ['hello after compact']);
+    },
+  );
+});
+
+test('single-turn recovery enters wait without input readiness and picks up caller turn without submitting draft', async () => {
+  await withSingleTurnBackend(
+    'openp-claude-adapter-retry-late-caller-',
+    (logPath, cwd, sessionId) => new PreCallerLocalCommandThenLateCallerSession(logPath, cwd, sessionId),
+    async ({ backend, cwd, session, sessionId }) => {
+      const result = await backend.runTurn(
+        {
+          turnId: '22222222-2222-4222-8222-222222222228',
+          prompt: 'hello after compact',
+          jsonSchema: null,
+        },
+        adapterRunOptions(cwd, sessionId, 5_000),
+      );
+
+      assert.equal(result.text, 'single-turn late caller result');
+      assert.equal(session.submitCount, 1);
       assert.deepEqual(session.writes, ['hello after compact']);
     },
   );
@@ -324,7 +370,13 @@ test('single-turn retry submits an existing input draft instead of writing the p
 test('single-turn retry keeps the original turn timeout budget', async () => {
   await withSingleTurnBackend(
     'openp-claude-adapter-retry-timeout-',
-    (logPath, cwd, sessionId) => new PreCallerLocalCommandThenTurnSession(logPath, cwd, sessionId, 2_000),
+    (logPath, cwd, sessionId) => new PreCallerLocalCommandThenTurnSession(
+      logPath,
+      cwd,
+      sessionId,
+      2_000,
+      '❯ hello after compact',
+    ),
     async ({ backend, cwd, session, sessionId }) => {
       await assert.rejects(
         () => backend.runTurn(
@@ -337,8 +389,8 @@ test('single-turn retry keeps the original turn timeout budget', async () => {
         ),
         (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.timeout,
       );
-      assert.equal(session.submitCount >= 1, true);
-      assert.equal(session.submitCount <= 2, true);
+      assert.equal(session.submitCount, 2);
+      assert.deepEqual(session.writes, ['hello after compact']);
     },
   );
 });
@@ -489,6 +541,129 @@ class PreCallerLocalCommandThenTurnSession implements PtySession {
       return this.draftLineAfterFirstSubmit;
     }
     return '❯';
+  }
+}
+
+class PreCallerLocalCommandThenLateCallerSession implements PtySession {
+  readonly id = 'fake-pty';
+  submitCount = 0;
+  readonly writes: string[] = [];
+  private alive = true;
+  private lastWrite = '';
+  private lateCallerAppended = false;
+
+  constructor(
+    private readonly logPath: string,
+    private readonly cwd: string,
+    private readonly sessionId: string,
+  ) {}
+
+  async write(input: string): Promise<void> {
+    this.lastWrite = input;
+    this.writes.push(input);
+  }
+
+  async submit(): Promise<void> {
+    this.submitCount += 1;
+    if (this.submitCount !== 1) {
+      throw new Error('recovery must not submit after the local-command prelude');
+    }
+    await appendFile(this.logPath, [
+      eventLine({
+        type: 'system',
+        subtype: 'compact_boundary',
+        cwd: this.cwd,
+        sessionId: this.sessionId,
+        content: 'Conversation compacted',
+      }),
+      eventLine({
+        type: 'user',
+        cwd: this.cwd,
+        sessionId: this.sessionId,
+        promptId: 'compact-command',
+        isMeta: true,
+        message: { content: '<local-command-caveat>generated while running local commands</local-command-caveat>' },
+      }),
+      eventLine({
+        type: 'user',
+        cwd: this.cwd,
+        sessionId: this.sessionId,
+        promptId: 'compact-command',
+        message: { content: '<command-name>/compact</command-name>\n<command-message>compact</command-message>' },
+      }),
+      eventLine({
+        type: 'user',
+        cwd: this.cwd,
+        sessionId: this.sessionId,
+        promptId: 'compact-command',
+        message: { content: '<local-command-stdout>Compacted (ctrl+o to see full summary)</local-command-stdout>' },
+      }),
+    ].join('\n') + '\n');
+  }
+
+  async interrupt(): Promise<void> {}
+
+  async terminate(signal: NodeJS.Signals = 'SIGTERM'): Promise<void> {
+    void signal;
+    this.alive = false;
+  }
+
+  async exit(): Promise<void> {
+    this.alive = false;
+  }
+
+  async isAlive(): Promise<boolean> {
+    return this.alive;
+  }
+
+  async captureText(): Promise<string> {
+    if (this.submitCount === 0) {
+      return '❯';
+    }
+    return 'Claude Code v\nGenerating response...';
+  }
+
+  async captureCursorLine(): Promise<string> {
+    if (this.submitCount === 0) {
+      return '❯';
+    }
+    if (this.submitCount === 1 && !this.lateCallerAppended) {
+      this.lateCallerAppended = true;
+      await appendFile(this.logPath, [
+        eventLine({
+          type: 'user',
+          cwd: this.cwd,
+          sessionId: this.sessionId,
+          uuid: 'active-user',
+          message: { content: this.lastWrite },
+        }),
+        eventLine({
+          type: 'user',
+          cwd: this.cwd,
+          sessionId: this.sessionId,
+          promptId: 'compact-command',
+          message: { content: '<local-command-stderr>late compact diagnostic</local-command-stderr>' },
+        }),
+        eventLine({
+          type: 'assistant',
+          cwd: this.cwd,
+          sessionId: this.sessionId,
+          parentUuid: 'active-user',
+          message: {
+            content: [{ type: 'text', text: 'single-turn late caller result' }],
+            stop_reason: 'end_turn',
+          },
+        }),
+        eventLine({
+          type: 'system',
+          subtype: 'turn_duration',
+          cwd: this.cwd,
+          sessionId: this.sessionId,
+          durationMs: 10,
+        }),
+      ].join('\n') + '\n');
+    }
+    return 'Generating response...';
   }
 }
 

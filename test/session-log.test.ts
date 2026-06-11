@@ -7,6 +7,7 @@ import test from 'node:test';
 import {
   resolveClaudeCodeProjectLogDir,
   resolveClaudeCodeSessionLogPath,
+  hasClaudeCodeCallerUserTurnInSessionLogSegment,
   readNewText,
   snapshotClaudeCodeSessionLogPaths,
   waitForClaudeCodeTurnResult,
@@ -542,6 +543,502 @@ test('first-turn session log discovery waits through pre-caller local-command tr
       await rm(logDir, { recursive: true, force: true });
     }
   });
+});
+
+test('local command prompt returns stdout as a successful Claude turn result', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-session-log-local-command-'));
+  const logPath = join(dir, 'session.jsonl');
+  const sessionId = randomUUID();
+  const intermediate: string[] = [];
+  await writeFile(logPath, [
+    line({
+      type: 'user',
+      sessionId,
+      promptId: 'compact-command',
+      isMeta: true,
+      message: { content: '<local-command-caveat>Caveat</local-command-caveat>' },
+    }),
+    line({
+      type: 'user',
+      sessionId,
+      promptId: 'compact-command',
+      message: {
+        content: '<command-name>/compact</command-name>\n            <command-message>compact</command-message>',
+      },
+    }),
+    line({
+      type: 'user',
+      sessionId,
+      promptId: 'compact-command',
+      message: {
+        content: '<local-command-stdout>\u001b[2mCompacted (ctrl+o to see full summary)\u001b[22m</local-command-stdout>',
+      },
+    }),
+  ].join(''));
+
+  const result = await waitForClaudeCodeTurnResult({
+    sessionId,
+    turnId: 'turn-1',
+    timeoutMs: 10_000,
+    initialOffset: 0,
+    knownLogPath: logPath,
+    promptLocalCommandName: '/compact',
+    isBackendAlive: async () => true,
+    onIntermediateText: (text) => intermediate.push(text),
+  });
+
+  assert.equal(result.text, 'Compacted (ctrl+o to see full summary)');
+  assert.equal(result.sessionId, sessionId);
+  assert.equal(result.reasoningContent, null);
+  assert.deepEqual(result.assistantEvents, []);
+  assert.equal(result.diagnostics.durationMs, null);
+  assert.equal(result.diagnostics.stopReason, null);
+  assert.deepEqual(result.diagnostics.toolsUsed, []);
+  assert.deepEqual(result.diagnostics.usage, {
+    inputTokens: null,
+    cacheReadInputTokens: null,
+    outputTokens: null,
+  });
+  assert.equal(result.diagnostics.rawUsage, null);
+  assert.equal(result.diagnostics.model, null);
+  assert.equal(result.diagnostics.contextWindow, null);
+  assert.equal(result.diagnostics.lastSubturnUsage, null);
+  assert.equal(result.diagnostics.lastSubturnContextTokens, null);
+  assert.equal(result.diagnostics.rawEventCount, 3);
+  assert.deepEqual(intermediate, []);
+});
+
+test('local command prompt attributes system local_command output to the previous command group', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-session-log-local-command-'));
+  const logPath = join(dir, 'session.jsonl');
+  const sessionId = randomUUID();
+  await writeFile(logPath, [
+    line({
+      type: 'user',
+      sessionId,
+      promptId: 'compact-command',
+      isMeta: true,
+      message: { content: '<local-command-caveat>Caveat</local-command-caveat>' },
+    }),
+    line({
+      type: 'user',
+      sessionId,
+      promptId: 'compact-command',
+      message: {
+        content: '<command-name>/compact</command-name>\n            <command-message>compact</command-message>',
+      },
+    }),
+    line({
+      type: 'system',
+      subtype: 'local_command',
+      sessionId,
+      content: '<local-command-stdout>Not enough messages to compact.</local-command-stdout>',
+    }),
+  ].join(''));
+
+  const result = await waitForClaudeCodeTurnResult({
+    sessionId,
+    turnId: 'turn-1',
+    timeoutMs: 10_000,
+    initialOffset: 0,
+    knownLogPath: logPath,
+    promptLocalCommandName: '/compact',
+    isBackendAlive: async () => true,
+  });
+
+  assert.equal(result.text, 'Not enough messages to compact.');
+  assert.equal(result.sessionId, sessionId);
+});
+
+test('local command result backfills session id from command-name event', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-session-log-local-command-'));
+  const logPath = join(dir, 'session.jsonl');
+  const sessionId = randomUUID();
+  await writeFile(logPath, [
+    line({
+      type: 'user',
+      promptId: 'compact-command',
+      isMeta: true,
+      message: { content: '<local-command-caveat>Caveat</local-command-caveat>' },
+    }),
+    line({
+      type: 'user',
+      sessionId,
+      promptId: 'compact-command',
+      message: {
+        content: '<command-name>/compact</command-name>\n            <command-message>compact</command-message>',
+      },
+    }),
+    line({
+      type: 'user',
+      promptId: 'compact-command',
+      message: {
+        content: '<local-command-stdout>Compacted (ctrl+o to see full summary)</local-command-stdout>',
+      },
+    }),
+  ].join(''));
+
+  const result = await waitForClaudeCodeTurnResult({
+    sessionId,
+    turnId: 'turn-1',
+    timeoutMs: 10_000,
+    initialOffset: 0,
+    knownLogPath: logPath,
+    promptLocalCommandName: '/compact',
+    isBackendAlive: async () => true,
+  });
+
+  assert.equal(result.text, 'Compacted (ctrl+o to see full summary)');
+  assert.equal(result.sessionId, sessionId);
+});
+
+test('local command turn does not publish pre-caller assistant callbacks', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-session-log-local-command-'));
+  const logPath = join(dir, 'session.jsonl');
+  const sessionId = randomUUID();
+  const callbacks: string[] = [];
+  await writeFile(logPath, [
+    line({
+      type: 'assistant',
+      sessionId,
+      message: {
+        content: [
+          { type: 'thinking', thinking: 'pre caller reasoning' },
+          { type: 'text', text: 'pre caller text' },
+        ],
+      },
+    }),
+    line({
+      type: 'user',
+      sessionId,
+      promptId: 'compact-command',
+      isMeta: true,
+      message: { content: '<local-command-caveat>Caveat</local-command-caveat>' },
+    }),
+    line({
+      type: 'user',
+      sessionId,
+      promptId: 'compact-command',
+      message: {
+        content: '<command-name>/compact</command-name>\n            <command-message>compact</command-message>',
+      },
+    }),
+    line({
+      type: 'user',
+      sessionId,
+      promptId: 'compact-command',
+      message: {
+        content: '<local-command-stdout>Compacted (ctrl+o to see full summary)</local-command-stdout>',
+      },
+    }),
+  ].join(''));
+
+  const result = await waitForClaudeCodeTurnResult({
+    sessionId,
+    turnId: 'turn-1',
+    timeoutMs: 10_000,
+    initialOffset: 0,
+    knownLogPath: logPath,
+    promptLocalCommandName: '/compact',
+    isBackendAlive: async () => true,
+    onIntermediateText: (text) => callbacks.push(`text:${text}`),
+    onIntermediateReasoning: (text) => callbacks.push(`reasoning:${text}`),
+    onIntermediateAssistantSnapshot: () => callbacks.push('snapshot'),
+  });
+
+  assert.equal(result.text, 'Compacted (ctrl+o to see full summary)');
+  assert.deepEqual(callbacks, []);
+});
+
+test('active streaming starts at caller user turn and excludes pre-caller assistant text', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-session-log-'));
+  const logPath = join(dir, 'session.jsonl');
+  await writeFile(logPath, [
+    line({
+      type: 'assistant',
+      message: {
+        id: 'pre-caller',
+        content: [
+          { type: 'thinking', thinking: 'pre caller reasoning' },
+          { type: 'text', text: 'pre caller text' },
+        ],
+      },
+    }),
+    line({
+      type: 'user',
+      message: { content: 'real prompt' },
+    }),
+    line({
+      type: 'assistant',
+      message: {
+        id: 'active-answer',
+        content: [
+          { type: 'thinking', thinking: 'active reasoning' },
+          { type: 'text', text: 'active answer' },
+        ],
+        stop_reason: 'end_turn',
+      },
+    }),
+    line({ type: 'system', subtype: 'turn_duration', durationMs: 12 }),
+  ].join(''));
+  const callbacks: string[] = [];
+
+  const result = await waitForClaudeCodeTurnResult({
+    sessionId: '11111111-1111-4111-8111-111111111111',
+    turnId: 'turn-1',
+    timeoutMs: 10_000,
+    initialOffset: 0,
+    knownLogPath: logPath,
+    isBackendAlive: async () => true,
+    onIntermediateText: (text) => callbacks.push(`text:${text}`),
+    onIntermediateReasoning: (text) => callbacks.push(`reasoning:${text}`),
+    onIntermediateAssistantSnapshot: (snapshot) => {
+      const content = snapshot.message.content;
+      const text = Array.isArray(content) &&
+        typeof content[1] === 'object' &&
+        content[1] !== null &&
+        !Array.isArray(content[1])
+        ? (content[1] as Record<string, unknown>).text
+        : null;
+      callbacks.push(`snapshot:${String(text)}`);
+    },
+  });
+
+  assert.equal(result.text, 'active answer');
+  assert.deepEqual(callbacks, [
+    'reasoning:active reasoning',
+    'text:active answer',
+    'snapshot:active answer',
+  ]);
+});
+
+test('normal prompt never matches a local-command group that has no command-name', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-session-log-local-command-'));
+  const logPath = join(dir, 'session.jsonl');
+  const sessionId = randomUUID();
+  await writeFile(logPath, [
+    line({
+      type: 'user',
+      sessionId,
+      promptId: 'orphan-transcript',
+      isMeta: true,
+      message: { content: '<local-command-caveat>Caveat</local-command-caveat>' },
+    }),
+    line({
+      type: 'user',
+      sessionId,
+      promptId: 'orphan-transcript',
+      message: {
+        content: '<local-command-stdout>orphan output</local-command-stdout>',
+      },
+    }),
+  ].join(''));
+
+  await assert.rejects(
+    () => waitForClaudeCodeTurnResult({
+      sessionId,
+      turnId: 'turn-1',
+      timeoutMs: 10_000,
+      initialOffset: 0,
+      knownLogPath: logPath,
+      isBackendAlive: async () => true,
+    }),
+    (error) => error instanceof OpenPError &&
+      error.exitCode === EXIT_CODES.protocolViolation &&
+      error.reasonCode === 'missing_turn_boundary',
+  );
+});
+
+test('recovery attempt fails after bounded local-command idle grace without new log events', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-session-log-local-command-'));
+  const logPath = join(dir, 'session.jsonl');
+  await writeFile(logPath, '');
+
+  await assert.rejects(
+    () => waitForClaudeCodeTurnResult({
+      sessionId: '11111111-1111-4111-8111-111111111111',
+      turnId: 'turn-1',
+      timeoutMs: 10_000,
+      initialOffset: 0,
+      knownLogPath: logPath,
+      recoveryAttempt: true,
+      recoveryMissingCallerLogIdleGraceMs: 25,
+      isBackendAlive: async () => true,
+    }),
+    (error) => error instanceof OpenPError &&
+      error.exitCode === EXIT_CODES.protocolViolation &&
+      error.reasonCode === 'missing_turn_boundary',
+  );
+});
+
+test('recovery caller scan preserves local-command prompt ids from the failed attempt', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-session-log-local-command-'));
+  const logPath = join(dir, 'session.jsonl');
+  const prefix = line({
+    type: 'user',
+    promptId: 'compact-command',
+    isMeta: true,
+    message: { content: '<local-command-caveat>Caveat</local-command-caveat>' },
+  });
+  await writeFile(logPath, prefix + line({
+    type: 'user',
+    promptId: 'compact-command',
+    message: {
+      content: '<local-command-stdout>late compact output</local-command-stdout>',
+    },
+  }));
+
+  const hasCaller = await hasClaudeCodeCallerUserTurnInSessionLogSegment(
+    logPath,
+    Buffer.byteLength(prefix, 'utf8'),
+    new Set(['compact-command']),
+  );
+
+  assert.equal(hasCaller, false);
+});
+
+test('recovery wait preserves local-command prompt ids from the failed attempt', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-session-log-local-command-'));
+  const logPath = join(dir, 'session.jsonl');
+  const sessionId = randomUUID();
+  const prefix = line({
+    type: 'user',
+    sessionId,
+    promptId: 'compact-command',
+    isMeta: true,
+    message: { content: '<local-command-caveat>Caveat</local-command-caveat>' },
+  });
+  await writeFile(logPath, prefix + line({
+    type: 'user',
+    sessionId,
+    promptId: 'compact-command',
+    message: {
+      content: '<local-command-stdout>late compact output</local-command-stdout>',
+    },
+  }));
+
+  await assert.rejects(
+    () => waitForClaudeCodeTurnResult({
+      sessionId,
+      turnId: 'turn-1',
+      timeoutMs: 500,
+      initialOffset: Buffer.byteLength(prefix, 'utf8'),
+      knownLogPath: logPath,
+      recoveryAttempt: true,
+      recoveryMissingCallerLogIdleGraceMs: 25,
+      initialLocalCommandTranscriptPromptIds: new Set(['compact-command']),
+      isBackendAlive: async () => true,
+    }),
+    (error) => error instanceof OpenPError &&
+      error.exitCode === EXIT_CODES.protocolViolation &&
+      error.reasonCode === 'missing_turn_boundary',
+  );
+});
+
+test('recovery result parsing preserves local-command prompt ids from the failed attempt', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-session-log-local-command-'));
+  const logPath = join(dir, 'session.jsonl');
+  const sessionId = randomUUID();
+  const prefix = line({
+    type: 'user',
+    sessionId,
+    promptId: 'compact-command',
+    isMeta: true,
+    message: { content: '<local-command-caveat>Caveat</local-command-caveat>' },
+  });
+  await writeFile(logPath, prefix + [
+    line({
+      type: 'user',
+      sessionId,
+      promptId: 'compact-command',
+      message: {
+        content: '<local-command-stderr>late compact diagnostic</local-command-stderr>',
+      },
+    }),
+    line({
+      type: 'user',
+      sessionId,
+      uuid: 'active-user',
+      message: { content: 'real prompt' },
+    }),
+    line({
+      type: 'assistant',
+      sessionId,
+      parentUuid: 'active-user',
+      message: {
+        content: [{ type: 'text', text: 'active answer after late transcript' }],
+        stop_reason: 'end_turn',
+      },
+    }),
+    line({ type: 'system', subtype: 'turn_duration', sessionId, durationMs: 12 }),
+  ].join(''));
+
+  const result = await waitForClaudeCodeTurnResult({
+    sessionId,
+    turnId: 'turn-1',
+    timeoutMs: 500,
+    initialOffset: Buffer.byteLength(prefix, 'utf8'),
+    knownLogPath: logPath,
+    recoveryAttempt: true,
+    recoveryMissingCallerLogIdleGraceMs: 25,
+    initialLocalCommandTranscriptPromptIds: new Set(['compact-command']),
+    isBackendAlive: async () => true,
+  });
+
+  assert.equal(result.text, 'active answer after late transcript');
+});
+
+test('recovery result parsing preserves local-command prompt ids after the caller turn', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-session-log-local-command-'));
+  const logPath = join(dir, 'session.jsonl');
+  const sessionId = randomUUID();
+  const prefix = line({
+    type: 'user',
+    sessionId,
+    promptId: 'compact-command',
+    isMeta: true,
+    message: { content: '<local-command-caveat>Caveat</local-command-caveat>' },
+  });
+  await writeFile(logPath, prefix + [
+    line({
+      type: 'user',
+      sessionId,
+      uuid: 'active-user',
+      message: { content: 'real prompt' },
+    }),
+    line({
+      type: 'user',
+      sessionId,
+      promptId: 'compact-command',
+      message: {
+        content: '<local-command-stderr>late compact diagnostic</local-command-stderr>',
+      },
+    }),
+    line({
+      type: 'assistant',
+      sessionId,
+      parentUuid: 'active-user',
+      message: {
+        content: [{ type: 'text', text: 'active answer before late transcript' }],
+        stop_reason: 'end_turn',
+      },
+    }),
+    line({ type: 'system', subtype: 'turn_duration', sessionId, durationMs: 12 }),
+  ].join(''));
+
+  const result = await waitForClaudeCodeTurnResult({
+    sessionId,
+    turnId: 'turn-1',
+    timeoutMs: 500,
+    initialOffset: Buffer.byteLength(prefix, 'utf8'),
+    knownLogPath: logPath,
+    recoveryAttempt: true,
+    recoveryMissingCallerLogIdleGraceMs: 25,
+    initialLocalCommandTranscriptPromptIds: new Set(['compact-command']),
+    isBackendAlive: async () => true,
+  });
+
+  assert.equal(result.text, 'active answer before late transcript');
 });
 
 test('active turn waits through pre-caller compact transcript until caller prompt is logged', async () => {

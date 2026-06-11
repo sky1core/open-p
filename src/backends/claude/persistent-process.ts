@@ -24,6 +24,7 @@ import {
 import {
   findClaudeCodeSessionLog,
   getFileSize,
+  hasClaudeCodeCallerUserTurnInSessionLogSegment,
   isMissingCallerAfterLocalCommandError,
   readNewText,
   resolveClaudeCodeSessionLogPath,
@@ -41,6 +42,7 @@ import {
 import { createClaudePtyInterrupter } from './pty-interrupt.js';
 import { assertClaudeCodeBin } from './bin.js';
 import { createClaudeSessionLogIdleDebugLogger } from './diagnostics.js';
+import { extractPromptLocalCommandName } from './prompt-command.js';
 
 const PRE_CALLER_LOCAL_COMMAND_PROMPT_RETRY_LIMIT = 1;
 
@@ -165,31 +167,38 @@ export class PersistentClaudeCodeProcess implements ManagedBackendProcess {
           const turnDeadlineMs = options.timeoutMs === 0 ? null : Date.now() + options.timeoutMs;
           let retryLogPath: string | null = null;
           let retryInitialOffset: number | null = null;
+          let retryLocalCommandTranscriptPromptIds: ReadonlySet<string> = new Set();
+          const promptLocalCommandName = extractPromptLocalCommandName(prompt);
           for (let attempt = 0; ; attempt += 1) {
-            const readinessAttemptTimeoutMs = remainingTurnTimeoutMs(
-              turnDeadlineMs,
-              request.turnId,
-              () => {
-                interrupter.requestGracefulStop();
-              },
-            );
-            await waitForClaudeCodeInputReady(
-              this.pty,
-              readinessTimeoutMs(readinessAttemptTimeoutMs),
-              { confirmTrustPrompt: false },
-            );
-            if (!this.nativeSessionId && retryLogPath) {
+            if (retryLogPath) {
               this.sessionLogPath = retryLogPath;
             }
-            this.sessionLogPath = this.nativeSessionId
+            this.sessionLogPath = retryInitialOffset === null && this.nativeSessionId
               ? await findClaudeCodeSessionLog(this.nativeSessionId, this.cwd) ?? this.sessionLogPath
               : this.sessionLogPath;
-            const initialOffset = retryInitialOffset !== null &&
-              retryLogPath !== null &&
-              this.sessionLogPath === retryLogPath
-              ? retryInitialOffset
-              : await getFileSize(this.sessionLogPath ?? this.expectedLogPath);
-            await submitPromptForAttempt(this.pty, prompt, attempt);
+            const initialOffset = retryInitialOffset ?? await getFileSize(this.sessionLogPath ?? this.expectedLogPath);
+            if (attempt === 0) {
+              const readinessAttemptTimeoutMs = remainingTurnTimeoutMs(
+                turnDeadlineMs,
+                request.turnId,
+                () => {
+                  interrupter.requestGracefulStop();
+                },
+              );
+              await waitForClaudeCodeInputReady(
+                this.pty,
+                readinessTimeoutMs(readinessAttemptTimeoutMs),
+                { confirmTrustPrompt: false },
+              );
+              await submitPrompt(this.pty, prompt);
+            } else if (!(await hasCallerUserTurnAtRecoveryOffset(
+              this.sessionLogPath,
+              this.expectedLogPath,
+              initialOffset,
+              retryLocalCommandTranscriptPromptIds,
+            ))) {
+              await submitRecoveryDraftIfPresent(this.pty);
+            }
             const waitAttemptTimeoutMs = remainingTurnTimeoutMs(
               turnDeadlineMs,
               request.turnId,
@@ -215,6 +224,11 @@ export class PersistentClaudeCodeProcess implements ManagedBackendProcess {
                 onIntermediateText: (text) => {
                   publishJsonlIntermediateText(text);
                 },
+                promptLocalCommandName,
+                recoveryAttempt: attempt > 0,
+                initialLocalCommandTranscriptPromptIds: attempt > 0
+                  ? retryLocalCommandTranscriptPromptIds
+                  : undefined,
                 onIntermediateReasoning: (text, source, contentBlocks) => {
                   this.lastIntermediateReasoningText = text;
                   options.onIntermediateReasoning?.(text, source, contentBlocks);
@@ -254,10 +268,9 @@ export class PersistentClaudeCodeProcess implements ManagedBackendProcess {
               lastPublishedJsonlIntermediate = null;
               this.lastIntermediateText = null;
               this.lastIntermediateReasoningText = null;
-              if (!this.nativeSessionId && error.logPath) {
-                retryLogPath = error.logPath;
-                retryInitialOffset = error.nextOffset;
-              }
+              retryLogPath = error.logPath ?? this.sessionLogPath;
+              retryInitialOffset = error.nextOffset;
+              retryLocalCommandTranscriptPromptIds = error.localCommandTranscriptPromptIds;
             }
           }
         },
@@ -463,17 +476,38 @@ function remainingTurnTimeoutMs(
   return remainingMs;
 }
 
-async function submitPromptForAttempt(pty: PtySession, prompt: string, attempt: number): Promise<void> {
+async function submitPrompt(pty: PtySession, prompt: string): Promise<void> {
+  await pty.write(prompt);
+  await sleep(150);
+  await pty.submit();
+}
+
+async function hasCallerUserTurnAtRecoveryOffset(
+  sessionLogPath: string | null,
+  expectedLogPath: string | null,
+  initialOffset: number,
+  initialLocalCommandTranscriptPromptIds: ReadonlySet<string>,
+): Promise<boolean> {
+  const scanLogPath = sessionLogPath ?? expectedLogPath;
+  return scanLogPath !== null &&
+    await hasClaudeCodeCallerUserTurnInSessionLogSegment(
+      scanLogPath,
+      initialOffset,
+      initialLocalCommandTranscriptPromptIds,
+    );
+}
+
+async function submitRecoveryDraftIfPresent(pty: PtySession): Promise<boolean> {
   const cursorLine = await pty.captureCursorLine().catch(() => null);
-  const reuseExistingDraft = attempt > 0 &&
-    cursorLine !== null &&
-    isClaudeCodeInputPromptLine(cursorLine) &&
-    !isClaudeCodeEmptyInputPromptLine(cursorLine);
-  if (!reuseExistingDraft) {
-    await pty.write(prompt);
-    await sleep(150);
+  if (
+    cursorLine === null ||
+    !isClaudeCodeInputPromptLine(cursorLine) ||
+    isClaudeCodeEmptyInputPromptLine(cursorLine)
+  ) {
+    return false;
   }
   await pty.submit();
+  return true;
 }
 
 async function forcePtyStopWithEscalation(

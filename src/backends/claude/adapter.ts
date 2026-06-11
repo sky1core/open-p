@@ -17,6 +17,7 @@ import { rejectStructuredClaudeCodeBackendArgs } from './args-validation.js';
 import {
   findClaudeCodeSessionLog,
   getFileSize,
+  hasClaudeCodeCallerUserTurnInSessionLogSegment,
   isMissingCallerAfterLocalCommandError,
   resolveClaudeCodeSessionLogPath,
   snapshotClaudeCodeSessionLogPaths,
@@ -33,6 +34,7 @@ import {
   CLAUDE_CODE_BACKGROUND_SUPPRESSION_ENV,
 } from './launch-safety.js';
 import { createClaudeSessionLogIdleDebugLogger } from './diagnostics.js';
+import { extractPromptLocalCommandName } from './prompt-command.js';
 
 // The non-interactive PTY turn cannot survive tools that outlive the synchronous turn or that block on
 // interactive input. openp launches Claude with these suppressed (official contract — see
@@ -145,23 +147,18 @@ export class ClaudeCodeBackend implements Backend {
           const turnDeadlineMs = options.timeoutMs === 0 ? null : Date.now() + options.timeoutMs;
           let retryLogPath: string | null = null;
           let retryInitialOffset: number | null = null;
+          let retryLocalCommandTranscriptPromptIds: ReadonlySet<string> = new Set();
+          const promptLocalCommandName = extractPromptLocalCommandName(request.prompt);
           for (let attempt = 0; ; attempt += 1) {
-            const readinessAttemptTimeoutMs = remainingTurnTimeoutMs(
-              turnDeadlineMs,
-              request.turnId,
-              () => {
-                interrupter.requestGracefulStop();
-              },
-            );
-            await waitForClaudeCodeInputReady(pty, readinessTimeoutMs(readinessAttemptTimeoutMs));
-            const activeLogPath = nativeSessionId
-              ? await findClaudeCodeSessionLog(nativeSessionId, options.cwd) ?? existingLogPath
-              : retryLogPath ?? existingLogPath;
-            const initialOffset = retryInitialOffset !== null &&
-              retryLogPath !== null &&
-              activeLogPath === retryLogPath
-              ? retryInitialOffset
-              : await getFileSize(activeLogPath ?? expectedLogPath);
+            let activeLogPath: string | null;
+            if (retryInitialOffset !== null) {
+              activeLogPath = retryLogPath ?? existingLogPath;
+            } else if (nativeSessionId) {
+              activeLogPath = await findClaudeCodeSessionLog(nativeSessionId, options.cwd) ?? existingLogPath;
+            } else {
+              activeLogPath = retryLogPath ?? existingLogPath;
+            }
+            const initialOffset = retryInitialOffset ?? await getFileSize(activeLogPath ?? expectedLogPath);
             let lastPublishedIntermediate: string | null = null;
             const publishIntermediateText = (text: string): void => {
               if (!shouldPublishIntermediateText(text, lastPublishedIntermediate)) {
@@ -170,7 +167,24 @@ export class ClaudeCodeBackend implements Backend {
               lastPublishedIntermediate = text;
               options.onIntermediateText!(text, 'jsonl');
             };
-            await submitPromptForAttempt(pty, request.prompt, attempt);
+            if (attempt === 0) {
+              const readinessAttemptTimeoutMs = remainingTurnTimeoutMs(
+                turnDeadlineMs,
+                request.turnId,
+                () => {
+                  interrupter.requestGracefulStop();
+                },
+              );
+              await waitForClaudeCodeInputReady(pty, readinessTimeoutMs(readinessAttemptTimeoutMs));
+              await submitPrompt(pty, request.prompt);
+            } else if (!(await hasCallerUserTurnAtRecoveryOffset(
+              activeLogPath,
+              expectedLogPath,
+              initialOffset,
+              retryLocalCommandTranscriptPromptIds,
+            ))) {
+              await submitRecoveryDraftIfPresent(pty);
+            }
             const waitAttemptTimeoutMs = remainingTurnTimeoutMs(
               turnDeadlineMs,
               request.turnId,
@@ -204,6 +218,11 @@ export class ClaudeCodeBackend implements Backend {
                     }
                   : undefined,
                 onIntermediateAssistantSnapshot: options.onIntermediateAssistantSnapshot,
+                promptLocalCommandName,
+                recoveryAttempt: attempt > 0,
+                initialLocalCommandTranscriptPromptIds: attempt > 0
+                  ? retryLocalCommandTranscriptPromptIds
+                  : undefined,
                 onSessionLogIdle: createClaudeSessionLogIdleDebugLogger({
                   debugLog: options.debugLog,
                   backendSessionId: options.backendSessionId,
@@ -222,10 +241,9 @@ export class ClaudeCodeBackend implements Backend {
               ) {
                 throw error;
               }
-              if (nativeSessionId === null && error.logPath) {
-                retryLogPath = error.logPath;
-                retryInitialOffset = error.nextOffset;
-              }
+              retryLogPath = error.logPath ?? activeLogPath;
+              retryInitialOffset = error.nextOffset;
+              retryLocalCommandTranscriptPromptIds = error.localCommandTranscriptPromptIds;
             }
           }
         },
@@ -286,17 +304,38 @@ function remainingTurnTimeoutMs(
   return remainingMs;
 }
 
-async function submitPromptForAttempt(pty: PtySession, prompt: string, attempt: number): Promise<void> {
+async function submitPrompt(pty: PtySession, prompt: string): Promise<void> {
+  await pty.write(prompt);
+  await sleep(150);
+  await pty.submit();
+}
+
+async function hasCallerUserTurnAtRecoveryOffset(
+  activeLogPath: string | null,
+  expectedLogPath: string | null,
+  initialOffset: number,
+  initialLocalCommandTranscriptPromptIds: ReadonlySet<string>,
+): Promise<boolean> {
+  const scanLogPath = activeLogPath ?? expectedLogPath;
+  return scanLogPath !== null &&
+    await hasClaudeCodeCallerUserTurnInSessionLogSegment(
+      scanLogPath,
+      initialOffset,
+      initialLocalCommandTranscriptPromptIds,
+    );
+}
+
+async function submitRecoveryDraftIfPresent(pty: PtySession): Promise<boolean> {
   const cursorLine = await pty.captureCursorLine().catch(() => null);
-  const reuseExistingDraft = attempt > 0 &&
-    cursorLine !== null &&
-    isClaudeCodeInputPromptLine(cursorLine) &&
-    !isClaudeCodeEmptyInputPromptLine(cursorLine);
-  if (!reuseExistingDraft) {
-    await pty.write(prompt);
-    await sleep(150);
+  if (
+    cursorLine === null ||
+    !isClaudeCodeInputPromptLine(cursorLine) ||
+    isClaudeCodeEmptyInputPromptLine(cursorLine)
+  ) {
+    return false;
   }
   await pty.submit();
+  return true;
 }
 
 function shouldPublishIntermediateText(text: string, previousText: string | null): boolean {

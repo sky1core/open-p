@@ -95,7 +95,11 @@ function finalMessageIteration(usage: JsonObject): JsonObject | null {
 export function parseClaudeCodeJsonlTurn(
   lines: readonly string[],
   turnId: string,
-  options: { readonly structuredOutputRequested?: boolean; readonly jsonSchema?: unknown } = {},
+  options: {
+    readonly structuredOutputRequested?: boolean;
+    readonly jsonSchema?: unknown;
+    readonly initialLocalCommandTranscriptPromptIds?: ReadonlySet<string>;
+  } = {},
 ): TurnResult | null {
   const state: ParserState = {
     inScope: true,
@@ -125,7 +129,7 @@ export function parseClaudeCodeJsonlTurn(
     sessionId: null,
     assistantEvents: [],
     callerUserTurnCount: 0,
-    localCommandTranscriptPromptIds: new Set(),
+    localCommandTranscriptPromptIds: new Set(options.initialLocalCommandTranscriptPromptIds ?? []),
   };
 
   for (const line of lines) {
@@ -204,11 +208,14 @@ export function extractClaudeCodeIntermediateText(
 
 export function extractClaudeCodeIntermediateContent(
   lines: readonly string[],
-  options: { readonly includeTerminalAssistant?: boolean } = {},
+  options: {
+    readonly includeTerminalAssistant?: boolean;
+    readonly initialLocalCommandTranscriptPromptIds?: ReadonlySet<string>;
+  } = {},
 ): IntermediateContent {
   let inBackgroundTask = false;
   const backgroundParentUuids = new Set<string>();
-  const localCommandTranscriptPromptIds = new Set<string>();
+  const localCommandTranscriptPromptIds = new Set(options.initialLocalCommandTranscriptPromptIds ?? []);
   const textState: ActiveAssistantTextState = {
     activeAssistantTexts: [],
     lastActiveAssistantMessageId: null,
@@ -269,7 +276,6 @@ export function extractClaudeCodeIntermediateContent(
       clearTextState();
       clearReasoningState();
       pendingAssistantSnapshot = null;
-      localCommandTranscriptPromptIds.clear();
       continue;
     }
     if (inBackgroundTask) {
@@ -385,7 +391,6 @@ function consumeEvent(state: ParserState, event: JsonObject, turnId: string): vo
     state.activeTextSinceBackgroundStart = false;
     state.requestId = null;
     state.assistantEvents = [];
-    state.localCommandTranscriptPromptIds.clear();
     return;
   }
 

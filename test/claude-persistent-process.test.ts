@@ -218,6 +218,7 @@ class PreCallerLocalCommandThenTurnSession implements PtySession {
   constructor(
     private readonly logPath: string,
     private readonly draftLineAfterFirstSubmit: string | null = null,
+    private readonly secondSubmitDelayMs = 0,
   ) {}
 
   async write(input: string): Promise<void> {
@@ -258,7 +259,7 @@ class PreCallerLocalCommandThenTurnSession implements PtySession {
       ].join('\n') + '\n');
       return;
     }
-    await appendFile(this.logPath, [
+    const appendResult = (): Promise<void> => appendFile(this.logPath, [
       eventLine({
         type: 'user',
         uuid: 'active-user',
@@ -278,6 +279,13 @@ class PreCallerLocalCommandThenTurnSession implements PtySession {
         durationMs: 10,
       }),
     ].join('\n') + '\n');
+    if (this.secondSubmitDelayMs > 0) {
+      setTimeout(() => {
+        void appendResult();
+      }, this.secondSubmitDelayMs);
+      return;
+    }
+    await appendResult();
   }
 
   async interrupt(): Promise<void> {}
@@ -303,6 +311,105 @@ class PreCallerLocalCommandThenTurnSession implements PtySession {
       return this.draftLineAfterFirstSubmit;
     }
     return '❯';
+  }
+}
+
+class PreCallerLocalCommandThenLateCallerSession implements PtySession {
+  readonly id = 'late-caller-after-local-command-session';
+  alive = true;
+  submitCount = 0;
+  readonly writes: string[] = [];
+  private lastWrite = '';
+  private lateCallerAppended = false;
+
+  constructor(
+    private readonly logPath: string,
+  ) {}
+
+  async write(input: string): Promise<void> {
+    this.lastWrite = input;
+    this.writes.push(input);
+  }
+
+  async submit(): Promise<void> {
+    this.submitCount += 1;
+    if (this.submitCount !== 1) {
+      throw new Error('recovery must not submit after the local-command prelude');
+    }
+    await appendFile(this.logPath, [
+      eventLine({
+        type: 'user',
+        promptId: 'compact-command',
+        isMeta: true,
+        message: { content: '<local-command-caveat>generated while running local commands</local-command-caveat>' },
+      }),
+      eventLine({
+        type: 'user',
+        promptId: 'compact-command',
+        message: { content: '<command-name>/compact</command-name>\n<command-message>compact</command-message>' },
+      }),
+      eventLine({
+        type: 'user',
+        promptId: 'compact-command',
+        message: { content: '<local-command-stdout>Compacted (ctrl+o to see full summary)</local-command-stdout>' },
+      }),
+    ].join('\n') + '\n');
+  }
+
+  async interrupt(): Promise<void> {}
+
+  async terminate(): Promise<void> {
+    this.alive = false;
+  }
+
+  async exit(): Promise<void> {
+    this.alive = false;
+  }
+
+  async isAlive(): Promise<boolean> {
+    return this.alive;
+  }
+
+  async captureText(): Promise<string> {
+    if (this.submitCount === 0) {
+      return 'Claude Code v\n❯';
+    }
+    return 'Claude Code v\nGenerating response...';
+  }
+
+  async captureCursorLine(): Promise<string> {
+    if (this.submitCount === 0) {
+      return '❯';
+    }
+    if (this.submitCount === 1 && !this.lateCallerAppended) {
+      this.lateCallerAppended = true;
+      await appendFile(this.logPath, [
+        eventLine({
+          type: 'user',
+          uuid: 'active-user',
+          message: { content: this.lastWrite },
+        }),
+        eventLine({
+          type: 'user',
+          promptId: 'compact-command',
+          message: { content: '<local-command-stderr>late compact diagnostic</local-command-stderr>' },
+        }),
+        eventLine({
+          type: 'assistant',
+          parentUuid: 'active-user',
+          message: {
+            content: [{ type: 'text', text: 'late caller result' }],
+            stop_reason: 'end_turn',
+          },
+        }),
+        eventLine({
+          type: 'system',
+          subtype: 'turn_duration',
+          durationMs: 10,
+        }),
+      ].join('\n') + '\n');
+    }
+    return 'Generating response...';
   }
 }
 
@@ -1104,7 +1211,7 @@ test('persistent turn starts JSONL parsing at the prompt submission boundary', a
   }
 });
 
-test('persistent turn retries prompt submission after pre-caller local command consumes the first submit', async () => {
+test('persistent local command prompt returns command output without retrying submission', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'openp-pre-caller-local-command-'));
   const logPath = join(dir, 'session.jsonl');
   await writeFile(logPath, '');
@@ -1113,13 +1220,37 @@ test('persistent turn retries prompt submission after pre-caller local command c
   const process = new PersistentClaudeCodeProcess(sessionId, signature(), dir, session, logPath, logPath, 0);
 
   try {
-    const result = await process.sendTurn('hello after compact', {
+    const result = await process.sendTurn('/compact', {
       timeoutMs: 5_000,
     });
 
-    assert.equal(result.text, 'retry result');
-    assert.equal(session.submitCount, 2);
-    assert.deepEqual(session.writes, ['hello after compact', 'hello after compact']);
+    assert.equal(result.text, 'Compacted (ctrl+o to see full summary)');
+    assert.equal(session.submitCount, 1);
+    assert.deepEqual(session.writes, ['/compact']);
+  } finally {
+    await process.shutdown();
+  }
+});
+
+test('persistent recovery fails closed instead of retyping when no input draft is visible', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-pre-caller-local-command-no-draft-'));
+  const logPath = join(dir, 'session.jsonl');
+  await writeFile(logPath, '');
+  const sessionId = randomUUID();
+  const session = new PreCallerLocalCommandThenTurnSession(logPath);
+  const process = new PersistentClaudeCodeProcess(sessionId, signature(), dir, session, logPath, logPath, 0);
+
+  try {
+    await assert.rejects(
+      () => process.sendTurn('hello after compact', {
+        timeoutMs: 12_000,
+      }),
+      (error) => error instanceof OpenPError &&
+        error.exitCode === EXIT_CODES.protocolViolation &&
+        error.reasonCode === 'missing_turn_boundary',
+    );
+    assert.equal(session.submitCount, 1);
+    assert.deepEqual(session.writes, ['hello after compact']);
   } finally {
     await process.shutdown();
   }
@@ -1146,22 +1277,44 @@ test('persistent retry submits an existing input draft instead of writing the pr
   }
 });
 
+test('persistent recovery enters wait without input readiness and picks up caller turn without submitting draft', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-pre-caller-local-command-late-caller-'));
+  const logPath = join(dir, 'session.jsonl');
+  await writeFile(logPath, '');
+  const sessionId = randomUUID();
+  const session = new PreCallerLocalCommandThenLateCallerSession(logPath);
+  const process = new PersistentClaudeCodeProcess(sessionId, signature(), dir, session, logPath, logPath, 0);
+
+  try {
+    const result = await process.sendTurn('hello after compact', {
+      timeoutMs: 5_000,
+    });
+
+    assert.equal(result.text, 'late caller result');
+    assert.equal(session.submitCount, 1);
+    assert.deepEqual(session.writes, ['hello after compact']);
+  } finally {
+    await process.shutdown();
+  }
+});
+
 test('persistent retry keeps the original turn timeout budget', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'openp-pre-caller-local-command-timeout-'));
   const logPath = join(dir, 'session.jsonl');
   await writeFile(logPath, '');
   const sessionId = randomUUID();
-  const session = new PreCallerLocalCommandThenTurnSession(logPath);
+  const session = new PreCallerLocalCommandThenTurnSession(logPath, '❯ hello after compact', 3_000);
   const process = new PersistentClaudeCodeProcess(sessionId, signature(), dir, session, logPath, logPath, 0);
 
   try {
     await assert.rejects(
       () => process.sendTurn('hello after compact', {
-        timeoutMs: 1_200,
+        timeoutMs: 2_000,
       }),
       (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.timeout,
     );
-    assert.equal(session.submitCount, 1);
+    assert.equal(session.submitCount, 2);
+    assert.deepEqual(session.writes, ['hello after compact']);
   } finally {
     await process.shutdown();
   }
