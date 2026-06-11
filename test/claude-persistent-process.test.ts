@@ -1242,8 +1242,10 @@ test('persistent recovery fails closed instead of retyping when no input draft i
 
   try {
     await assert.rejects(
+      // The no-draft recovery path spends ~11s of graces (1s missing-caller + 10s recovery); the turn
+      // timeout must stay well above that or a loaded suite run hits exit 30 before the expected 40.
       () => process.sendTurn('hello after compact', {
-        timeoutMs: 12_000,
+        timeoutMs: 30_000,
       }),
       (error) => error instanceof OpenPError &&
         error.exitCode === EXIT_CODES.protocolViolation &&
