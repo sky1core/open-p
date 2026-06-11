@@ -41,9 +41,9 @@ export class MissingCallerAfterLocalCommandError extends OpenPError {
     readonly localCommandTranscriptPromptIds: ReadonlySet<string> = new Set(),
   ) {
     super(
-      `Claude Code session log became idle after local command output before logging caller user turn for turn ${turnId}`,
+      `Claude Code ran a local command (e.g. automatic context compaction) during prompt submission for turn ${turnId}; the prompt never became a conversation turn and was not executed. Resubmitting the same prompt is safe.`,
       EXIT_CODES.protocolViolation,
-      ARTIFACT_REJECTION_REASONS.missingTurnBoundary,
+      ARTIFACT_REJECTION_REASONS.promptNotExecuted,
     );
     this.name = 'MissingCallerAfterLocalCommandError';
   }

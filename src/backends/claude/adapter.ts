@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { runAbortableOperation, throwIfAborted } from '../../core/abort.js';
-import { EXIT_CODES, OpenPError } from '../../core/errors.js';
+import { ARTIFACT_REJECTION_REASONS, EXIT_CODES, OpenPError } from '../../core/errors.js';
 import { DEFAULT_TERMINATE_GRACE_MS, shouldTerminateOnAbort } from '../../core/graceful-interrupt.js';
 import { SessionLockStore } from '../../core/session-lock.js';
 import { SessionStateStore, validateSessionStateCompatibility } from '../../core/session-state.js';
@@ -19,6 +19,7 @@ import {
   getFileSize,
   hasClaudeCodeCallerUserTurnInSessionLogSegment,
   isMissingCallerAfterLocalCommandError,
+  MissingCallerAfterLocalCommandError,
   resolveClaudeCodeSessionLogPath,
   snapshotClaudeCodeSessionLogPaths,
   waitForClaudeCodeTurnResult,
@@ -239,6 +240,9 @@ export class ClaudeCodeBackend implements Backend {
                 !isMissingCallerAfterLocalCommandError(error) ||
                 attempt >= PRE_CALLER_LOCAL_COMMAND_PROMPT_RETRY_LIMIT
               ) {
+                if (isMissingCallerAfterLocalCommandError(error)) {
+                  throw await dischargeResendSafetyBeforeThrow(pty, error);
+                }
                 throw error;
               }
               retryLogPath = error.logPath ?? activeLogPath;
@@ -374,6 +378,27 @@ export function buildClaudeCodeArgs(options: BackendRunOptions, extraArgs: reado
     options.cwd,
   ));
   return args;
+}
+
+// `prompt_not_executed` promises the caller that the preempted prompt can never run, which is only
+// true once the backend process is gone. Shut the PTY down before the error becomes caller-visible;
+// if the process survives termination escalation, downgrade to a reason code with no resend guarantee.
+async function dischargeResendSafetyBeforeThrow(
+  pty: PtySession,
+  error: MissingCallerAfterLocalCommandError,
+): Promise<OpenPError> {
+  await pty.exit().catch(() => undefined);
+  if (await pty.isAlive().catch(() => true)) {
+    await forcePtyStopWithEscalation(pty, DEFAULT_TERMINATE_GRACE_MS).catch(() => undefined);
+  }
+  if (await pty.isAlive().catch(() => true)) {
+    return new OpenPError(
+      `Claude Code backend did not terminate after a local command preempted prompt submission for turn ${error.turnId}; the prompt may still execute. Resubmitting is not known to be safe.`,
+      EXIT_CODES.protocolViolation,
+      ARTIFACT_REJECTION_REASONS.missingTurnBoundary,
+    );
+  }
+  return error;
 }
 
 export async function exitPtyAfterTurn(

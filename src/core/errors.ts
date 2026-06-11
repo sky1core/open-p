@@ -20,6 +20,7 @@ export const ARTIFACT_REJECTION_REASONS = {
   noCandidate: 'no_candidate',
   ambiguousCandidate: 'ambiguous_candidate',
   missingTurnBoundary: 'missing_turn_boundary',
+  promptNotExecuted: 'prompt_not_executed',
   multipleTurnBoundaries: 'multiple_turn_boundaries',
   missingCompletion: 'missing_completion',
   unsupportedArtifactShape: 'unsupported_artifact_shape',

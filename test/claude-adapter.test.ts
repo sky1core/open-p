@@ -306,11 +306,11 @@ test('single-turn recovery fails closed instead of retyping when no input draft 
             prompt: 'hello after compact',
             jsonSchema: null,
           },
-          adapterRunOptions(cwd, sessionId, 12_000),
+          adapterRunOptions(cwd, sessionId, 30_000),
         ),
         (error) => error instanceof OpenPError &&
           error.exitCode === EXIT_CODES.protocolViolation &&
-          error.reasonCode === 'missing_turn_boundary',
+          error.reasonCode === 'prompt_not_executed',
       );
       assert.equal(session.submitCount, 1);
       assert.deepEqual(session.writes, ['hello after compact']);
@@ -543,6 +543,38 @@ class PreCallerLocalCommandThenTurnSession implements PtySession {
     return '❯';
   }
 }
+
+class ImmortalAdapterPreCallerLocalCommandSession extends PreCallerLocalCommandThenTurnSession {
+  override async exit(): Promise<void> {}
+  override async terminate(): Promise<void> {}
+  override async isAlive(): Promise<boolean> {
+    return true;
+  }
+}
+
+test('single-turn recovery downgrades resend safety when the backend survives shutdown escalation', async () => {
+  await withSingleTurnBackend(
+    'openp-claude-adapter-retry-immortal-',
+    (logPath, cwd, sessionId) => new ImmortalAdapterPreCallerLocalCommandSession(logPath, cwd, sessionId),
+    async ({ backend, cwd, session, sessionId }) => {
+      await assert.rejects(
+        () => backend.runTurn(
+          {
+            turnId: '22222222-2222-4222-8222-222222222228',
+            prompt: 'hello after compact',
+            jsonSchema: null,
+          },
+          adapterRunOptions(cwd, sessionId, 30_000),
+        ),
+        (error) => error instanceof OpenPError &&
+          error.exitCode === EXIT_CODES.protocolViolation &&
+          error.reasonCode === 'missing_turn_boundary' &&
+          /not known to be safe/.test(error.message),
+      );
+      assert.deepEqual(session.writes, ['hello after compact']);
+    },
+  );
+});
 
 class PreCallerLocalCommandThenLateCallerSession implements PtySession {
   readonly id = 'fake-pty';

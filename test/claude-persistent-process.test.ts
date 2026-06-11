@@ -1249,9 +1249,41 @@ test('persistent recovery fails closed instead of retyping when no input draft i
       }),
       (error) => error instanceof OpenPError &&
         error.exitCode === EXIT_CODES.protocolViolation &&
-        error.reasonCode === 'missing_turn_boundary',
+        error.reasonCode === 'prompt_not_executed',
     );
     assert.equal(session.submitCount, 1);
+    assert.deepEqual(session.writes, ['hello after compact']);
+  } finally {
+    await process.shutdown();
+  }
+});
+
+class ImmortalPreCallerLocalCommandSession extends PreCallerLocalCommandThenTurnSession {
+  override async exit(): Promise<void> {}
+  override async terminate(): Promise<void> {}
+  override async isAlive(): Promise<boolean> {
+    return true;
+  }
+}
+
+test('persistent recovery downgrades resend safety when the backend survives shutdown escalation', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-pre-caller-local-command-immortal-'));
+  const logPath = join(dir, 'session.jsonl');
+  await writeFile(logPath, '');
+  const sessionId = randomUUID();
+  const session = new ImmortalPreCallerLocalCommandSession(logPath);
+  const process = new PersistentClaudeCodeProcess(sessionId, signature(), dir, session, logPath, logPath, 0);
+
+  try {
+    await assert.rejects(
+      () => process.sendTurn('hello after compact', {
+        timeoutMs: 30_000,
+      }),
+      (error) => error instanceof OpenPError &&
+        error.exitCode === EXIT_CODES.protocolViolation &&
+        error.reasonCode === 'missing_turn_boundary' &&
+        /not known to be safe/.test(error.message),
+    );
     assert.deepEqual(session.writes, ['hello after compact']);
   } finally {
     await process.shutdown();

@@ -845,7 +845,7 @@ test('normal prompt never matches a local-command group that has no command-name
     }),
     (error) => error instanceof OpenPError &&
       error.exitCode === EXIT_CODES.protocolViolation &&
-      error.reasonCode === 'missing_turn_boundary',
+      error.reasonCode === 'prompt_not_executed',
   );
 });
 
@@ -867,7 +867,7 @@ test('recovery attempt fails after bounded local-command idle grace without new 
     }),
     (error) => error instanceof OpenPError &&
       error.exitCode === EXIT_CODES.protocolViolation &&
-      error.reasonCode === 'missing_turn_boundary',
+      error.reasonCode === 'prompt_not_executed',
   );
 });
 
@@ -931,7 +931,7 @@ test('recovery wait preserves local-command prompt ids from the failed attempt',
     }),
     (error) => error instanceof OpenPError &&
       error.exitCode === EXIT_CODES.protocolViolation &&
-      error.reasonCode === 'missing_turn_boundary',
+      error.reasonCode === 'prompt_not_executed',
   );
 });
 
@@ -1282,7 +1282,7 @@ test('active turn fails instead of waiting forever when local command output is 
         }),
         (error) => error instanceof OpenPError &&
           error.exitCode === EXIT_CODES.protocolViolation &&
-          /session log became idle after local command output before logging caller user turn/.test(error.message),
+          /the prompt never became a conversation turn and was not executed/.test(error.message),
       );
     } finally {
       await rm(logDir, { recursive: true, force: true });
@@ -1349,7 +1349,7 @@ test('first-turn discovery fails instead of waiting forever when local command o
         }),
         (error) => error instanceof OpenPError &&
           error.exitCode === EXIT_CODES.protocolViolation &&
-          /session log became idle after local command output before logging caller user turn/.test(error.message),
+          /the prompt never became a conversation turn and was not executed/.test(error.message),
       );
     } finally {
       await rm(logDir, { recursive: true, force: true });
