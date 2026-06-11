@@ -3,6 +3,7 @@ import test from 'node:test';
 import { ClaudeCodeWorkerBridge, type ClaudeCodeManagedProcess, type ClaudeCodeWorkerBridgeStartRequest } from '../src/backends/claude/worker-bridge.js';
 import { isAbortError } from '../src/core/abort.js';
 import { EXIT_CODES, OpenPError } from '../src/core/errors.js';
+import { PersistentProcessManager } from '../src/core/persistent-process.js';
 import type { LaunchSignature } from '../src/core/worker-types.js';
 import type { TurnResult } from '../src/core/types.js';
 import type { PtyProvider } from '../src/runners/types.js';
@@ -149,6 +150,30 @@ test('worker bridge creates a backend session and sends first turn as raw messag
   assert.equal('ANTHROPIC_API_KEY' in (starts[0]?.launchSignature.env ?? {}), false);
   assert.equal('ANTHROPIC_AUTH_TOKEN' in (starts[0]?.launchSignature.env ?? {}), false);
   assert.equal(starts[0]?.launchSignature.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS, '1');
+});
+
+test('worker bridge instance launch signature records instance id and configured Claude config dir', async () => {
+  const starts: ClaudeCodeWorkerBridgeStartRequest[] = [];
+  const instanceConfigDir = '/tmp/openp-claude-alt';
+  const bridge = new ClaudeCodeWorkerBridge(UNUSED_PROVIDER, undefined, async (request) => {
+    starts.push(request);
+    return new FakeManagedProcess(request.sessionId, request.launchSignature);
+  }, {
+    backendId: 'claude-alt',
+    configDir: instanceConfigDir,
+  });
+
+  await bridge.runTurn({
+    sessionId: null,
+    isFirstTurn: true,
+    projectRoot: '/work/open-p',
+    message: 'hello',
+    env: { CLAUDE_CONFIG_DIR: '/tmp/ambient-or-request-value' },
+  });
+
+  assert.equal(starts[0]?.launchSignature.backendId, 'claude-alt');
+  assert.equal(starts[0]?.launchSignature.env.CLAUDE_CONFIG_DIR, instanceConfigDir);
+  assert.equal('configDir' in (starts[0] as unknown as Record<string, unknown>), false);
 });
 
 test('worker bridge keeps result when JSONL streaming differs from result', async () => {
@@ -337,6 +362,43 @@ test('worker bridge restarts with resume when launch signature changes', async (
   assert.equal(starts[1]?.resume, true);
   assert.equal(processes[0]?.shutdownCount, 1);
   assert.equal(starts[1]?.launchSignature.model, 'sonnet');
+});
+
+test('worker bridge restarts same session when configured instance identity changes', async () => {
+  const starts: ClaudeCodeWorkerBridgeStartRequest[] = [];
+  const processes: FakeManagedProcess[] = [];
+  const manager = new PersistentProcessManager<ClaudeCodeManagedProcess>();
+  const startProcess = async (request: ClaudeCodeWorkerBridgeStartRequest): Promise<ClaudeCodeManagedProcess> => {
+    starts.push(request);
+    const process = new FakeManagedProcess(request.sessionId, request.launchSignature);
+    processes.push(process);
+    return process;
+  };
+  const baseBridge = new ClaudeCodeWorkerBridge(UNUSED_PROVIDER, manager, startProcess);
+  const instanceBridge = new ClaudeCodeWorkerBridge(UNUSED_PROVIDER, manager, startProcess, {
+    backendId: 'claude-alt',
+    configDir: '/tmp/openp-claude-alt',
+  });
+
+  const first = await baseBridge.runTurn({
+    sessionId: null,
+    isFirstTurn: true,
+    projectRoot: '/work/open-p',
+    message: 'first',
+  });
+  await instanceBridge.runTurn({
+    sessionId: first.sessionId,
+    isFirstTurn: false,
+    projectRoot: '/work/open-p',
+    message: 'second',
+  });
+
+  assert.equal(starts.length, 2);
+  assert.equal(starts[1]?.resume, true);
+  assert.equal(starts[0]?.launchSignature.backendId, 'claude');
+  assert.equal(starts[1]?.launchSignature.backendId, 'claude-alt');
+  assert.equal(starts[1]?.launchSignature.env.CLAUDE_CONFIG_DIR, '/tmp/openp-claude-alt');
+  assert.equal(processes[0]?.shutdownCount, 1);
 });
 
 test('worker bridge discards a process after turn failure before allowing another turn', async () => {

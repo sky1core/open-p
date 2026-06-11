@@ -1,7 +1,7 @@
 import { constants } from 'node:fs';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { access, mkdtemp, readFile, realpath, stat } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, realpath, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -69,6 +69,7 @@ test('help exposes public streaming and reasoning effort options', async () => {
   assert.match(result.stdout, /--verbose/);
   assert.match(result.stdout, /--debug-log\s+Write runner diagnostics/);
   assert.doesNotMatch(result.stdout, /--debug-log\s+\[path\]/);
+  assert.match(result.stdout, /Configured backend instances from \$\{XDG_CONFIG_HOME:-~\/\.config\}\/open-p\/instances\.yaml are selectable like built-in backends/);
   assert.match(result.stdout, /Top-level commands/);
   assert.match(result.stdout, /Only the options listed above are public openp options/);
   assert.equal(result.stderr, '');
@@ -122,6 +123,57 @@ test('public CLI rejects Claude-native compatibility flags instead of ignoring t
     () => stat(join(projectRoot, '.openp')),
     (error) => typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT',
   );
+});
+
+test('configured backend instance id is accepted by text CLI dispatch', async () => {
+  const repoRoot = process.cwd();
+  const tsxBin = join(repoRoot, 'node_modules', '.bin', 'tsx');
+  const projectRoot = await realpath(await mkdtemp(join(tmpdir(), 'openp-cli-')));
+  const stateRoot = await mkdtemp(join(tmpdir(), 'openp-cli-state-'));
+  const configHome = await writeInstanceConfig('claude-alt');
+
+  const result = await runCommand(tsxBin, [
+    join(repoRoot, 'src/cli.ts'),
+    'claude-alt',
+    '--resume',
+    SESSION_ID,
+    'hello',
+  ], projectRoot, {
+    XDG_CONFIG_HOME: configHome,
+    XDG_STATE_HOME: stateRoot,
+  });
+
+  assert.equal(result.code, 20);
+  assert.equal(result.stdout, '');
+  assert.match(result.stderr, /session state not found/);
+  assert.doesNotMatch(result.stderr, /unknown backend/);
+});
+
+test('configured backend instance id is accepted by stream-json worker dispatch', async () => {
+  const repoRoot = process.cwd();
+  const tsxBin = join(repoRoot, 'node_modules', '.bin', 'tsx');
+  const projectRoot = await realpath(await mkdtemp(join(tmpdir(), 'openp-cli-')));
+  const stateRoot = await mkdtemp(join(tmpdir(), 'openp-cli-state-'));
+  const configHome = await writeInstanceConfig('claude-alt');
+
+  const result = await runCommand(tsxBin, [
+    join(repoRoot, 'src/cli.ts'),
+    'claude-alt',
+    '--resume',
+    SESSION_ID,
+    '--input-format',
+    'stream-json',
+    '--output-format',
+    'stream-json',
+  ], projectRoot, {
+    XDG_CONFIG_HOME: configHome,
+    XDG_STATE_HOME: stateRoot,
+  }, `${JSON.stringify({ type: 'user', message: { content: 'hello' } })}\n`);
+
+  assert.equal(result.code, 20);
+  assert.equal(result.stdout, '');
+  assert.match(result.stderr, /session state not found/);
+  assert.doesNotMatch(result.stderr, /unknown backend/);
 });
 
 test('version after prompt separator remains prompt text', async () => {
@@ -427,3 +479,15 @@ test('stream-json input errors do not emit system init on stdout', async () => {
   assert.equal(result.stdout, '');
   assert.match(result.stderr, /invalid stream-json input line 1/);
 });
+
+async function writeInstanceConfig(instanceId: string): Promise<string> {
+  const configHome = await mkdtemp(join(tmpdir(), 'openp-cli-config-'));
+  await mkdir(join(configHome, 'open-p'), { recursive: true });
+  await writeFile(join(configHome, 'open-p', 'instances.yaml'), `
+instances:
+  ${instanceId}:
+    backend: claude
+    configDir: ${join(configHome, `${instanceId}-config`)}
+`);
+  return configHome;
+}

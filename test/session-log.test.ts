@@ -2,11 +2,12 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { appendFile, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import test from 'node:test';
 import {
   resolveClaudeCodeProjectLogDir,
   resolveClaudeCodeSessionLogPath,
+  findClaudeCodeSessionLog,
   hasClaudeCodeCallerUserTurnInSessionLogSegment,
   readNewText,
   snapshotClaudeCodeSessionLogPaths,
@@ -75,6 +76,123 @@ test('resolves direct session log paths for opaque session ids', () => {
       ),
     );
   });
+});
+
+test('resolves Claude Code session logs under an explicit config dir', async () => {
+  const configDir = await mkdtemp(join(tmpdir(), 'openp-claude-config-'));
+  const cwd = '/tmp/open-p';
+  const sessionId = '11111111-1111-4111-8111-111111111111';
+  const expectedPath = join(configDir, 'projects', '-tmp-open-p', `${sessionId}.jsonl`);
+
+  assert.equal(
+    resolveClaudeCodeSessionLogPath(sessionId, cwd, configDir),
+    expectedPath,
+  );
+
+  await mkdir(dirname(expectedPath), { recursive: true });
+  await writeFile(expectedPath, '');
+
+  assert.equal(await findClaudeCodeSessionLog(sessionId, cwd, configDir), expectedPath);
+  assert.deepEqual(await snapshotClaudeCodeSessionLogPaths(cwd, configDir), new Set([expectedPath]));
+});
+
+test('first-turn session log discovery uses explicit config dir instead of base root', async () => {
+  await withClaudeProjectsRoot(async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'openp-session-log-cwd-'));
+    const configDir = await mkdtemp(join(tmpdir(), 'openp-claude-config-'));
+    const baseSessionId = randomUUID();
+    const instanceSessionId = randomUUID();
+    const baseLogDir = resolveClaudeCodeProjectLogDir(cwd);
+    const instanceLogDir = resolveClaudeCodeProjectLogDir(cwd, configDir);
+    const baseLogPath = join(baseLogDir, `${baseSessionId}.jsonl`);
+    const instanceLogPath = join(instanceLogDir, `${instanceSessionId}.jsonl`);
+    await mkdir(baseLogDir, { recursive: true });
+    await mkdir(instanceLogDir, { recursive: true });
+
+    try {
+      const discoveryStartedAtMs = Date.now() - 1000;
+      await writeFile(baseLogPath, [
+        line({
+          type: 'user',
+          cwd,
+          sessionId: baseSessionId,
+          message: { content: 'base prompt' },
+        }),
+        line({
+          type: 'assistant',
+          cwd,
+          sessionId: baseSessionId,
+          message: {
+            content: [{ type: 'text', text: 'base final' }],
+            stop_reason: 'end_turn',
+          },
+        }),
+        line({ type: 'system', subtype: 'turn_duration', cwd, sessionId: baseSessionId, durationMs: 1 }),
+      ].join(''));
+      await writeFile(instanceLogPath, [
+        line({
+          type: 'user',
+          cwd,
+          sessionId: instanceSessionId,
+          message: { content: 'instance prompt' },
+        }),
+        line({
+          type: 'assistant',
+          cwd,
+          sessionId: instanceSessionId,
+          message: {
+            content: [{ type: 'text', text: 'instance final' }],
+            stop_reason: 'end_turn',
+          },
+        }),
+        line({ type: 'system', subtype: 'turn_duration', cwd, sessionId: instanceSessionId, durationMs: 1 }),
+      ].join(''));
+
+      const result = await waitForClaudeCodeTurnResult({
+        sessionId: null,
+        turnId: 'turn-1',
+        timeoutMs: 10_000,
+        initialOffset: 0,
+        knownLogPath: null,
+        cwd,
+        configDir,
+        discoveryStartedAtMs,
+        isBackendAlive: async () => true,
+      });
+
+      assert.equal(result.sessionId, instanceSessionId);
+      assert.equal(result.text, 'instance final');
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+      await rm(configDir, { recursive: true, force: true });
+    }
+  });
+});
+
+test('base Claude Code session log discovery ignores ambient Claude config dir', () => {
+  const previousConfigDir = process.env.CLAUDE_CONFIG_DIR;
+  process.env.CLAUDE_CONFIG_DIR = '/tmp/ambient-claude-config';
+  try {
+    assert.equal(
+      resolveClaudeCodeSessionLogPath(
+        '11111111-1111-4111-8111-111111111111',
+        '/tmp/open-p',
+      ),
+      join(
+        homedir(),
+        '.claude',
+        'projects',
+        '-tmp-open-p',
+        '11111111-1111-4111-8111-111111111111.jsonl',
+      ),
+    );
+  } finally {
+    if (previousConfigDir === undefined) {
+      delete process.env.CLAUDE_CONFIG_DIR;
+    } else {
+      process.env.CLAUDE_CONFIG_DIR = previousConfigDir;
+    }
+  }
 });
 
 test('rejects unsafe session ids before building a session log path', () => {
@@ -2169,6 +2287,35 @@ test('writes Claude session log idle diagnostics to debug log', async () => {
   assert.equal(entry.idleMs, 30_000);
   assert.equal(entry.observedLogFile, true);
   assert.equal(entry.sawCallerUserTurn, true);
+});
+
+test('writes Claude session log idle diagnostics with configured backend instance id', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-session-log-debug-'));
+  const debugLogPath = join(dir, 'debug.jsonl');
+  const logger = createClaudeSessionLogIdleDebugLogger({
+    debugLog: debugLogPath,
+    backendId: 'claude-alt',
+    backendSessionId: 'backend-session',
+    nativeSessionId: 'native-session',
+    ptySessionId: 'openp-backend-session-pty',
+  });
+
+  await logger({
+    turnId: 'turn-1',
+    stage: 'discovering_log',
+    logPath: null,
+    offset: 0,
+    idleMs: 30_000,
+    observedLogFile: false,
+    sawCallerUserTurn: false,
+  });
+
+  const entries = (await readFile(debugLogPath, 'utf8'))
+    .trim()
+    .split('\n')
+    .map((entry) => JSON.parse(entry) as Record<string, unknown>);
+
+  assert.equal(entries[0]?.backend, 'claude-alt');
 });
 
 test('publishes same-message Claude session-log snapshots as replacements, not appended answers', async () => {

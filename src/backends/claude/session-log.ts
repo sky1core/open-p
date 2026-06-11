@@ -53,23 +53,27 @@ export function isMissingCallerAfterLocalCommandError(error: unknown): error is 
   return error instanceof MissingCallerAfterLocalCommandError;
 }
 
-export function resolveClaudeCodeSessionLogPath(sessionId: string, cwd: string): string {
+export function resolveClaudeCodeSessionLogPath(sessionId: string, cwd: string, configDir: string | null = null): string {
   assertValidSessionId(sessionId);
-  return join(resolveClaudeCodeProjectLogDir(cwd), `${sessionId}.jsonl`);
+  return join(resolveClaudeCodeProjectLogDir(cwd, configDir), `${sessionId}.jsonl`);
 }
 
-export function resolveClaudeCodeProjectLogDir(cwd: string): string {
-  return join(resolveClaudeCodeSessionLogRoot(), encodeClaudeCodeProjectPath(cwd));
+export function resolveClaudeCodeProjectLogDir(cwd: string, configDir: string | null = null): string {
+  return join(resolveClaudeCodeSessionLogRoot(configDir), encodeClaudeCodeProjectPath(cwd));
 }
 
 function encodeClaudeCodeProjectPath(cwd: string): string {
   return cwd.replace(/[^a-zA-Z0-9]/g, '-');
 }
 
-export async function findClaudeCodeSessionLog(sessionId: string, cwd?: string | null): Promise<string | null> {
+export async function findClaudeCodeSessionLog(
+  sessionId: string,
+  cwd?: string | null,
+  configDir: string | null = null,
+): Promise<string | null> {
   assertValidSessionId(sessionId);
   if (cwd) {
-    const direct = resolveClaudeCodeSessionLogPath(sessionId, cwd);
+    const direct = resolveClaudeCodeSessionLogPath(sessionId, cwd, configDir);
     try {
       const directStat = await stat(direct);
       if (directStat.isFile()) return direct;
@@ -77,7 +81,7 @@ export async function findClaudeCodeSessionLog(sessionId: string, cwd?: string |
       // Fall through to recursive lookup for older or unexpected Claude Code path encodings.
     }
   }
-  const root = resolveClaudeCodeSessionLogRoot();
+  const root = resolveClaudeCodeSessionLogRoot(configDir);
   try {
     const rootStat = await stat(root);
     if (!rootStat.isDirectory()) return null;
@@ -87,9 +91,12 @@ export async function findClaudeCodeSessionLog(sessionId: string, cwd?: string |
   return findJsonlByBasename(root, `${sessionId}.jsonl`, cwd ? await cwdCandidates(cwd) : null);
 }
 
-export async function snapshotClaudeCodeSessionLogPaths(_cwd: string): Promise<ReadonlySet<string>> {
+export async function snapshotClaudeCodeSessionLogPaths(
+  _cwd: string,
+  configDir: string | null = null,
+): Promise<ReadonlySet<string>> {
   const output = new Set<string>();
-  for (const logDir of await projectLogDirsForCwd(_cwd)) {
+  for (const logDir of await projectLogDirsForCwd(_cwd, configDir)) {
     await collectTopLevelJsonlLogPaths(logDir, output);
   }
   return output;
@@ -99,10 +106,11 @@ export async function findRecentClaudeCodeSessionLog(
   cwd: string,
   changedAfterMs: number,
   excludedLogPaths: ReadonlySet<string> = new Set(),
+  configDir: string | null = null,
 ): Promise<string | null> {
   const validCwds = await cwdCandidates(cwd);
   const candidates: LogCandidate[] = [];
-  for (const logDir of await projectLogDirsForCwd(cwd)) {
+  for (const logDir of await projectLogDirsForCwd(cwd, configDir)) {
     candidates.push(...await findRecentJsonlLogs(
       logDir,
       changedAfterMs,
@@ -127,10 +135,11 @@ async function findRecentClaudeCodePreCallerIdleLog(
   cwd: string,
   changedAfterMs: number,
   excludedLogPaths: ReadonlySet<string> = new Set(),
+  configDir: string | null = null,
 ): Promise<string | null> {
   const validCwds = await cwdCandidates(cwd);
   const candidates: LogCandidate[] = [];
-  for (const logDir of await projectLogDirsForCwd(cwd)) {
+  for (const logDir of await projectLogDirsForCwd(cwd, configDir)) {
     candidates.push(...await findRecentJsonlLogs(
       logDir,
       changedAfterMs,
@@ -160,6 +169,7 @@ export async function waitForClaudeCodeTurnResult(options: {
   readonly knownLogPath: string | null;
   readonly expectedLogPath?: string | null;
   readonly cwd?: string | null;
+  readonly configDir?: string | null;
   readonly discoveryStartedAtMs?: number | null;
   readonly excludedLogPaths?: ReadonlySet<string>;
   readonly paceIntermediateEvents?: boolean;
@@ -506,11 +516,12 @@ function resolveSessionLogWaitStage(
 async function discoverClaudeCodeSessionLog(options: {
   readonly sessionId: string | null;
   readonly cwd?: string | null;
+  readonly configDir?: string | null;
   readonly discoveryStartedAtMs?: number | null;
   readonly excludedLogPaths?: ReadonlySet<string>;
 }): Promise<string | null> {
   if (options.sessionId) {
-    return findClaudeCodeSessionLog(options.sessionId, options.cwd);
+    return findClaudeCodeSessionLog(options.sessionId, options.cwd, options.configDir ?? null);
   }
   if (!options.cwd || options.discoveryStartedAtMs === null || options.discoveryStartedAtMs === undefined) {
     return null;
@@ -519,12 +530,14 @@ async function discoverClaudeCodeSessionLog(options: {
     options.cwd,
     options.discoveryStartedAtMs,
     options.excludedLogPaths,
+    options.configDir ?? null,
   );
 }
 
 async function discoverClaudeCodePreCallerIdleLog(options: {
   readonly sessionId: string | null;
   readonly cwd?: string | null;
+  readonly configDir?: string | null;
   readonly discoveryStartedAtMs?: number | null;
   readonly excludedLogPaths?: ReadonlySet<string>;
 }): Promise<string | null> {
@@ -535,6 +548,7 @@ async function discoverClaudeCodePreCallerIdleLog(options: {
     options.cwd,
     options.discoveryStartedAtMs,
     options.excludedLogPaths,
+    options.configDir ?? null,
   );
 }
 
@@ -607,8 +621,8 @@ async function findJsonlByBasename(
   return null;
 }
 
-function resolveClaudeCodeSessionLogRoot(): string {
-  return join(homedir(), '.claude', 'projects');
+function resolveClaudeCodeSessionLogRoot(configDir: string | null = null): string {
+  return join(configDir ?? join(homedir(), '.claude'), 'projects');
 }
 
 interface LogCandidate {
@@ -713,10 +727,10 @@ async function cwdCandidates(cwd: string): Promise<ReadonlySet<string>> {
   return candidates;
 }
 
-async function projectLogDirsForCwd(cwd: string): Promise<ReadonlySet<string>> {
+async function projectLogDirsForCwd(cwd: string, configDir: string | null = null): Promise<ReadonlySet<string>> {
   const dirs = new Set<string>();
   for (const candidate of await cwdCandidates(cwd)) {
-    dirs.add(resolveClaudeCodeProjectLogDir(candidate));
+    dirs.add(resolveClaudeCodeProjectLogDir(candidate, configDir));
   }
   return dirs;
 }
@@ -773,6 +787,7 @@ async function assertDiscoveredLogStillUnambiguous(
   options: {
     readonly sessionId: string | null;
     readonly cwd?: string | null;
+    readonly configDir?: string | null;
     readonly discoveryStartedAtMs?: number | null;
     readonly excludedLogPaths?: ReadonlySet<string>;
   },
@@ -790,6 +805,7 @@ async function assertDiscoveredLogStillUnambiguous(
     options.cwd,
     options.discoveryStartedAtMs,
     options.excludedLogPaths,
+    options.configDir ?? null,
   );
   if (discoveredLogPath && discoveredLogPath !== selectedLogPath) {
     throw new OpenPError(

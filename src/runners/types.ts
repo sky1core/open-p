@@ -3,6 +3,7 @@ export interface PtyStartOptions {
   readonly sessionName: string;
   readonly env?: Readonly<Record<string, string>>;
   readonly isolateAnthropicEnv?: boolean;
+  readonly unsetEnv?: readonly string[];
 }
 
 export interface PtySession {

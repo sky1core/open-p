@@ -64,7 +64,14 @@ export class TmuxProvider implements PtyProvider {
     await this.ensureAvailable();
     registerTmuxExitCleanup();
     await reapOrphanedOpenpSessions(this.tmuxBin, options.sessionName);
-    const shellCommand = buildTmuxShellCommand(command, args, options.env ?? {}, options.isolateAnthropicEnv ?? false);
+    const shellCommand = buildTmuxShellCommand(
+      command,
+      args,
+      options.env ?? {},
+      options.isolateAnthropicEnv ?? false,
+      process.env,
+      options.unsetEnv ?? [],
+    );
     await execFileText(this.tmuxBin, [
       'new-session',
       '-d',
@@ -102,18 +109,29 @@ export function buildTmuxShellCommand(
   env: Readonly<Record<string, string>>,
   isolateAnthropicEnv: boolean,
   ambientEnv: Readonly<Record<string, string | undefined>> = process.env,
+  unsetEnv: readonly string[] = [],
 ): string {
   return [
     'env',
-    ...(isolateAnthropicEnv ? anthropicUnsetArgs(ambientEnv) : []),
+    ...envUnsetArgs(ambientEnv, isolateAnthropicEnv, unsetEnv),
     ...Object.entries(env).map(([key, value]) => `${key}=${value}`),
     command,
     ...args,
   ].map(shellQuote).join(' ');
 }
 
-function anthropicUnsetArgs(ambientEnv: Readonly<Record<string, string | undefined>>): string[] {
-  return [...new Set(['ANTHROPIC_BASE_URL', ...Object.keys(ambientEnv).filter((key) => key.startsWith('ANTHROPIC_'))])]
+function envUnsetArgs(
+  ambientEnv: Readonly<Record<string, string | undefined>>,
+  isolateAnthropicEnv: boolean,
+  unsetEnv: readonly string[],
+): string[] {
+  const keys = [
+    ...unsetEnv,
+    ...(isolateAnthropicEnv
+      ? ['ANTHROPIC_BASE_URL', ...Object.keys(ambientEnv).filter((key) => key.startsWith('ANTHROPIC_'))]
+      : []),
+  ];
+  return [...new Set(keys)]
     .sort()
     .flatMap((key) => ['-u', key]);
 }

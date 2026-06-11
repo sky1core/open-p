@@ -32,7 +32,8 @@ import { buildClaudeToolsArgs } from './tools.js';
 import { createClaudePtyInterrupter } from './pty-interrupt.js';
 import {
   appendClaudeCodePtySuppressionArgs,
-  CLAUDE_CODE_BACKGROUND_SUPPRESSION_ENV,
+  CLAUDE_CODE_ACCOUNT_UNSET_ENV,
+  withClaudeCodeAccountLaunchEnv,
 } from './launch-safety.js';
 import { createClaudeSessionLogIdleDebugLogger } from './diagnostics.js';
 import { extractPromptLocalCommandName } from './prompt-command.js';
@@ -49,8 +50,22 @@ import { extractPromptLocalCommandName } from './prompt-command.js';
 
 const PRE_CALLER_LOCAL_COMMAND_PROMPT_RETRY_LIMIT = 1;
 
+export interface ClaudeCodeBackendOptions {
+  readonly backendId?: string;
+  readonly configDir?: string | null;
+}
+
 export class ClaudeCodeBackend implements Backend {
-  constructor(private readonly provider: PtyProvider) {}
+  private readonly backendId: string;
+  private readonly configDir: string | null;
+
+  constructor(
+    private readonly provider: PtyProvider,
+    options: ClaudeCodeBackendOptions = {},
+  ) {
+    this.backendId = options.backendId ?? 'claude';
+    this.configDir = options.configDir ?? null;
+  }
 
   async runTurn(request: TurnRequest, options: BackendRunOptions): Promise<TurnResult> {
     const lock = await new SessionLockStore(options.cwd).acquire(options.backendSessionId);
@@ -75,7 +90,7 @@ export class ClaudeCodeBackend implements Backend {
     throwIfAborted(options.signal);
     const stateStore = new SessionStateStore(options.cwd);
     const expectedState = {
-      backend: 'claude' as const,
+      backend: this.backendId,
       backendSessionId: options.backendSessionId,
       cwd: options.cwd,
     };
@@ -87,11 +102,17 @@ export class ClaudeCodeBackend implements Backend {
     }
 
     const claudeCodeBin = resolveClaudeCodeBin();
-    await assertClaudeCodeBin(claudeCodeBin, { cwd: options.cwd, isolateAnthropicEnv: true });
+    const launchEnv = withClaudeCodeAccountLaunchEnv({}, this.configDir);
+    await assertClaudeCodeBin(claudeCodeBin, {
+      cwd: options.cwd,
+      env: launchEnv,
+      isolateAnthropicEnv: true,
+      unsetEnv: CLAUDE_CODE_ACCOUNT_UNSET_ENV,
+    });
     const nativeSessionId = options.resume ? options.backendSessionId : null;
-    const expectedLogPath = nativeSessionId ? resolveClaudeCodeSessionLogPath(nativeSessionId, options.cwd) : null;
-    const existingLogPath = nativeSessionId ? await findClaudeCodeSessionLog(nativeSessionId, options.cwd) : null;
-    const excludedLogPaths = nativeSessionId ? undefined : await snapshotClaudeCodeSessionLogPaths(options.cwd);
+    const expectedLogPath = nativeSessionId ? resolveClaudeCodeSessionLogPath(nativeSessionId, options.cwd, this.configDir) : null;
+    const existingLogPath = nativeSessionId ? await findClaudeCodeSessionLog(nativeSessionId, options.cwd, this.configDir) : null;
+    const excludedLogPaths = nativeSessionId ? undefined : await snapshotClaudeCodeSessionLogPaths(options.cwd, this.configDir);
     const discoveryStartedAtMs = nativeSessionId ? null : Date.now() - 1000;
     const args = buildClaudeCodeArgs(options);
     // Use the FULL normalized backend session id (not a 12-char prefix) so the reaper's
@@ -100,8 +121,9 @@ export class ClaudeCodeBackend implements Backend {
     const pty = await this.provider.start(claudeCodeBin, args, {
       cwd: options.cwd,
       sessionName,
-      env: CLAUDE_CODE_BACKGROUND_SUPPRESSION_ENV,
+      env: launchEnv,
       isolateAnthropicEnv: true,
+      unsetEnv: CLAUDE_CODE_ACCOUNT_UNSET_ENV,
     });
 
     let primaryError: unknown = null;
@@ -155,7 +177,7 @@ export class ClaudeCodeBackend implements Backend {
             if (retryInitialOffset !== null) {
               activeLogPath = retryLogPath ?? existingLogPath;
             } else if (nativeSessionId) {
-              activeLogPath = await findClaudeCodeSessionLog(nativeSessionId, options.cwd) ?? existingLogPath;
+              activeLogPath = await findClaudeCodeSessionLog(nativeSessionId, options.cwd, this.configDir) ?? existingLogPath;
             } else {
               activeLogPath = retryLogPath ?? existingLogPath;
             }
@@ -202,6 +224,7 @@ export class ClaudeCodeBackend implements Backend {
                 knownLogPath: activeLogPath,
                 expectedLogPath,
                 cwd: options.cwd,
+                configDir: this.configDir,
                 discoveryStartedAtMs,
                 excludedLogPaths,
                 paceIntermediateEvents: options.paceIntermediateEvents === true,
@@ -226,6 +249,7 @@ export class ClaudeCodeBackend implements Backend {
                   : undefined,
                 onSessionLogIdle: createClaudeSessionLogIdleDebugLogger({
                   debugLog: options.debugLog,
+                  backendId: this.backendId,
                   backendSessionId: options.backendSessionId,
                   nativeSessionId,
                   ptySessionId: pty.id,
@@ -266,7 +290,7 @@ export class ClaudeCodeBackend implements Backend {
       await stateStore.save({
         ...resultExpectedState,
         lastProviderSessionId: pty.id,
-        sessionLogPath: await findClaudeCodeSessionLog(resultSessionId, options.cwd) ?? expectedLogPath,
+        sessionLogPath: await findClaudeCodeSessionLog(resultSessionId, options.cwd, this.configDir) ?? expectedLogPath,
         lastTurnId: request.turnId,
       });
       return {

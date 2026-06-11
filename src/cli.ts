@@ -37,8 +37,9 @@ import { runStreamJsonWorkerLines } from './core/stream-json-worker-runner.js';
 import type { AssistantEventSnapshot, TurnResult } from './core/types.js';
 import { TmuxProvider } from './runners/tmux.js';
 import { registerBackend, getBackendProvider, getKnownBackendNames, resolveRegisteredBackendId } from './core/backend-registry.js';
+import { loadConfiguredBackendInstances } from './core/configured-backend-instances.js';
 import { getOpenPVersion } from './core/version.js';
-import { claudeBackendProvider } from './backends/claude/index.js';
+import { claudeBackendProvider, createClaudeBackendProvider } from './backends/claude/index.js';
 import { codexBackendProvider } from './backends/codex/index.js';
 import { kiroBackendProvider } from './backends/kiro/index.js';
 
@@ -58,6 +59,7 @@ Backends:
   claude    Claude Code interactive backend
   codex     Codex exec backend
   kiro      Kiro ACP backend
+  Configured backend instances from \${XDG_CONFIG_HOME:-~/.config}/open-p/instances.yaml are selectable like built-in backends.
 
 Core options:
   --resume <session-id>       Resume a previously returned open-p session id
@@ -101,6 +103,7 @@ async function main(argv: readonly string[]): Promise<number> {
   let debugLogPath = resolveDebugLogPath(parseDebugLogOption(argv), cwd);
   let verbose = parseVerboseOption(argv);
   try {
+    await registerConfiguredBackendInstances();
     const rawOptions = parseCliArgs(argv, getKnownBackendNames());
     const registeredBackendId = resolveRegisteredBackendId(rawOptions.backend);
     const registeredOptions = { ...rawOptions, backend: registeredBackendId } as typeof rawOptions;
@@ -371,6 +374,22 @@ async function main(argv: readonly string[]): Promise<number> {
       process.stderr.write(formatVerboseError(exitCode, debugLogPath, reasonCode));
     }
     return exitCode;
+  }
+}
+
+async function registerConfiguredBackendInstances(): Promise<void> {
+  for (const instance of await loadConfiguredBackendInstances()) {
+    if (instance.backend === 'claude') {
+      registerBackend(createClaudeBackendProvider({
+        id: instance.id,
+        configDir: instance.configDir,
+      }));
+      continue;
+    }
+    throw new OpenPError(
+      `backend ${instance.backend} does not support configured instances`,
+      EXIT_CODES.usage,
+    );
   }
 }
 

@@ -46,6 +46,18 @@ test('tmux shell command can isolate Anthropic env for local backends', () => {
   );
 });
 
+test('tmux shell command can unset ambient Claude config dir while injecting an instance config dir', () => {
+  assert.equal(
+    buildTmuxShellCommand('claude', [], {
+      CLAUDE_CONFIG_DIR: '/tmp/openp-claude-alt',
+    }, true, {
+      ANTHROPIC_BASE_URL: 'ambient-base',
+      CLAUDE_CONFIG_DIR: '/tmp/ambient-claude',
+    }, ['CLAUDE_CONFIG_DIR']),
+    'env -u ANTHROPIC_BASE_URL -u CLAUDE_CONFIG_DIR CLAUDE_CONFIG_DIR=/tmp/openp-claude-alt claude',
+  );
+});
+
 test('tmux shell command does not strip Anthropic env unless isolation is requested', () => {
   assert.equal(
     buildTmuxShellCommand('claude', [], {}, false),

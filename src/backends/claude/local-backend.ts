@@ -1,4 +1,5 @@
 import type { BackendDescriptor } from '../../core/worker-types.js';
+import { isBuiltInBackendId } from '../../core/backend-ids.js';
 import { CLAUDE_CODE_DESCRIPTOR } from './descriptor.js';
 
 export interface LocalClaudeCodeModelConfig {
@@ -93,7 +94,7 @@ export function buildLocalClaudeCodeDescriptor(config: LocalClaudeCodeBackendCon
 }
 
 export function validateLocalBackendId(id: string): void {
-  if (id === 'claude' || id === 'codex') {
+  if (isBuiltInBackendId(id)) {
     throw new Error(`local backend id must not collide with built-in backend id: ${id}`);
   }
 }

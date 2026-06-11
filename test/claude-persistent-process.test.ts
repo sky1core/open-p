@@ -866,6 +866,41 @@ test('persistent Claude Code startup launch isolates ambient Anthropic env', asy
   assert.equal(capturedEnv?.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS, '1');
 });
 
+test('persistent Claude Code instance startup injects configured Claude config dir and unsets ambient config dir', async () => {
+  const session = new StartupFailureSession(true, true);
+  let capturedEnv: Readonly<Record<string, string>> | undefined;
+  let capturedUnsetEnv: readonly string[] | undefined;
+  const provider: PtyProvider = {
+    start: async (_command: string, _args: readonly string[], options: PtyStartOptions) => {
+      capturedEnv = options.env;
+      capturedUnsetEnv = options.unsetEnv;
+      return session;
+    },
+  };
+  const configDir = '/tmp/openp-claude-alt';
+
+  const started = await startPersistentClaudeCodeProcess({
+    sessionId: randomUUID(),
+    launchSignature: buildLaunchSignature({
+      backendId: 'claude-alt',
+      bin: process.execPath,
+      binArgs: [],
+      env: {
+        CLAUDE_CONFIG_DIR: configDir,
+      },
+      local: false,
+    }),
+    resume: false,
+    cwd: TEST_CWD,
+    provider,
+    timeoutMs: 1_000,
+  });
+
+  await started.shutdown();
+  assert.equal(capturedEnv?.CLAUDE_CONFIG_DIR, configDir);
+  assert.deepEqual(capturedUnsetEnv, ['CLAUDE_CONFIG_DIR']);
+});
+
 test('readiness timeout stays bounded when turn timeout is disabled', () => {
   assert.equal(readinessTimeoutMs(0), 15_000);
   assert.equal(readinessTimeoutMs(1_000), 1_000);

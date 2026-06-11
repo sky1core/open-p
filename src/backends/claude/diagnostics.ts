@@ -3,6 +3,7 @@ import type { ClaudeCodeSessionLogIdleDiagnostic } from './session-log.js';
 
 export function createClaudeSessionLogIdleDebugLogger(input: {
   readonly debugLog: string | null;
+  readonly backendId?: string;
   readonly backendSessionId: string;
   readonly nativeSessionId: string | null;
   readonly ptySessionId: string;
@@ -11,7 +12,7 @@ export function createClaudeSessionLogIdleDebugLogger(input: {
     await appendDebugLog(input.debugLog, {
       event: 'claude_session_log_waiting',
       severity: 'info',
-      backend: 'claude',
+      backend: input.backendId ?? 'claude',
       backendSessionId: input.backendSessionId,
       nativeSessionId: input.nativeSessionId,
       ptySessionId: input.ptySessionId,

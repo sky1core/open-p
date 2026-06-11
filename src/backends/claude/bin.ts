@@ -10,6 +10,7 @@ export async function assertClaudeCodeBin(
   options: {
     readonly env?: Readonly<Record<string, string>>;
     readonly isolateAnthropicEnv?: boolean;
+    readonly unsetEnv?: readonly string[];
     readonly cwd?: string;
   } = {},
 ): Promise<void> {

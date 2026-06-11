@@ -16,7 +16,7 @@ import {
   startPersistentClaudeCodeProcess,
 } from './persistent-process.js';
 import { resolveClaudeCodeBin } from './bin.js';
-import { withClaudeCodeSafeLaunchEnv } from './launch-safety.js';
+import { withClaudeCodeAccountLaunchEnv } from './launch-safety.js';
 
 export interface ClaudeCodeManagedProcess extends ManagedBackendProcess {
   sendTurn(prompt: string, options: PersistentClaudeCodeTurnOptions): Promise<TurnResult>;
@@ -30,17 +30,27 @@ export interface ClaudeCodeWorkerBridgeStartRequest extends ProcessStartRequest 
 
 export type ClaudeCodeWorkerBridgeStarter = (request: ClaudeCodeWorkerBridgeStartRequest) => Promise<ClaudeCodeManagedProcess>;
 
+export interface ClaudeCodeWorkerBridgeOptions {
+  readonly backendId?: string;
+  readonly configDir?: string | null;
+}
+
 export class ClaudeCodeWorkerBridge implements BackendWorkerBridge {
   private readonly manager: PersistentProcessManager<ClaudeCodeManagedProcess>;
   private readonly startProcess: ClaudeCodeWorkerBridgeStarter;
+  private readonly backendId: string;
+  private readonly configDir: string | null;
 
   constructor(
     private readonly provider: PtyProvider = new TmuxProvider(),
     manager?: PersistentProcessManager<ClaudeCodeManagedProcess>,
     startProcess: ClaudeCodeWorkerBridgeStarter = startPersistentClaudeCodeProcess,
+    options: ClaudeCodeWorkerBridgeOptions = {},
   ) {
     this.manager = manager ?? new PersistentProcessManager<ClaudeCodeManagedProcess>();
     this.startProcess = startProcess;
+    this.backendId = options.backendId ?? 'claude';
+    this.configDir = options.configDir ?? null;
   }
 
   async runTurn(request: WorkerTurnRequest): Promise<WorkerTurnResult> {
@@ -50,8 +60,9 @@ export class ClaudeCodeWorkerBridge implements BackendWorkerBridge {
       throw new OpenPError('Claude Code resume requires a session id', EXIT_CODES.usage);
     }
     const backendSessionId = preparedInput.isFirstTurn ? randomUUID() : request.sessionId!;
+    const launchEnv = withClaudeCodeAccountLaunchEnv(request.env ?? {}, this.configDir);
     const launchSignature = buildLaunchSignature({
-      backendId: 'claude',
+      backendId: this.backendId,
       bin: request.bin ?? resolveClaudeCodeBin(),
       binArgs: request.binArgs ?? [],
       model: request.model ?? null,
@@ -59,7 +70,7 @@ export class ClaudeCodeWorkerBridge implements BackendWorkerBridge {
       executionMode: request.executionMode ?? null,
       tools: request.tools ?? null,
       jsonSchema: request.jsonSchema ?? null,
-      env: withClaudeCodeSafeLaunchEnv(request.env ?? {}),
+      env: launchEnv,
       local: request.local ?? false,
     });
 

@@ -110,4 +110,5 @@ test('fails closed when defaultModel is not one of the configured models', () =>
 test('rejects local backend ids that collide with built-ins', () => {
   assert.throws(() => validateLocalBackendId('claude'), /must not collide/);
   assert.throws(() => validateLocalBackendId('codex'), /must not collide/);
+  assert.throws(() => validateLocalBackendId('kiro'), /must not collide/);
 });

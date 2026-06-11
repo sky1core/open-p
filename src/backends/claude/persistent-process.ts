@@ -38,7 +38,9 @@ import { withThinkingSummariesSettings } from './settings.js';
 import { buildClaudeToolsArgs } from './tools.js';
 import {
   appendClaudeCodePtySuppressionArgs,
-  withClaudeCodeSafeLaunchEnv,
+  CLAUDE_CODE_ACCOUNT_UNSET_ENV,
+  CLAUDE_CONFIG_DIR_ENV_KEY,
+  withClaudeCodeAccountLaunchEnv,
 } from './launch-safety.js';
 import { createClaudePtyInterrupter } from './pty-interrupt.js';
 import { assertClaudeCodeBin } from './bin.js';
@@ -100,6 +102,7 @@ export class PersistentClaudeCodeProcess implements ManagedBackendProcess {
     private nativeSessionId: string | null = sessionId,
     private readonly discoveryStartedAtMs: number | null = null,
     private readonly excludedLogPaths?: ReadonlySet<string>,
+    private readonly configDir: string | null = null,
   ) {}
 
   async sendTurn(prompt: string, options: PersistentClaudeCodeTurnOptions): Promise<TurnResult> {
@@ -175,7 +178,7 @@ export class PersistentClaudeCodeProcess implements ManagedBackendProcess {
               this.sessionLogPath = retryLogPath;
             }
             this.sessionLogPath = retryInitialOffset === null && this.nativeSessionId
-              ? await findClaudeCodeSessionLog(this.nativeSessionId, this.cwd) ?? this.sessionLogPath
+              ? await findClaudeCodeSessionLog(this.nativeSessionId, this.cwd, this.configDir) ?? this.sessionLogPath
               : this.sessionLogPath;
             const initialOffset = retryInitialOffset ?? await getFileSize(this.sessionLogPath ?? this.expectedLogPath);
             if (attempt === 0) {
@@ -216,6 +219,7 @@ export class PersistentClaudeCodeProcess implements ManagedBackendProcess {
                 knownLogPath: this.sessionLogPath,
                 expectedLogPath: this.expectedLogPath,
                 cwd: this.cwd,
+                configDir: this.configDir,
                 discoveryStartedAtMs: this.discoveryStartedAtMs,
                 excludedLogPaths: this.excludedLogPaths,
                 paceIntermediateEvents: options.paceIntermediateEvents === true,
@@ -237,6 +241,7 @@ export class PersistentClaudeCodeProcess implements ManagedBackendProcess {
                 onIntermediateAssistantSnapshot: options.onIntermediateAssistantSnapshot,
                 onSessionLogIdle: createClaudeSessionLogIdleDebugLogger({
                   debugLog: options.debugLog ?? null,
+                  backendId: this.launchSignature.backendId,
                   backendSessionId: this.sessionId,
                   nativeSessionId: this.nativeSessionId,
                   ptySessionId: this.pty.id,
@@ -253,7 +258,7 @@ export class PersistentClaudeCodeProcess implements ManagedBackendProcess {
                 this.sessionId = result.sessionId;
               }
               this.sessionLogPath = this.nativeSessionId
-                ? await findClaudeCodeSessionLog(this.nativeSessionId, this.cwd) ?? this.sessionLogPath
+                ? await findClaudeCodeSessionLog(this.nativeSessionId, this.cwd, this.configDir) ?? this.sessionLogPath
                 : this.sessionLogPath;
               this.lastIntermediateText = null;
               this.lastIntermediateReasoningText = null;
@@ -324,7 +329,7 @@ export class PersistentClaudeCodeProcess implements ManagedBackendProcess {
       }
       if (!this.sessionLogPath) {
         this.sessionLogPath = this.nativeSessionId
-          ? await findClaudeCodeSessionLog(this.nativeSessionId, this.cwd)
+          ? await findClaudeCodeSessionLog(this.nativeSessionId, this.cwd, this.configDir)
           : null;
       }
       if (this.sessionLogPath) {
@@ -365,17 +370,19 @@ export class PersistentClaudeCodeProcess implements ManagedBackendProcess {
 export async function startPersistentClaudeCodeProcess(
   options: StartPersistentClaudeCodeProcessOptions,
 ): Promise<PersistentClaudeCodeProcess> {
-  const env = withClaudeCodeSafeLaunchEnv(options.launchSignature.env);
+  const configDir = resolveLaunchSignatureConfigDir(options.launchSignature);
+  const env = withClaudeCodeAccountLaunchEnv(options.launchSignature.env, configDir);
   await assertClaudeCodeBin(options.launchSignature.bin, {
     env,
     isolateAnthropicEnv: true,
+    unsetEnv: CLAUDE_CODE_ACCOUNT_UNSET_ENV,
     cwd: options.cwd,
   });
   const nativeSessionId = options.resume ? options.sessionId : null;
-  const expectedLogPath = nativeSessionId ? resolveClaudeCodeSessionLogPath(nativeSessionId, options.cwd) : null;
-  const existingLogPath = nativeSessionId ? await findClaudeCodeSessionLog(nativeSessionId, options.cwd) : null;
+  const expectedLogPath = nativeSessionId ? resolveClaudeCodeSessionLogPath(nativeSessionId, options.cwd, configDir) : null;
+  const existingLogPath = nativeSessionId ? await findClaudeCodeSessionLog(nativeSessionId, options.cwd, configDir) : null;
   const backgroundOffset = await getFileSize(existingLogPath ?? expectedLogPath);
-  const excludedLogPaths = nativeSessionId ? undefined : await snapshotClaudeCodeSessionLogPaths(options.cwd);
+  const excludedLogPaths = nativeSessionId ? undefined : await snapshotClaudeCodeSessionLogPaths(options.cwd, configDir);
   const discoveryStartedAtMs = nativeSessionId ? null : Date.now() - 1000;
   const args = buildPersistentClaudeCodeArgs(options);
   const sessionName = `openp-${options.sessionId.replaceAll('-', '')}-${randomUUID().replaceAll('-', '').slice(0, 8)}`;
@@ -384,6 +391,7 @@ export async function startPersistentClaudeCodeProcess(
     sessionName,
     env,
     isolateAnthropicEnv: true,
+    unsetEnv: CLAUDE_CODE_ACCOUNT_UNSET_ENV,
   });
   const process = new PersistentClaudeCodeProcess(
     options.sessionId,
@@ -396,6 +404,7 @@ export async function startPersistentClaudeCodeProcess(
     nativeSessionId,
     discoveryStartedAtMs,
     excludedLogPaths,
+    configDir,
   );
   try {
     await waitForClaudeCodeInputReady(pty, readinessTimeoutMs(options.timeoutMs));
@@ -411,6 +420,10 @@ export async function startPersistentClaudeCodeProcess(
     }
     throw error;
   }
+}
+
+function resolveLaunchSignatureConfigDir(launchSignature: LaunchSignature): string | null {
+  return launchSignature.env[CLAUDE_CONFIG_DIR_ENV_KEY] || null;
 }
 
 export function buildPersistentClaudeCodeArgs(options: {

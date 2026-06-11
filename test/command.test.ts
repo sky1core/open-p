@@ -7,6 +7,11 @@ const PRINT_ANTHROPIC_ENV = [
   "process.stdout.write(JSON.stringify({base: process.env.ANTHROPIC_BASE_URL ?? null, extra: process.env.ANTHROPIC_TEST_ENV ?? null}))",
 ];
 
+const PRINT_CLAUDE_CONFIG_ENV = [
+  '-e',
+  "process.stdout.write(JSON.stringify({configDir: process.env.CLAUDE_CONFIG_DIR ?? null}))",
+];
+
 test('execFileText preserves ambient Anthropic env unless isolation is requested', async () => {
   const previousBaseUrl = process.env.ANTHROPIC_BASE_URL;
   const previousExtra = process.env.ANTHROPIC_TEST_ENV;
@@ -42,7 +47,34 @@ test('execFileText preserves ambient Anthropic env unless isolation is requested
   }
 });
 
-function restoreEnv(key: 'ANTHROPIC_BASE_URL' | 'ANTHROPIC_TEST_ENV', value: string | undefined): void {
+test('execFileText can unset ambient Claude config dir and preserve explicit instance config dir', async () => {
+  const previousConfigDir = process.env.CLAUDE_CONFIG_DIR;
+  process.env.CLAUDE_CONFIG_DIR = '/tmp/ambient-claude';
+  try {
+    const isolated = await execFileText(process.execPath, PRINT_CLAUDE_CONFIG_ENV, {
+      env: {},
+      unsetEnv: ['CLAUDE_CONFIG_DIR'],
+    });
+    assert.deepEqual(JSON.parse(isolated.stdout), {
+      configDir: null,
+    });
+
+    const explicit = await execFileText(process.execPath, PRINT_CLAUDE_CONFIG_ENV, {
+      env: { CLAUDE_CONFIG_DIR: '/tmp/openp-claude-alt' },
+      unsetEnv: ['CLAUDE_CONFIG_DIR'],
+    });
+    assert.deepEqual(JSON.parse(explicit.stdout), {
+      configDir: '/tmp/openp-claude-alt',
+    });
+  } finally {
+    restoreEnv('CLAUDE_CONFIG_DIR', previousConfigDir);
+  }
+});
+
+function restoreEnv(
+  key: 'ANTHROPIC_BASE_URL' | 'ANTHROPIC_TEST_ENV' | 'CLAUDE_CONFIG_DIR',
+  value: string | undefined,
+): void {
   if (value === undefined) {
     delete process.env[key];
     return;

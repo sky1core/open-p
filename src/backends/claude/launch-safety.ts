@@ -2,6 +2,9 @@ export const CLAUDE_CODE_BACKGROUND_SUPPRESSION_ENV: Readonly<Record<string, str
   CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1',
 };
 
+export const CLAUDE_CONFIG_DIR_ENV_KEY = 'CLAUDE_CONFIG_DIR';
+export const CLAUDE_CODE_ACCOUNT_UNSET_ENV = [CLAUDE_CONFIG_DIR_ENV_KEY] as const;
+
 const SAFE_ANTHROPIC_ENV_KEYS = new Set(['ANTHROPIC_BASE_URL']);
 
 export const CLAUDE_CODE_PTY_DISALLOWED_TOOLS = 'Monitor,Workflow,AskUserQuestion';
@@ -27,6 +30,20 @@ export function withClaudeCodeSafeLaunchEnv(
     safeEnv[key] = value;
   }
   return withClaudeCodeBackgroundSuppressionEnv(safeEnv);
+}
+
+export function withClaudeCodeAccountLaunchEnv(
+  env: Readonly<Record<string, string>> = {},
+  configDir: string | null = null,
+): Readonly<Record<string, string>> {
+  const launchEnv: Record<string, string> = {
+    ...withClaudeCodeSafeLaunchEnv(env),
+  };
+  delete launchEnv[CLAUDE_CONFIG_DIR_ENV_KEY];
+  if (configDir !== null) {
+    launchEnv[CLAUDE_CONFIG_DIR_ENV_KEY] = configDir;
+  }
+  return launchEnv;
 }
 
 export function appendClaudeCodePtySuppressionArgs(args: string[]): void {

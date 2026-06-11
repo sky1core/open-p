@@ -13,14 +13,15 @@ export function execFileText(
     readonly input?: string;
     readonly env?: Readonly<Record<string, string>>;
     readonly isolateAnthropicEnv?: boolean;
+    readonly unsetEnv?: readonly string[];
     readonly cwd?: string;
   } = {},
 ): Promise<CommandResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, [...args], {
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: (options.env || options.isolateAnthropicEnv)
-        ? buildChildEnv(options.env ?? {}, options.isolateAnthropicEnv ?? false)
+      env: (options.env || options.isolateAnthropicEnv || options.unsetEnv)
+        ? buildChildEnv(options.env ?? {}, options.isolateAnthropicEnv ?? false, options.unsetEnv ?? [])
         : undefined,
       cwd: options.cwd,
     });
@@ -60,7 +61,11 @@ export function execFileText(
   });
 }
 
-export function buildChildEnv(env: Readonly<Record<string, string>>, isolateAnthropicEnv: boolean): NodeJS.ProcessEnv {
+export function buildChildEnv(
+  env: Readonly<Record<string, string>>,
+  isolateAnthropicEnv: boolean,
+  unsetEnv: readonly string[] = [],
+): NodeJS.ProcessEnv {
   const childEnv = { ...process.env };
   if (isolateAnthropicEnv) {
     for (const key of Object.keys(childEnv)) {
@@ -68,6 +73,9 @@ export function buildChildEnv(env: Readonly<Record<string, string>>, isolateAnth
         delete childEnv[key];
       }
     }
+  }
+  for (const key of unsetEnv) {
+    delete childEnv[key];
   }
   return { ...childEnv, ...env };
 }

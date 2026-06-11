@@ -191,6 +191,125 @@ test('single-turn backend launches Claude with background suppression (env + dis
   assert.equal(capturedArgs[disallowIndex + 1], 'Monitor,Workflow,AskUserQuestion');
 });
 
+test('single-turn instance backend injects configured Claude config dir at PTY launch', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-claude-adapter-'));
+  const fakeClaude = join(dir, 'claude');
+  const stateRoot = join(dir, 'state');
+  const instanceConfigDir = join(dir, 'claude-alt');
+  await writeFile(fakeClaude, '#!/bin/sh\n[ "$1" = "--version" ] && { echo "claude 0.0.0"; exit 0; }\nexit 0\n');
+  await chmod(fakeClaude, 0o755);
+
+  const previousPath = process.env.PATH;
+  const previousStateRoot = process.env.XDG_STATE_HOME;
+  const abort = new AbortController();
+  const session = new AbortDuringSubmitSession(() => abort.abort(), () => undefined);
+  let capturedConfigDir: string | undefined;
+  let capturedUnsetEnv: readonly string[] | undefined;
+  const backend = new ClaudeCodeBackend({
+    start: async (_command: string, _args: readonly string[], options: PtyStartOptions): Promise<PtySession> => {
+      capturedConfigDir = options.env?.CLAUDE_CONFIG_DIR;
+      capturedUnsetEnv = options.unsetEnv;
+      return session;
+    },
+  }, {
+    backendId: 'claude-alt',
+    configDir: instanceConfigDir,
+  });
+
+  process.env.PATH = `${dir}:${previousPath ?? ''}`;
+  process.env.XDG_STATE_HOME = stateRoot;
+  try {
+    await assert.rejects(
+      backend.runTurn(
+        {
+          turnId: '33333333-3333-4333-8333-333333333334',
+          prompt: 'hello',
+          jsonSchema: null,
+        },
+        {
+          cwd: dir,
+          backendSessionId: '44444444-4444-4444-8444-444444444445',
+          resume: false,
+          timeoutMs: 0,
+          model: null,
+          reasoningEffort: null,
+          permissionMode: null,
+          jsonSchema: null,
+          backendArgs: [],
+          debugLog: null,
+          signal: abort.signal,
+        },
+      ),
+      isAbortError,
+    );
+  } finally {
+    restoreEnv('PATH', previousPath);
+    restoreEnv('XDG_STATE_HOME', previousStateRoot);
+  }
+
+  assert.equal(capturedConfigDir, instanceConfigDir);
+  assert.deepEqual(capturedUnsetEnv, ['CLAUDE_CONFIG_DIR']);
+});
+
+test('base single-turn Claude backend unsets ambient Claude config dir at PTY launch', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-claude-adapter-'));
+  const fakeClaude = join(dir, 'claude');
+  const stateRoot = join(dir, 'state');
+  await writeFile(fakeClaude, '#!/bin/sh\n[ "$1" = "--version" ] && { echo "claude 0.0.0"; exit 0; }\nexit 0\n');
+  await chmod(fakeClaude, 0o755);
+
+  const previousPath = process.env.PATH;
+  const previousStateRoot = process.env.XDG_STATE_HOME;
+  const previousConfigDir = process.env.CLAUDE_CONFIG_DIR;
+  const abort = new AbortController();
+  const session = new AbortDuringSubmitSession(() => abort.abort(), () => undefined);
+  let capturedConfigDir: string | undefined;
+  let capturedUnsetEnv: readonly string[] | undefined;
+  const backend = new ClaudeCodeBackend({
+    start: async (_command: string, _args: readonly string[], options: PtyStartOptions): Promise<PtySession> => {
+      capturedConfigDir = options.env?.CLAUDE_CONFIG_DIR;
+      capturedUnsetEnv = options.unsetEnv;
+      return session;
+    },
+  });
+
+  process.env.PATH = `${dir}:${previousPath ?? ''}`;
+  process.env.XDG_STATE_HOME = stateRoot;
+  process.env.CLAUDE_CONFIG_DIR = join(dir, 'ambient-claude');
+  try {
+    await assert.rejects(
+      backend.runTurn(
+        {
+          turnId: '33333333-3333-4333-8333-333333333335',
+          prompt: 'hello',
+          jsonSchema: null,
+        },
+        {
+          cwd: dir,
+          backendSessionId: '44444444-4444-4444-8444-444444444446',
+          resume: false,
+          timeoutMs: 0,
+          model: null,
+          reasoningEffort: null,
+          permissionMode: null,
+          jsonSchema: null,
+          backendArgs: [],
+          debugLog: null,
+          signal: abort.signal,
+        },
+      ),
+      isAbortError,
+    );
+  } finally {
+    restoreEnv('PATH', previousPath);
+    restoreEnv('XDG_STATE_HOME', previousStateRoot);
+    restoreEnv('CLAUDE_CONFIG_DIR', previousConfigDir);
+  }
+
+  assert.equal(capturedConfigDir, undefined);
+  assert.deepEqual(capturedUnsetEnv, ['CLAUDE_CONFIG_DIR']);
+});
+
 test('single-turn backend rejects open-p claude command before starting PTY', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'openp-claude-adapter-'));
   const fakeOpenP = join(dir, 'claude');
