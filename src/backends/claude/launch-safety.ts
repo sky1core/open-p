@@ -2,6 +2,11 @@ export const CLAUDE_CODE_BACKGROUND_SUPPRESSION_ENV: Readonly<Record<string, str
   CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1',
 };
 
+export const CLAUDE_CODE_RESUME_MODAL_SUPPRESSION_ENV: Readonly<Record<string, string>> = {
+  CLAUDE_CODE_RESUME_THRESHOLD_MINUTES: '1000000000',
+  CLAUDE_CODE_RESUME_TOKEN_THRESHOLD: '1000000000000',
+};
+
 export const CLAUDE_CONFIG_DIR_ENV_KEY = 'CLAUDE_CONFIG_DIR';
 export const CLAUDE_CODE_ACCOUNT_UNSET_ENV = [CLAUDE_CONFIG_DIR_ENV_KEY] as const;
 
@@ -19,6 +24,15 @@ export function withClaudeCodeBackgroundSuppressionEnv(
   };
 }
 
+export function withClaudeCodeResumeModalSuppressionEnv(
+  env: Readonly<Record<string, string>> = {},
+): Readonly<Record<string, string>> {
+  return {
+    ...env,
+    ...CLAUDE_CODE_RESUME_MODAL_SUPPRESSION_ENV,
+  };
+}
+
 export function withClaudeCodeSafeLaunchEnv(
   env: Readonly<Record<string, string>> = {},
 ): Readonly<Record<string, string>> {
@@ -29,7 +43,7 @@ export function withClaudeCodeSafeLaunchEnv(
     }
     safeEnv[key] = value;
   }
-  return withClaudeCodeBackgroundSuppressionEnv(safeEnv);
+  return withClaudeCodeResumeModalSuppressionEnv(withClaudeCodeBackgroundSuppressionEnv(safeEnv));
 }
 
 export function withClaudeCodeAccountLaunchEnv(
