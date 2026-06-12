@@ -9,6 +9,7 @@ export async function waitForClaudeCodeInputReady(
   const deadline = timeoutMs === 0 ? null : Date.now() + timeoutMs;
   const confirmTrustPrompt = options.confirmTrustPrompt ?? true;
   let trustConfirmed = false;
+  let consecutiveMenuSelectionFrames = 0;
   let lastScreenText = '';
   while (deadline === null || Date.now() < deadline) {
     if (!(await pty.isAlive())) {
@@ -26,6 +27,19 @@ export async function waitForClaudeCodeInputReady(
       throw new OpenPError(`Claude Code is still waiting for workspace trust after confirmation.${formatReadinessScreen(lastScreenText)}`, EXIT_CODES.backendStartFailed);
     }
     const cursorLine = await pty.captureCursorLine().catch(() => '');
+    if (isClaudeCodeMenuSelectionLine(cursorLine)) {
+      consecutiveMenuSelectionFrames += 1;
+      if (consecutiveMenuSelectionFrames >= 2) {
+        throw new OpenPError(
+          `Claude Code is showing an interactive selection prompt that open-p cannot answer ` +
+            `(e.g., a first-run bypass permissions approval). Complete it manually by running ` +
+            `Claude Code once with the same configuration directory.${formatReadinessScreen(lastScreenText)}`,
+          EXIT_CODES.backendStartFailed,
+        );
+      }
+    } else {
+      consecutiveMenuSelectionFrames = 0;
+    }
     if (isClaudeCodeInputPromptLine(cursorLine)) {
       await sleep(300);
       return;
@@ -49,11 +63,16 @@ export async function isClaudeCodeInputReady(pty: Pick<PtySession, 'captureCurso
 
 export function isClaudeCodeInputPromptLine(line: string): boolean {
   const cleanLine = cleanClaudeCodeInputLine(line);
-  return /^❯(?:\s|$)/u.test(cleanLine);
+  return /^❯(?:\s|$)/u.test(cleanLine) && !isClaudeCodeMenuSelectionLine(line);
 }
 
 export function isClaudeCodeEmptyInputPromptLine(line: string): boolean {
   return /^❯\s*$/u.test(cleanClaudeCodeInputLine(line));
+}
+
+export function isClaudeCodeMenuSelectionLine(line: string): boolean {
+  // Numbered drafts are ambiguous with startup menus, so recovery/readiness must fail closed.
+  return /^❯\s*\d+\.\s/u.test(cleanClaudeCodeInputLine(line));
 }
 
 function cleanClaudeCodeInputLine(line: string): string {
