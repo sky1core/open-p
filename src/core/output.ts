@@ -15,11 +15,8 @@ export interface OutputOptions {
   readonly mcpServers?: readonly unknown[];
   readonly contextWindow?: number | null;
   readonly structuredOutputToolUseId?: string | null;
-  readonly suppressAssistantTexts?: readonly string[];
-  readonly suppressAssistantReasoningTexts?: readonly string[];
   readonly suppressAssistantSnapshots?: readonly AssistantEventSnapshot[];
   readonly previouslyEmittedAssistantEvents?: readonly Record<string, unknown>[];
-  readonly suppressFallbackAssistantText?: boolean;
   readonly warnings?: readonly OutputWarning[];
   readonly verbose?: boolean;
 }
@@ -78,36 +75,14 @@ export function formatTurnResult(result: TurnResult, options: OutputOptions): st
     normalizedSuppressedSnapshots,
   );
   const snapshotStructuredOutputToolUseId = findStructuredOutputToolUseId(normalizedSnapshots);
-  const suppressedAssistantTexts = (options.suppressAssistantTexts ?? [])
-    .filter((text) => text.length > 0);
-  const suppressedAssistantReasoningTexts = (options.suppressAssistantReasoningTexts ?? [])
-    .filter((text) => text.length > 0);
-  const latestSuppressedAssistantText = suppressedAssistantTexts
-    .at(-1) ?? null;
-  const fallbackReasoningContent = isReasoningContentAlreadySuppressed(
-    result.reasoningContent,
-    suppressedAssistantReasoningTexts,
-  )
-    ? null
-    : result.reasoningContent;
+  const fallbackReasoningContent = result.reasoningContent;
   const fallbackStructuredOutput = snapshotStructuredOutputToolUseId === null
     ? result.structuredOutput
     : undefined;
-  const assistantSnapshots = filterAssistantSnapshots(normalizedSnapshots, {
-    text: suppressedAssistantTexts,
-    reasoning: suppressedAssistantReasoningTexts,
-    snapshots: normalizedSuppressedSnapshots ?? [],
-  });
-  const semanticSnapshotsContainResultText = snapshotsContainSemanticAssistantText(normalizedSnapshots, result.text);
+  const assistantSnapshots = filterAssistantSnapshots(normalizedSnapshots, normalizedSuppressedSnapshots ?? []);
   const suppressedSnapshotsContainResultText = nonSemanticSnapshotsContainAssistantText(
     normalizedSuppressedSnapshots,
     result.text,
-  );
-  const blankResultTextFallback = shouldBlankResultTextFallback(
-    result.text,
-    latestSuppressedAssistantText,
-    options.suppressFallbackAssistantText,
-    semanticSnapshotsContainResultText,
   );
   const assistantEvents = buildAssistantEventsFromSnapshots(
     assistantSnapshots,
@@ -157,12 +132,7 @@ export function formatTurnResult(result: TurnResult, options: OutputOptions): st
     openPAnswerEventsAggregateResultText(assistantEvents, result.text) ||
     openPAnswerEventsAggregateResultText(suppressedResultSnapshotOpenPEvents, result.text) ||
     suppressedSnapshotsContainResultText;
-  const shouldEmitTextFallback = shouldEmitResultTextFallback(
-    result.text,
-    latestSuppressedAssistantText,
-    options.suppressFallbackAssistantText,
-    semanticSnapshotsContainResultText,
-  ) && !suppressedSnapshotsContainResultText;
+  const shouldEmitTextFallback = result.text.length > 0 && !suppressedSnapshotsContainResultText;
   const terminalAssistantEvents = buildTerminalAssistantEventRecords({
     existingAssistantEvents: assistantEvents,
     resultTextFallbackSourceEvents,
@@ -174,7 +144,6 @@ export function formatTurnResult(result: TurnResult, options: OutputOptions): st
     snapshotStructuredOutputToolUseId,
     structuredOutputToolUseId,
     shouldEmitTextFallback,
-    blankResultTextFallback,
     turnId: result.turnId,
     sessionId: options.backendSessionId,
     requestId: result.requestId,
@@ -394,11 +363,8 @@ export function formatWorkerTurnResult(result: WorkerTurnResult, event: {
   readonly backend?: string | null;
   readonly model?: string | null;
   readonly structuredOutputToolUseId?: string | null;
-  readonly suppressAssistantTexts?: readonly string[];
-  readonly suppressAssistantReasoningTexts?: readonly string[];
   readonly suppressAssistantSnapshots?: readonly AssistantEventSnapshot[];
   readonly previouslyEmittedAssistantEvents?: readonly Record<string, unknown>[];
-  readonly suppressFallbackAssistantText?: boolean;
   readonly warnings?: readonly OutputWarning[];
 }): string {
   const usage = {
@@ -432,36 +398,14 @@ export function formatWorkerTurnResult(result: WorkerTurnResult, event: {
     normalizedSuppressedSnapshots,
   );
   const snapshotStructuredOutputToolUseId = findStructuredOutputToolUseId(normalizedSnapshots);
-  const suppressedAssistantTexts = (event.suppressAssistantTexts ?? [])
-    .filter((text) => text.length > 0);
-  const suppressedAssistantReasoningTexts = (event.suppressAssistantReasoningTexts ?? [])
-    .filter((text) => text.length > 0);
-  const latestSuppressedAssistantText = suppressedAssistantTexts
-    .at(-1) ?? null;
-  const fallbackReasoningContent = isReasoningContentAlreadySuppressed(
-    result.reasoningContent,
-    suppressedAssistantReasoningTexts,
-  )
-    ? null
-    : result.reasoningContent;
+  const fallbackReasoningContent = result.reasoningContent;
   const fallbackStructuredOutput = snapshotStructuredOutputToolUseId === null
     ? result.structuredOutput
     : undefined;
-  const assistantSnapshots = filterAssistantSnapshots(normalizedSnapshots, {
-    text: suppressedAssistantTexts,
-    reasoning: suppressedAssistantReasoningTexts,
-    snapshots: normalizedSuppressedSnapshots ?? [],
-  });
-  const semanticSnapshotsContainResultText = snapshotsContainSemanticAssistantText(normalizedSnapshots, result.content);
+  const assistantSnapshots = filterAssistantSnapshots(normalizedSnapshots, normalizedSuppressedSnapshots ?? []);
   const suppressedSnapshotsContainResultText = nonSemanticSnapshotsContainAssistantText(
     normalizedSuppressedSnapshots,
     result.content,
-  );
-  const blankResultTextFallback = shouldBlankResultTextFallback(
-    result.content,
-    latestSuppressedAssistantText,
-    event.suppressFallbackAssistantText,
-    semanticSnapshotsContainResultText,
   );
   const assistantEvents = buildAssistantEventsFromSnapshots(
     assistantSnapshots,
@@ -518,21 +462,12 @@ export function formatWorkerTurnResult(result: WorkerTurnResult, event: {
     ? false
     : Boolean(effectiveFallbackReasoningContent)
       || fallbackStructuredOutput !== undefined
-      || shouldEmitResultTextFallback(
-        result.content,
-        latestSuppressedAssistantText,
-        event.suppressFallbackAssistantText,
-        semanticSnapshotsContainResultText,
-      ) && !suppressedSnapshotsContainResultText;
+      || (result.content.length > 0 && !suppressedSnapshotsContainResultText);
   const textFallbackAfterSnapshots = result.structuredOutput === undefined &&
     assistantEvents.length > 0 &&
     !assistantSnapshotsContainResultText &&
-    shouldEmitResultTextFallback(
-      result.content,
-      latestSuppressedAssistantText,
-      event.suppressFallbackAssistantText,
-      semanticSnapshotsContainResultText,
-    ) && !suppressedSnapshotsContainResultText
+    result.content.length > 0 &&
+    !suppressedSnapshotsContainResultText
     ? buildResultTextAssistantEventRecords({
         turnId: event.turnId,
         sessionId: result.sessionId,
@@ -582,14 +517,9 @@ export function formatWorkerTurnResult(result: WorkerTurnResult, event: {
               sessionId: result.sessionId,
               answerText: resultTextFallbackAnswerText(resultTextFallbackSourceEvents, result.content),
               reasoningText: effectiveFallbackReasoningContent,
-              emitAnswer: shouldEmitResultTextFallback(
-                result.content,
-                latestSuppressedAssistantText,
-                event.suppressFallbackAssistantText,
-                semanticSnapshotsContainResultText,
-              ) && !suppressedSnapshotsContainResultText &&
-                fallbackStructuredOutput === undefined &&
-                !blankResultTextFallback,
+              emitAnswer: result.content.length > 0 &&
+                !suppressedSnapshotsContainResultText &&
+                fallbackStructuredOutput === undefined,
               requestId: result.requestId,
               stopReason: result.diagnostics.stopReason,
               model: effectiveModel,
@@ -683,13 +613,7 @@ function resultAnswerTextForTextOutput(result: TurnResult, options: OutputOption
     result.structuredOutput,
     structuredOutputToolUseId,
   );
-  const suppressedAssistantTexts = options.suppressAssistantTexts ?? [];
-  const suppressedAssistantReasoningTexts = options.suppressAssistantReasoningTexts ?? [];
-  const assistantSnapshots = filterAssistantSnapshots(normalizedSnapshots, {
-    text: suppressedAssistantTexts,
-    reasoning: suppressedAssistantReasoningTexts,
-    snapshots: normalizedSuppressedSnapshots ?? [],
-  });
+  const assistantSnapshots = filterAssistantSnapshots(normalizedSnapshots, normalizedSuppressedSnapshots ?? []);
   const resultUsage = result.diagnostics.usage;
   const assistantEventUsage = resultUsage;
   const assistantEvents = buildAssistantEventsFromSnapshots(
@@ -726,36 +650,6 @@ function resultAnswerTextForTextOutput(result: TurnResult, options: OutputOption
   // append the missing remainder (or the full text) like the JSON-family
   // result fallback so text output never drops confirmed answer content.
   return [...answers, resultTextFallbackAnswerText(assistantEvents, result.text)].join('\n\n');
-}
-
-function shouldEmitResultTextFallback(
-  text: string,
-  latestSuppressedText: string | null,
-  suppressFallback: boolean | undefined,
-  semanticSnapshotMatchesResult = false,
-): boolean {
-  if (text.length === 0) {
-    return false;
-  }
-  if (semanticSnapshotMatchesResult) {
-    return true;
-  }
-  if (!suppressFallback) {
-    return true;
-  }
-  return latestSuppressedText !== text;
-}
-
-function shouldBlankResultTextFallback(
-  text: string,
-  latestSuppressedText: string | null,
-  suppressFallback: boolean | undefined,
-  semanticSnapshotMatchesResult: boolean,
-): boolean {
-  return Boolean(suppressFallback) &&
-    !semanticSnapshotMatchesResult &&
-    text.length > 0 &&
-    latestSuppressedText === text;
 }
 
 type OpenPEventKind = 'answer' | 'reasoning' | 'tool_call' | 'tool_result' | 'structured_output' | 'metadata';
@@ -2253,7 +2147,6 @@ function buildTerminalAssistantEventRecords(event: {
   readonly snapshotStructuredOutputToolUseId: string | null;
   readonly structuredOutputToolUseId: string | null;
   readonly shouldEmitTextFallback: boolean;
-  readonly blankResultTextFallback: boolean;
   readonly turnId: string;
   readonly sessionId: string;
   readonly requestId?: string | null;
@@ -2330,8 +2223,7 @@ function buildTerminalAssistantEventRecords(event: {
     answerText: resultTextFallbackAnswerText(event.resultTextFallbackSourceEvents, event.text),
     reasoningText: event.fallbackReasoningContent,
     emitAnswer: event.shouldEmitTextFallback &&
-      event.fallbackStructuredOutput === undefined &&
-      !event.blankResultTextFallback,
+      event.fallbackStructuredOutput === undefined,
     requestId: event.requestId,
     stopReason: event.stopReason ?? null,
     model: event.model,
@@ -2463,105 +2355,18 @@ function normalizeStructuredOutputFallbackSnapshots(
 
 function filterAssistantSnapshots(
   snapshots: readonly AssistantEventSnapshot[] | undefined,
-  suppressed: {
-    readonly text: readonly string[];
-    readonly reasoning: readonly string[];
-    readonly snapshots: readonly AssistantEventSnapshot[];
-  },
+  suppressedSnapshots: readonly AssistantEventSnapshot[],
 ): readonly AssistantEventSnapshot[] | undefined {
   if (!snapshots) {
     return snapshots;
   }
-  const remainingSuppressedSnapshotCounts = countTexts(suppressed.snapshots.map(snapshotSuppressionKey));
-  if (
-    suppressed.text.length === 0 &&
-    suppressed.reasoning.length === 0 &&
-    remainingSuppressedSnapshotCounts.size === 0
-  ) {
-    return snapshots.filter((snapshot) => !isEmptyReasoningOnlySnapshot(snapshot));
-  }
-  const remainingSuppressedTextCounts = countTexts(suppressed.text);
-  const remainingSuppressedReasoningCounts = countTexts(suppressed.reasoning);
-  const remainingSuppressedReasoningSegmentCounts = countSuppressedReasoningSegments(suppressed.reasoning);
-  const output: AssistantEventSnapshot[] = [];
-  let pendingReasoningSnapshots: AssistantEventSnapshot[] = [];
-  let pendingReasoningText: string | null = null;
-  const flushPendingReasoning = (): void => {
-    if (pendingReasoningSnapshots.length > 0) {
-      output.push(...pendingReasoningSnapshots);
-      pendingReasoningSnapshots = [];
-      pendingReasoningText = null;
-    }
-  };
-  const suppressReasoningIfMatched = (): boolean => {
-    if (pendingReasoningText === null) {
-      return false;
-    }
-    const remainingCount = remainingSuppressedReasoningCounts.get(pendingReasoningText) ?? 0;
-    if (remainingCount <= 0) {
-      return false;
-    }
-    remainingSuppressedReasoningCounts.set(pendingReasoningText, remainingCount - 1);
-    pendingReasoningSnapshots = [];
-    pendingReasoningText = null;
-    return true;
-  };
-  for (const snapshot of snapshots) {
+  const remainingSuppressedSnapshotCounts = countTexts(suppressedSnapshots.map(snapshotSuppressionKey));
+  return snapshots.filter((snapshot) => {
     if (consumeSuppressedSnapshot(snapshot, remainingSuppressedSnapshotCounts)) {
-      continue;
+      return false;
     }
-    if (snapshot.semanticKind) {
-      flushPendingReasoning();
-      output.push(snapshot);
-      continue;
-    }
-    if (isEmptyReasoningOnlySnapshot(snapshot)) {
-      continue;
-    }
-    const text = textOnlySnapshotText(snapshot);
-    if (text !== null) {
-      flushPendingReasoning();
-      const remainingCount = remainingSuppressedTextCounts.get(text) ?? 0;
-      if (remainingCount <= 0) {
-        output.push(snapshot);
-        continue;
-      }
-      remainingSuppressedTextCounts.set(text, remainingCount - 1);
-      continue;
-    }
-    const reasoning = reasoningOnlySnapshotText(snapshot);
-    if (reasoning === null) {
-      flushPendingReasoning();
-      const filteredSnapshot = filterMixedAssistantSnapshot(snapshot, {
-        text: remainingSuppressedTextCounts,
-        reasoning: remainingSuppressedReasoningCounts,
-        reasoningSegments: remainingSuppressedReasoningSegmentCounts,
-      });
-      if (filteredSnapshot !== null) {
-        output.push(filteredSnapshot);
-      }
-      continue;
-    }
-    if (consumeSuppressedReasoning(
-      reasoning,
-      remainingSuppressedReasoningCounts,
-      remainingSuppressedReasoningSegmentCounts,
-    )) {
-      continue;
-    }
-    pendingReasoningSnapshots.push(snapshot);
-    pendingReasoningText = pendingReasoningText === null
-      ? reasoning
-      : `${pendingReasoningText}\n\n${reasoning}`;
-    if (!hasRemainingSuppressedReasoningPrefix(pendingReasoningText, remainingSuppressedReasoningCounts)) {
-      if (suppressReasoningIfMatched()) {
-        continue;
-      }
-      flushPendingReasoning();
-    }
-  }
-  flushPendingReasoning();
-  return output;
+    return !isEmptyReasoningOnlySnapshot(snapshot);
+  });
 }
 
 function intersectSuppressedResultSnapshots(
@@ -2596,18 +2401,6 @@ function snapshotSuppressionKey(snapshot: AssistantEventSnapshot): string {
   return JSON.stringify(snapshot);
 }
 
-function hasRemainingSuppressedReasoningPrefix(prefix: string | null, counts: ReadonlyMap<string, number>): boolean {
-  if (prefix === null) {
-    return false;
-  }
-  for (const [text, count] of counts.entries()) {
-    if (count > 0 && text.startsWith(`${prefix}\n\n`)) {
-      return true;
-    }
-  }
-  return false;
-}
-
 function isEmptyReasoningOnlySnapshot(snapshot: AssistantEventSnapshot): boolean {
   const content = snapshot.message.content;
   if (!Array.isArray(content) || content.length === 0) {
@@ -2637,43 +2430,6 @@ function countTexts(texts: readonly string[]): Map<string, number> {
     counts.set(text, (counts.get(text) ?? 0) + 1);
   }
   return counts;
-}
-
-function countSuppressedReasoningSegments(texts: readonly string[]): Map<string, number> {
-  const counts = new Map<string, number>();
-  let previousText: string | null = null;
-  for (const text of texts) {
-    const newText = previousText !== null && text.startsWith(`${previousText}\n\n`)
-      ? text.slice(previousText.length + 2)
-      : text;
-    previousText = text;
-    for (const segment of newText.split('\n\n')) {
-      if (segment.length > 0) {
-        counts.set(segment, (counts.get(segment) ?? 0) + 1);
-      }
-    }
-  }
-  return counts;
-}
-
-function textOnlySnapshotText(snapshot: AssistantEventSnapshot): string | null {
-  const content = snapshot.message.content;
-  if (!Array.isArray(content) || content.length === 0) {
-    return null;
-  }
-  const parts: string[] = [];
-  for (const block of content) {
-    if (!block || typeof block !== 'object' || Array.isArray(block)) {
-      return null;
-    }
-    const item = block as Record<string, unknown>;
-    if (item.type !== 'text' || typeof item.text !== 'string') {
-      return null;
-    }
-    parts.push(item.text);
-  }
-  const text = parts.join('\n\n');
-  return text.length > 0 ? text : null;
 }
 
 function snapshotsContainAssistantText(
@@ -2721,16 +2477,6 @@ function snapshotHasToolPayload(snapshot: AssistantEventSnapshot): boolean {
     extractOpenPToolResults(snapshot.message).length > 0;
 }
 
-function snapshotsContainSemanticAssistantText(
-  snapshots: readonly AssistantEventSnapshot[] | undefined,
-  text: string,
-): boolean {
-  if (!snapshots || text.length === 0) {
-    return false;
-  }
-  return snapshots.some((snapshot) => Boolean(snapshot.semanticKind) && snapshotAssistantText(snapshot) === text);
-}
-
 function snapshotAssistantText(snapshot: AssistantEventSnapshot): string | null {
   const content = snapshot.message.content;
   if (!Array.isArray(content) || content.length === 0) {
@@ -2748,162 +2494,6 @@ function snapshotAssistantText(snapshot: AssistantEventSnapshot): string | null 
   }
   const text = parts.join('\n\n');
   return text.length > 0 ? text : null;
-}
-
-function reasoningOnlySnapshotText(snapshot: AssistantEventSnapshot): string | null {
-  const content = snapshot.message.content;
-  if (!Array.isArray(content) || content.length === 0) {
-    return null;
-  }
-  const parts: string[] = [];
-  for (const block of content) {
-    if (!block || typeof block !== 'object' || Array.isArray(block)) {
-      return null;
-    }
-    const item = block as Record<string, unknown>;
-    if (item.type === 'thinking') {
-      const text = reasoningBlockText(item);
-      if (text === null) {
-        return null;
-      }
-      parts.push(text);
-      continue;
-    }
-    if (item.type === 'reasoning') {
-      const text = reasoningBlockText(item);
-      if (text === null) {
-        return null;
-      }
-      parts.push(text);
-      continue;
-    }
-    return null;
-  }
-  const text = parts.join('\n\n');
-  return text.length > 0 ? text : null;
-}
-
-function filterMixedAssistantSnapshot(
-  snapshot: AssistantEventSnapshot,
-  suppressed: {
-    readonly text: Map<string, number>;
-    readonly reasoning: Map<string, number>;
-    readonly reasoningSegments: Map<string, number>;
-  },
-): AssistantEventSnapshot | null {
-  const content = snapshot.message.content;
-  if (!Array.isArray(content) || content.length === 0) {
-    return snapshot;
-  }
-  const textParts: string[] = [];
-  const reasoningParts: string[] = [];
-  for (const block of content) {
-    if (!block || typeof block !== 'object' || Array.isArray(block)) {
-      return snapshot;
-    }
-    const item = block as Record<string, unknown>;
-    if (item.type === 'text' && typeof item.text === 'string') {
-      textParts.push(item.text);
-      continue;
-    }
-    if (item.type === 'thinking' || item.type === 'reasoning') {
-      const reasoning = reasoningBlockText(item);
-      if (reasoning !== null && reasoning.length > 0) {
-        reasoningParts.push(reasoning);
-      }
-      continue;
-    }
-  }
-
-  const text = textParts.join('\n\n');
-  const reasoning = reasoningParts.join('\n\n');
-  const suppressText = text.length > 0 && consumeSuppressedText(text, suppressed.text);
-  const suppressReasoning = reasoning.length > 0 && consumeSuppressedReasoning(
-    reasoning,
-    suppressed.reasoning,
-    suppressed.reasoningSegments,
-  );
-  if (!suppressText && !suppressReasoning) {
-    return snapshot;
-  }
-
-  const filteredContent = content.filter((block) => {
-    const item = block as Record<string, unknown>;
-    if (suppressText && item.type === 'text') {
-      return false;
-    }
-    if (suppressReasoning && (item.type === 'thinking' || item.type === 'reasoning')) {
-      return false;
-    }
-    const reasoning = item.type === 'thinking' || item.type === 'reasoning'
-      ? reasoningBlockText(item)
-      : null;
-    if ((item.type === 'thinking' || item.type === 'reasoning') && (!reasoning || reasoning.length === 0)) {
-      return false;
-    }
-    return true;
-  });
-  if (filteredContent.length === 0) {
-    return null;
-  }
-  return {
-    ...snapshot,
-    message: {
-      ...snapshot.message,
-      content: filteredContent,
-    },
-  };
-}
-
-function consumeSuppressedText(text: string, counts: Map<string, number>): boolean {
-  const remainingCount = counts.get(text) ?? 0;
-  if (remainingCount <= 0) {
-    return false;
-  }
-  counts.set(text, remainingCount - 1);
-  return true;
-}
-
-function isReasoningContentAlreadySuppressed(
-  text: string | null | undefined,
-  suppressedReasoningTexts: readonly string[],
-): boolean {
-  if (!text) {
-    return false;
-  }
-  if (consumeSuppressedText(text, countTexts(suppressedReasoningTexts))) {
-    return true;
-  }
-  return consumeSuppressedReasoningSegments(text, countSuppressedReasoningSegments(suppressedReasoningTexts));
-}
-
-function consumeSuppressedReasoning(
-  text: string,
-  exactCounts: Map<string, number>,
-  segmentCounts: Map<string, number>,
-): boolean {
-  if (consumeSuppressedText(text, exactCounts)) {
-    consumeSuppressedReasoningSegments(text, segmentCounts);
-    return true;
-  }
-  return consumeSuppressedReasoningSegments(text, segmentCounts);
-}
-
-function consumeSuppressedReasoningSegments(text: string, counts: Map<string, number>): boolean {
-  const segments = text.split('\n\n').filter((segment) => segment.length > 0);
-  if (segments.length === 0) {
-    return false;
-  }
-  const needed = countTexts(segments);
-  for (const [segment, count] of needed.entries()) {
-    if ((counts.get(segment) ?? 0) < count) {
-      return false;
-    }
-  }
-  for (const [segment, count] of needed.entries()) {
-    counts.set(segment, (counts.get(segment) ?? 0) - count);
-  }
-  return true;
 }
 
 function reasoningBlockText(block: Record<string, unknown>): string | null {
