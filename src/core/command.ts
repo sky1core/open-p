@@ -36,6 +36,9 @@ export function execFileText(
     child.stderr.on('data', (chunk: string) => {
       stderr += chunk;
     });
+    child.stdin.on('error', () => {
+      // Child exit status remains the source of truth for command success/failure.
+    });
 
     child.on('error', (error: NodeJS.ErrnoException) => {
       if (error.code === 'ENOENT') {

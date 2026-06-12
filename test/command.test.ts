@@ -71,6 +71,25 @@ test('execFileText can unset ambient Claude config dir and preserve explicit ins
   }
 });
 
+test('execFileText settles when child closes stdin before input is written', async () => {
+  const uncaughtErrors: unknown[] = [];
+  const onUncaughtException = (error: unknown): void => {
+    uncaughtErrors.push(error);
+  };
+  process.prependListener('uncaughtException', onUncaughtException);
+  try {
+    const result = await execFileText('bash', ['-c', 'exec 0<&-; sleep 0.2; exit 0'], {
+      input: 'x'.repeat(64 * 1024 * 1024),
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    assert.deepEqual(result, { stdout: '', stderr: '' });
+    assert.deepEqual(uncaughtErrors, []);
+  } finally {
+    process.removeListener('uncaughtException', onUncaughtException);
+  }
+});
+
 function restoreEnv(
   key: 'ANTHROPIC_BASE_URL' | 'ANTHROPIC_TEST_ENV' | 'CLAUDE_CONFIG_DIR',
   value: string | undefined,
