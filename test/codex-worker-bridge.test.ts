@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
-import { access, chmod, mkdir, mkdtemp, symlink, writeFile } from 'node:fs/promises';
+import { access, chmod, mkdir, mkdtemp, readFile, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { CodexWorkerBridge } from '../src/backends/codex/worker-bridge.js';
 import { isAbortError } from '../src/core/abort.js';
@@ -207,6 +207,93 @@ test('CodexWorkerBridge.runTurn rejects unsafe resume session ids before launchi
       error.message.includes('unsafe Codex resume session id'),
   );
   await assert.rejects(access(markerPath), { code: 'ENOENT' });
+});
+
+test('CodexWorkerBridge.runTurn passes request env to Codex child process', async () => {
+  const binDir = await mkdtemp(join(tmpdir(), 'openp-codex-env-bin-'));
+  const envDumpPath = join(binDir, 'env.txt');
+  const fakeCodex = join(binDir, 'codex');
+  const previousDumpPath = process.env.OPENP_FAKE_CODEX_ENV_DUMP;
+  const previousCodexHome = process.env.CODEX_HOME;
+  await writeFile(fakeCodex, [
+    '#!/usr/bin/env node',
+    'const { writeFileSync } = require("node:fs");',
+    'writeFileSync(process.env.OPENP_FAKE_CODEX_ENV_DUMP, process.env.OPENP_CODEX_REQUEST_ENV ?? "<missing>");',
+    'process.stdout.write(JSON.stringify({ type: "thread.started", thread_id: "22222222-2222-4222-8222-222222222222" }) + "\\n");',
+    'process.stdout.write(JSON.stringify({ type: "turn.completed", session_id: "22222222-2222-4222-8222-222222222222", result: "env ok", usage: { input_tokens: 1, output_tokens: 1 } }) + "\\n");',
+    '',
+  ].join('\n'));
+  await chmod(fakeCodex, 0o755);
+  process.env.OPENP_FAKE_CODEX_ENV_DUMP = envDumpPath;
+  process.env.CODEX_HOME = await mkdtemp(join(tmpdir(), 'openp-codex-env-home-'));
+  try {
+    const bridge = new CodexWorkerBridge();
+    const result = await bridge.runTurn({
+      bin: fakeCodex,
+      sessionId: null,
+      isFirstTurn: true,
+      projectRoot: process.cwd(),
+      message: 'hello',
+      timeoutMs: 10000,
+      env: { OPENP_CODEX_REQUEST_ENV: 'request-visible' },
+    });
+
+    assert.equal(result.content, 'env ok');
+    assert.equal(await readFile(envDumpPath, 'utf8'), 'request-visible');
+  } finally {
+    if (previousDumpPath === undefined) {
+      delete process.env.OPENP_FAKE_CODEX_ENV_DUMP;
+    } else {
+      process.env.OPENP_FAKE_CODEX_ENV_DUMP = previousDumpPath;
+    }
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+  }
+});
+
+test('CodexWorkerBridge.runTurn rejects local worker mode before launching Codex', async () => {
+  const binDir = await mkdtemp(join(tmpdir(), 'openp-codex-local-bin-'));
+  const markerPath = join(binDir, 'spawned');
+  const fakeCodex = join(binDir, 'codex');
+  const previousCodexHome = process.env.CODEX_HOME;
+  await writeFile(fakeCodex, [
+    '#!/usr/bin/env node',
+    'const { writeFileSync } = require("node:fs");',
+    `writeFileSync(${JSON.stringify(markerPath)}, "spawned");`,
+    'process.stdout.write(JSON.stringify({ type: "thread.started", thread_id: "22222222-2222-4222-8222-222222222222" }) + "\\n");',
+    'process.stdout.write(JSON.stringify({ type: "turn.completed", session_id: "22222222-2222-4222-8222-222222222222", result: "local ignored", usage: { input_tokens: 1, output_tokens: 1 } }) + "\\n");',
+    '',
+  ].join('\n'));
+  await chmod(fakeCodex, 0o755);
+  process.env.CODEX_HOME = await mkdtemp(join(tmpdir(), 'openp-codex-local-home-'));
+
+  try {
+    const bridge = new CodexWorkerBridge();
+    await assert.rejects(
+      () => bridge.runTurn({
+        bin: fakeCodex,
+        sessionId: null,
+        isFirstTurn: true,
+        projectRoot: process.cwd(),
+        message: 'hello',
+        timeoutMs: 10000,
+        local: true,
+      }),
+      (error) => error instanceof OpenPError &&
+        error.exitCode === EXIT_CODES.unsupportedOption &&
+        error.message.includes('Codex backend does not support local worker mode'),
+    );
+    await assert.rejects(access(markerPath), { code: 'ENOENT' });
+  } finally {
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+  }
 });
 
 test('CodexWorkerBridge.runTurn streams intermediate text', withFakeBin('fake-codex-success.sh', async () => {

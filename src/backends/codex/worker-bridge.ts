@@ -29,6 +29,9 @@ export class CodexWorkerBridge implements BackendWorkerBridge {
     const startMs = Date.now();
     const bin = request.bin ?? resolveCodexBin();
     const isFirstTurn = readRequiredFirstTurnFlag(request);
+    if (request.local === true) {
+      throw new OpenPError('Codex backend does not support local worker mode', EXIT_CODES.unsupportedOption);
+    }
     if (!isFirstTurn && !request.sessionId) {
       throw new OpenPError('Codex resume requires a session id', EXIT_CODES.usage);
     }
@@ -97,6 +100,7 @@ export class CodexWorkerBridge implements BackendWorkerBridge {
         bin,
         args,
         cwd: request.projectRoot,
+        env: request.env ? { ...process.env, ...request.env } : undefined,
         timeoutMs: request.timeoutMs ?? 0,
         signal: request.signal,
         forceSignal: request.forceSignal,
