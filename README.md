@@ -128,6 +128,8 @@ Notes:
 - Instance ids must not collide with built-in backend ids.
 - Sessions are bound to the instance that created them; resuming a session through a different backend or instance id fails.
 - The base `claude` backend always uses the default Claude Code configuration directory; it does not read an ambient `CLAUDE_CONFIG_DIR`.
+- An instance reads user-scope skills, subagents, and `settings.json` (hooks, permissions) only from its own `configDir`; they are not inherited from the default `~/.claude` profile. Replicate them in the instance directory (copy, or symlink the `skills`/`agents` directories) if you want the same behavior.
+- Give the instance `configDir` its own `CLAUDE.md`. Without one, a workspace under `$HOME` makes Claude Code pick up the default `~/.claude/CLAUDE.md` as a project file, and any external `@` import it declares raises a per-workspace "Allow external CLAUDE.md file imports?" approval prompt that an unattended run cannot answer. A `CLAUDE.md` in the instance `configDir` loads the same imports as user scope and skips that prompt.
 
 ## Sessions
 
