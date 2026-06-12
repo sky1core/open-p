@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { runKiroAcp } from '../src/backends/kiro/acp-runner.js';
@@ -315,6 +315,27 @@ test('runKiroAcp waits for Kiro session log to settle before returning result co
   });
 
   assert.equal(result.content, 'A\n\nB');
+});
+
+// Pre-fix this only failed when the flush-window deadline coincided with the timeout timer (the
+// deadline can never fall after the timer), which needs slow startup relative to timeoutMs, so a
+// reintroduced race is not reliably detected here; the assertion pins the required behavior:
+// a completed turn must not be reported as a timeout.
+test('runKiroAcp does not let the turn timeout fire after prompt completion during log flush', async () => {
+  const result = await runKiroAcp({
+    bin: await writePromptCompleteBeforeTimeoutKiroBin(),
+    args: ['acp'],
+    cwd: process.cwd(),
+    prompt: 'hello',
+    sessionId: null,
+    isFirstTurn: true,
+    timeoutMs: 1500,
+    trustAllTools: false,
+    env: env(),
+  });
+
+  assert.equal(result.content, 'completed before timeout');
+  assert.equal(result.sessionId, FAKE_KIRO_SESSION_ID);
 });
 
 test('runKiroAcp honors abort while waiting for delayed Kiro session log', async () => {
@@ -755,6 +776,47 @@ test('runKiroAcp repeated abort signal escalates before interrupt grace expires'
 
 async function tempSignalLog(): Promise<string> {
   return join(await mkdtemp(join(tmpdir(), 'openp-kiro-signal-')), 'signals.log');
+}
+
+async function writePromptCompleteBeforeTimeoutKiroBin(): Promise<string> {
+  const binPath = join(await mkdtemp(join(tmpdir(), 'openp-kiro-timeout-bin-')), 'kiro.cjs');
+  await writeFile(binPath, [
+    '#!/usr/bin/env node',
+    'const { appendFileSync, mkdirSync } = require("node:fs");',
+    'const { join } = require("node:path");',
+    'const { createInterface } = require("node:readline");',
+    `const SESSION_ID = ${JSON.stringify(FAKE_KIRO_SESSION_ID)};`,
+    'const input = createInterface({ input: process.stdin, crlfDelay: Infinity });',
+    'main().catch((error) => { console.error(error); process.exit(1); });',
+    'async function main() {',
+    'for await (const line of input) {',
+    '  if (!line.trim()) continue;',
+    '  const message = JSON.parse(line);',
+    '  if (message.method === "initialize") {',
+    '    send({ jsonrpc: "2.0", id: message.id, result: { protocolVersion: 1, agentCapabilities: { loadSession: true, promptCapabilities: { image: true, audio: false, embeddedContext: false } }, authMethods: [], agentInfo: { name: "Fake Kiro", version: "0.0.0" } } });',
+    '    continue;',
+    '  }',
+    '  if (message.method === "session/new") {',
+    '    send({ jsonrpc: "2.0", id: message.id, result: { sessionId: SESSION_ID } });',
+    '    continue;',
+    '  }',
+    '  if (message.method === "session/prompt") {',
+    '    appendLog(SESSION_ID, { version: "v1", kind: "Prompt", data: { message_id: "prompt-timeout-race", content: [{ kind: "text", data: message.params.prompt[0].text }], meta: { timestamp: 1 } } });',
+    '    appendLog(SESSION_ID, { version: "v1", kind: "AssistantMessage", data: { message_id: "assistant-timeout-race", content: [{ kind: "text", data: "completed before timeout" }] } });',
+    '    send({ jsonrpc: "2.0", id: message.id, result: { stopReason: "end_turn" } });',
+    '  }',
+    '}',
+    '}',
+    'function send(message) { process.stdout.write(`${JSON.stringify(message)}\\n`); }',
+    'function appendLog(sessionId, event) {',
+    '  const sessionDir = join(process.env.HOME, ".kiro", "sessions", "cli");',
+    '  mkdirSync(sessionDir, { recursive: true });',
+    '  appendFileSync(join(sessionDir, `${sessionId}.jsonl`), `${JSON.stringify(event)}\\n`);',
+    '}',
+    '',
+  ].join('\n'));
+  await chmod(binPath, 0o755);
+  return binPath;
 }
 
 async function readSignalLog(path: string, minLines = 1): Promise<string[]> {

@@ -154,6 +154,7 @@ class KiroAcpClient {
     this.activePrompt = false;
     this.throwIfInterruptedOrTimedOut();
     this.completed = true;
+    clearTimeout(this.timeoutTimer);
 
     let turnResult: Awaited<ReturnType<typeof waitForKiroTurnResult>>;
     try {
