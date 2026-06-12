@@ -251,8 +251,9 @@ async function runStreamJsonWorkerLinesWithLock(input: {
       resolvedBackendSessionId = result.sessionId;
       if (turnIndex === 0 && !input.options.resume && result.sessionId !== input.options.backendSessionId && lock) {
         const resultLock = await lockStore.acquire(result.sessionId);
-        await releaseSessionLock(lock, null);
+        const provisionalLock = lock;
         lock = resultLock;
+        await releaseSessionLock(provisionalLock, null);
       }
       publicSessionId = result.sessionId;
       let verboseWarnings: readonly OutputWarning[] = [];

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -2804,6 +2804,68 @@ test('stream-json backend-generated first turn publishes returned session id as 
   assert.equal(events.at(-1)?.openp.sessionId, NATIVE_SESSION_ID);
   assert.equal(await state.stateStore.load(SESSION_ID), null);
   assert.equal((await state.stateStore.load(NATIVE_SESSION_ID))?.backendSessionId, NATIVE_SESSION_ID);
+});
+
+test('stream-json worker releases returned session lock when provisional lock release fails', async () => {
+  const NATIVE_SESSION_ID = '22222222-2222-4222-8222-222222222222';
+  const bridge: StreamJsonWorkerBridge = {
+    async runTurn() {
+      return {
+        content: 'done',
+        reasoningContent: null,
+        sessionId: NATIVE_SESSION_ID,
+        diagnostics: {
+          numTurns: 1,
+          inputTokens: 10,
+          outputTokens: 2,
+          cacheReadInputTokens: null,
+          contextWindow: null,
+          lastSubturnContextTokens: null,
+          durationMs: 25,
+          totalCostUsd: null,
+          stopReason: 'end_turn',
+          toolsUsed: [],
+          autoCompacted: null,
+          intermediateTextCount: 0,
+        },
+      };
+    },
+  };
+
+  const output: string[] = [];
+  const state = await stateContext('/work/open-p');
+  const provisionalLockPath = state.lockStore.pathForSession(SESSION_ID);
+  const resultLockPath = state.lockStore.pathForSession(NATIVE_SESSION_ID);
+  const lockStore = {
+    acquire: async (sessionId: string) => {
+      const lock = await state.lockStore.acquire(sessionId);
+      if (sessionId === NATIVE_SESSION_ID) {
+        await rm(provisionalLockPath, { force: true });
+        await mkdir(provisionalLockPath);
+      }
+      return lock;
+    },
+  } as unknown as SessionLockStore;
+
+  try {
+    await assert.rejects(
+      () => runStreamJsonWorkerLines({
+        options: options({ backend: 'codex' }),
+        lines: lines([userEvent('turn-a', 'first prompt')]),
+        bridge,
+        ...state,
+        lockStore,
+        outputMetadata: metadata(),
+        write: (chunk) => output.push(chunk),
+      }),
+      /failed to read session lock/,
+    );
+
+    await assert.rejects(access(resultLockPath), { code: 'ENOENT' });
+  } finally {
+    await rm(provisionalLockPath, { recursive: true, force: true });
+    await rm(resultLockPath, { force: true });
+  }
 });
 
 test('stream-json first turn omits open-p session id and stores returned backend id', async () => {
