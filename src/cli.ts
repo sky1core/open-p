@@ -14,24 +14,27 @@ import {
   type ResolvedCliOptions,
 } from './core/cli-args.js';
 import { createAbortError } from './core/abort.js';
-import { appendDebugLog, resolveDefaultDebugLogPath, type DebugLogEntry } from './core/debug-log.js';
+import { appendDebugLog, resolveDefaultDebugLogPath } from './core/debug-log.js';
 import { EXIT_CODES, OpenPError, toExitCode } from './core/errors.js';
 import { installProcessSignalHandlers } from './core/graceful-interrupt.js';
 import { parseJsonSchemaText } from './core/json-schema.js';
 import {
   buildIntermediateAssistantSnapshotEvents,
   createStreamingMessageState,
-  formatStreamingMessageSnapshotEvents,
   formatTurnResult,
-  isStreamingReasoningReplacementError,
   resetStreamingMessageState,
   type OutputWarning,
   resolveStructuredOutputToolUseId,
 } from './core/output.js';
 import {
   StreamingResultDiagnosticTracker,
-  type StreamingResultDiagnosticViolation,
 } from './core/streaming-result-diagnostics.js';
+import {
+  appendStreamingResultDiagnostic,
+  createStreamingSnapshotWriter,
+  isStreamingAssistantTextEvent,
+  streamingIssuesToWarnings,
+} from './core/streaming-output-helpers.js';
 import { SessionStateStore, validateSessionStateCompatibility } from './core/session-state.js';
 import { runStreamJsonWorkerLines } from './core/stream-json-worker-runner.js';
 import type { AssistantEventSnapshot, TurnResult } from './core/types.js';
@@ -149,78 +152,20 @@ async function main(argv: readonly string[]): Promise<number> {
     const streamingResultTracker = new StreamingResultDiagnosticTracker();
     const emittedAssistantSnapshots: AssistantEventSnapshot[] = [];
     const emittedAssistantEvents: Record<string, unknown>[] = [];
-    let streamingSnapshotFailed = false;
-    let streamingReasoningSnapshotSuppressed = false;
-    let streamingSnapshotError: unknown = null;
-    const writeStreamingSnapshot = (
-      text: string,
-      reasoningText: string | null = null,
-      sessionId: string | null = initialPublicSessionId,
-    ): boolean => {
-      if (streamingSnapshotFailed) {
-        return false;
-      }
-      const reasoningForSnapshot = streamingReasoningSnapshotSuppressed ? null : reasoningText;
-      try {
-        const previousText = streamingState.previousText;
-        const previousReasoningText = streamingState.previousReasoningText;
-        const streamingOutput = formatStreamingMessageSnapshotEvents(streamingState, {
-          turnId: options.turnId,
-          sessionId,
-          model: options.model,
-          text,
-          reasoningText: reasoningForSnapshot,
-        });
-        process.stdout.write(streamingOutput);
-        if (text && text !== previousText) {
-          streamingResultTracker.recordAnswerText(text);
-        }
-        if (reasoningForSnapshot && reasoningForSnapshot !== previousReasoningText) {
-          streamingResultTracker.recordReasoningText(reasoningForSnapshot);
-        }
-        return true;
-      } catch (error) {
-        if (reasoningForSnapshot && isStreamingReasoningReplacementError(error)) {
-          streamingReasoningSnapshotSuppressed = true;
-          streamingSnapshotError ??= error;
-          try {
-            const previousText = streamingState.previousText;
-            const streamingOutput = formatStreamingMessageSnapshotEvents(streamingState, {
-              turnId: options.turnId,
-              sessionId,
-              model: options.model,
-              text,
-              reasoningText: null,
-            });
-            process.stdout.write(streamingOutput);
-            if (text && text !== previousText) {
-              streamingResultTracker.recordAnswerText(text);
-            }
-            return true;
-          } catch (retryError) {
-            streamingSnapshotFailed = true;
-            streamingSnapshotError = retryError;
-            return false;
-          }
-        }
-        streamingSnapshotFailed = true;
-        streamingSnapshotError = error;
-        return false;
-      }
-    };
-    const writeCumulativeStreamingAnswerSnapshot = (text: string): boolean => {
-      return writeStreamingSnapshot(
-        text,
-        streamingState.previousReasoningText || null,
-      );
-    };
-    const writeCumulativeStreamingReasoningSnapshot = (text: string): boolean => {
-      return writeStreamingSnapshot(
-        streamingState.previousText,
-        text,
-      );
-    };
     const streamingEnabled = options.outputFormat === 'stream-json' && options.streaming;
+    const snapshotWriter = createStreamingSnapshotWriter({
+      streamingState,
+      resultTracker: streamingResultTracker,
+      write: (chunk) => process.stdout.write(chunk),
+      turnId: options.turnId,
+      sessionId: initialPublicSessionId,
+      model: options.model,
+      streamingEnabled,
+    });
+    const {
+      writeCumulativeStreamingAnswerSnapshot,
+      writeCumulativeStreamingReasoningSnapshot,
+    } = snapshotWriter;
     const signalHandlers = installProcessSignalHandlers();
     let result: TurnResult;
     try {
@@ -304,7 +249,7 @@ async function main(argv: readonly string[]): Promise<number> {
         backend: options.backend,
         turnId: result.turnId,
         sessionId: resultSessionId,
-        streamingSnapshotError,
+        streamingSnapshotError: snapshotWriter.snapshotError,
         violations: streamingResultTracker.findViolations(result.text, result.reasoningContent ?? null),
       });
       verboseWarnings = options.verbose ? streamingIssuesToWarnings(streamingIssues, debugLogPath) : [];
@@ -318,7 +263,6 @@ async function main(argv: readonly string[]): Promise<number> {
       successOutput += formatTurnResult(result, {
         outputFormat: options.outputFormat,
         backendSessionId: resultSessionId,
-        includeSystemInit: false,
         structuredOutputToolUseId,
         suppressAssistantSnapshots: emittedAssistantSnapshots,
         previouslyEmittedAssistantEvents: emittedAssistantEvents,
@@ -342,7 +286,6 @@ async function main(argv: readonly string[]): Promise<number> {
     successOutput = formatTurnResult(result, {
       outputFormat: options.outputFormat,
       backendSessionId: resultSessionId,
-      includeSystemInit: false,
       warnings: verboseWarnings,
       verbose: options.verbose,
       ...outputMetadata,
@@ -443,75 +386,6 @@ async function* readStdinLines(signal: AbortSignal): AsyncIterable<string> {
     signal.removeEventListener('abort', closeOnAbort);
     lines.close();
   }
-}
-
-async function appendStreamingResultDiagnostic(
-  debugLogPath: string | null,
-  input: {
-    readonly backend: string;
-    readonly turnId: string;
-    readonly sessionId: string;
-    readonly streamingSnapshotError: unknown;
-    readonly violations: readonly StreamingResultDiagnosticViolation[];
-  },
-): Promise<readonly DebugLogEntry[]> {
-  const issues: DebugLogEntry[] = [];
-  if (input.streamingSnapshotError) {
-    issues.push({
-      event: 'streaming_snapshot_rejected',
-      message: 'streaming snapshot replacement is not prefix-compatible with the current stream message',
-      errorMessage: errorMessage(input.streamingSnapshotError),
-    });
-  }
-  issues.push(...input.violations.map((violation) => ({
-    event: 'streaming_result_mismatch',
-    ...violation,
-  })));
-  if (issues.length === 0) {
-    return issues;
-  }
-  // Streaming diagnostics are non-fatal; a write failure must not discard the confirmed result.
-  await appendDebugLog(debugLogPath, {
-    event: 'streaming_result_diagnostic',
-    severity: 'warning',
-    backend: input.backend,
-    turnId: input.turnId,
-    sessionId: input.sessionId,
-    issueCount: issues.length,
-    issues,
-  }).catch(() => undefined);
-  return issues;
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-function streamingIssuesToWarnings(
-  issues: readonly DebugLogEntry[],
-  debugLogPath: string | null,
-): readonly OutputWarning[] {
-  if (issues.length === 0) {
-    return [];
-  }
-  const message = debugLogPath
-    ? `Streaming result diagnostics were recorded (${issues.length}); result was preserved. See debug log: ${debugLogPath}.`
-    : `Streaming result diagnostics were detected (${issues.length}); result was preserved. Use --debug-log to record details.`;
-  return [{
-    severity: 'warning',
-    code: 'streaming_result_diagnostic',
-    message,
-  }];
-}
-
-function isStreamingAssistantTextEvent(event: Record<string, unknown>): boolean {
-  const openp = event.openp;
-  if (!openp || typeof openp !== 'object' || Array.isArray(openp)) return false;
-  const output = (openp as Record<string, unknown>).output;
-  if (!output || typeof output !== 'object' || Array.isArray(output)) return false;
-  return (openp as Record<string, unknown>).form === 'streaming' &&
-    (typeof (output as Record<string, unknown>).answer === 'string' ||
-      typeof (output as Record<string, unknown>).reasoning === 'string');
 }
 
 function formatVerboseError(exitCode: number, debugLogPath: string | null, reasonCode?: string): string {

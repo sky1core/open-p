@@ -10,17 +10,21 @@ import {
   buildIntermediateAssistantSnapshotEvents,
   createStreamingMessageState,
   formatBackgroundAssistantTextEvent,
-  formatStreamingMessageSnapshotEvents,
   formatWorkerTurnResult,
-  isStreamingReasoningReplacementError,
   resetStreamingMessageState,
   type OutputWarning,
   resolveStructuredOutputToolUseId,
 } from './output.js';
 import {
   StreamingResultDiagnosticTracker,
-  type StreamingResultDiagnosticViolation,
 } from './streaming-result-diagnostics.js';
+import {
+  appendStreamingResultDiagnostic,
+  createStreamingSnapshotWriter,
+  errorMessage,
+  isStreamingAssistantTextEvent,
+  streamingIssuesToWarnings,
+} from './streaming-output-helpers.js';
 import type { AssistantEventSnapshot } from './types.js';
 import type { WorkerTurnRequest, WorkerTurnResult } from './worker-types.js';
 
@@ -120,74 +124,20 @@ async function runStreamJsonWorkerLinesWithLock(input: {
       const streamingResultTracker = new StreamingResultDiagnosticTracker();
       const emittedAssistantSnapshots: AssistantEventSnapshot[] = [];
       const emittedAssistantEvents: Record<string, unknown>[] = [];
-      let streamingSnapshotFailed = false;
-      let streamingReasoningSnapshotSuppressed = false;
-      let streamingSnapshotError: unknown = null;
       const publicTurnId = validated.turnId ?? randomUUID();
-      const writeStreamingSnapshot = (text: string, reasoningText: string | null = null): boolean => {
-        if (!input.options.streaming || streamingSnapshotFailed) {
-          return false;
-        }
-        const reasoningForSnapshot = streamingReasoningSnapshotSuppressed ? null : reasoningText;
-        try {
-          const previousText = streamingState.previousText;
-          const previousReasoningText = streamingState.previousReasoningText;
-          const streamingOutput = formatStreamingMessageSnapshotEvents(streamingState, {
-            turnId: publicTurnId,
-            sessionId: publicSessionId,
-            model: input.options.model,
-            text,
-            reasoningText: reasoningForSnapshot,
-          });
-          input.write(streamingOutput);
-          if (text && text !== previousText) {
-            streamingResultTracker.recordAnswerText(text);
-          }
-          if (reasoningForSnapshot && reasoningForSnapshot !== previousReasoningText) {
-            streamingResultTracker.recordReasoningText(reasoningForSnapshot);
-          }
-          return true;
-        } catch (error) {
-          if (reasoningForSnapshot && isStreamingReasoningReplacementError(error)) {
-            streamingReasoningSnapshotSuppressed = true;
-            streamingSnapshotError ??= error;
-            try {
-              const previousText = streamingState.previousText;
-              const streamingOutput = formatStreamingMessageSnapshotEvents(streamingState, {
-                turnId: publicTurnId,
-                sessionId: publicSessionId,
-                model: input.options.model,
-                text,
-                reasoningText: null,
-              });
-              input.write(streamingOutput);
-              if (text && text !== previousText) {
-                streamingResultTracker.recordAnswerText(text);
-              }
-              return true;
-            } catch (retryError) {
-              streamingSnapshotFailed = true;
-              streamingSnapshotError = retryError;
-              return false;
-            }
-          }
-          streamingSnapshotFailed = true;
-          streamingSnapshotError = error;
-          return false;
-        }
-      };
-      const writeCumulativeStreamingAnswerSnapshot = (text: string): boolean => {
-        return writeStreamingSnapshot(
-          text,
-          streamingState.previousReasoningText || null,
-        );
-      };
-      const writeCumulativeStreamingReasoningSnapshot = (text: string): boolean => {
-        return writeStreamingSnapshot(
-          streamingState.previousText,
-          text,
-        );
-      };
+      const snapshotWriter = createStreamingSnapshotWriter({
+        streamingState,
+        resultTracker: streamingResultTracker,
+        write: (chunk) => input.write(chunk),
+        turnId: publicTurnId,
+        sessionId: publicSessionId,
+        model: input.options.model,
+        streamingEnabled: input.options.streaming,
+      });
+      const {
+        writeCumulativeStreamingAnswerSnapshot,
+        writeCumulativeStreamingReasoningSnapshot,
+      } = snapshotWriter;
 
       const result = await input.bridge.runTurn({
         sessionId: resolvedBackendSessionId,
@@ -262,7 +212,7 @@ async function runStreamJsonWorkerLinesWithLock(input: {
           backend: input.options.backend,
           turnId: publicTurnId,
           sessionId: publicSessionId,
-          streamingSnapshotError,
+          streamingSnapshotError: snapshotWriter.snapshotError,
           violations: streamingResultTracker.findViolations(result.content, result.reasoningContent),
         });
         verboseWarnings = input.options.verbose
@@ -324,48 +274,6 @@ async function runStreamJsonWorkerLinesWithLock(input: {
   return EXIT_CODES.success;
 }
 
-async function appendStreamingResultDiagnostic(
-  debugLogPath: string | null,
-  input: {
-    readonly backend: string;
-    readonly turnId: string;
-    readonly sessionId: string | null;
-    readonly streamingSnapshotError: unknown;
-    readonly violations: readonly StreamingResultDiagnosticViolation[];
-  },
-): Promise<readonly DebugLogEntry[]> {
-  const issues: DebugLogEntry[] = [];
-  if (input.streamingSnapshotError) {
-    issues.push({
-      event: 'streaming_snapshot_rejected',
-      message: 'streaming snapshot replacement is not prefix-compatible with the current stream message',
-      errorMessage: errorMessage(input.streamingSnapshotError),
-    });
-  }
-  issues.push(...input.violations.map((violation) => ({
-    event: 'streaming_result_mismatch',
-    ...violation,
-  })));
-  if (issues.length === 0) {
-    return issues;
-  }
-  // Streaming diagnostics are non-fatal; a write failure must not discard the confirmed result.
-  await appendDebugLog(debugLogPath, {
-    event: 'streaming_result_diagnostic',
-    severity: 'warning',
-    backend: input.backend,
-    turnId: input.turnId,
-    sessionId: input.sessionId,
-    issueCount: issues.length,
-    issues,
-  }).catch(() => undefined);
-  return issues;
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 function errorDebugLogEntry(error: unknown): DebugLogEntry {
   const reasonCode = error instanceof OpenPError ? error.reasonCode : undefined;
   return {
@@ -374,34 +282,6 @@ function errorDebugLogEntry(error: unknown): DebugLogEntry {
     exitCode: toExitCode(error),
     ...(reasonCode ? { reasonCode } : {}),
   };
-}
-
-function streamingIssuesToWarnings(
-  issues: readonly DebugLogEntry[],
-  debugLogPath: string | null,
-): readonly OutputWarning[] {
-  if (issues.length === 0) {
-    return [];
-  }
-  const message = debugLogPath
-    ? `Streaming result diagnostics were recorded (${issues.length}); result was preserved. See debug log: ${debugLogPath}.`
-    : `Streaming result diagnostics were detected (${issues.length}); result was preserved. Use --debug-log to record details.`;
-  return [{
-    severity: 'warning',
-    code: 'streaming_result_diagnostic',
-    message,
-  }];
-}
-
-function isStreamingAssistantTextEvent(event: Record<string, unknown>): boolean {
-  const openp = event.openp;
-  if (!openp || typeof openp !== 'object' || Array.isArray(openp)) return false;
-  const payload = openp as Record<string, unknown>;
-  const output = payload.output && typeof payload.output === 'object' && !Array.isArray(payload.output)
-    ? payload.output as Record<string, unknown>
-    : {};
-  return payload.form === 'streaming' &&
-    (typeof output.answer === 'string' || typeof output.reasoning === 'string');
 }
 
 async function saveStreamWorkerSessionState(

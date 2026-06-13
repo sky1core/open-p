@@ -8,7 +8,6 @@ export interface OutputOptions {
   readonly outputFormat: OutputFormat;
   readonly backendSessionId: string;
   readonly backend?: string | null;
-  readonly includeSystemInit?: boolean;
   readonly model?: string | null;
   readonly cwd?: string | null;
   readonly permissionMode?: string | null;
@@ -202,7 +201,6 @@ export function formatTurnResult(result: TurnResult, options: OutputOptions): st
     }))}\n`;
   }
 
-  void options.includeSystemInit;
   const events: Record<string, unknown>[] = [];
   events.push(
     buildResultEvent({
