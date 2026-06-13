@@ -143,12 +143,12 @@ test('single-turn backend launches Claude with background suppression (env + dis
   const session = new AbortDuringSubmitSession(() => abort.abort(), () => undefined);
   let capturedArgs: readonly string[] = [];
   let capturedDisableBackgroundTasks: string | undefined;
-  let capturedIsolateAnthropicEnv: boolean | undefined;
+  let capturedIsolateEnvPrefixes: readonly string[] | undefined;
   const backend = new ClaudeCodeBackend({
     start: async (_command: string, args: readonly string[], options: PtyStartOptions): Promise<PtySession> => {
       capturedArgs = args;
       capturedDisableBackgroundTasks = options.env?.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS;
-      capturedIsolateAnthropicEnv = options.isolateAnthropicEnv;
+      capturedIsolateEnvPrefixes = options.isolateEnvPrefixes;
       return session;
     },
   });
@@ -185,7 +185,7 @@ test('single-turn backend launches Claude with background suppression (env + dis
   }
 
   assert.equal(capturedDisableBackgroundTasks, '1');
-  assert.equal(capturedIsolateAnthropicEnv, true);
+  assert.deepEqual(capturedIsolateEnvPrefixes, ['ANTHROPIC_']);
   const disallowIndex = capturedArgs.indexOf('--disallowedTools');
   assert.notEqual(disallowIndex, -1);
   assert.equal(capturedArgs[disallowIndex + 1], 'Monitor,Workflow,AskUserQuestion');
@@ -248,7 +248,9 @@ test('single-turn instance backend injects configured Claude config dir at PTY l
   }
 
   assert.equal(capturedConfigDir, instanceConfigDir);
-  assert.deepEqual(capturedUnsetEnv, ['CLAUDE_CONFIG_DIR']);
+  // The launch unsets the ambient config dir plus ANTHROPIC_BASE_URL (the latter is always unset before
+  // the explicit endpoint value is re-injected), so both keys travel through the launch unsetEnv list.
+  assert.deepEqual(capturedUnsetEnv, ['CLAUDE_CONFIG_DIR', 'ANTHROPIC_BASE_URL']);
 });
 
 test('base single-turn Claude backend unsets ambient Claude config dir at PTY launch', async () => {
@@ -307,7 +309,9 @@ test('base single-turn Claude backend unsets ambient Claude config dir at PTY la
   }
 
   assert.equal(capturedConfigDir, undefined);
-  assert.deepEqual(capturedUnsetEnv, ['CLAUDE_CONFIG_DIR']);
+  // The launch unsets the ambient config dir plus ANTHROPIC_BASE_URL (the latter is always unset before
+  // the explicit endpoint value is re-injected), so both keys travel through the launch unsetEnv list.
+  assert.deepEqual(capturedUnsetEnv, ['CLAUDE_CONFIG_DIR', 'ANTHROPIC_BASE_URL']);
 });
 
 test('single-turn backend rejects open-p claude command before starting PTY', async () => {

@@ -68,7 +68,7 @@ export class TmuxProvider implements PtyProvider {
       command,
       args,
       options.env ?? {},
-      options.isolateAnthropicEnv ?? false,
+      options.isolateEnvPrefixes ?? [],
       process.env,
       options.unsetEnv ?? [],
     );
@@ -107,13 +107,13 @@ export function buildTmuxShellCommand(
   command: string,
   args: readonly string[],
   env: Readonly<Record<string, string>>,
-  isolateAnthropicEnv: boolean,
+  isolateEnvPrefixes: readonly string[],
   ambientEnv: Readonly<Record<string, string | undefined>> = process.env,
   unsetEnv: readonly string[] = [],
 ): string {
   return [
     'env',
-    ...envUnsetArgs(ambientEnv, isolateAnthropicEnv, unsetEnv),
+    ...envUnsetArgs(ambientEnv, isolateEnvPrefixes, unsetEnv),
     ...Object.entries(env).map(([key, value]) => `${key}=${value}`),
     command,
     ...args,
@@ -122,14 +122,12 @@ export function buildTmuxShellCommand(
 
 function envUnsetArgs(
   ambientEnv: Readonly<Record<string, string | undefined>>,
-  isolateAnthropicEnv: boolean,
+  isolateEnvPrefixes: readonly string[],
   unsetEnv: readonly string[],
 ): string[] {
   const keys = [
     ...unsetEnv,
-    ...(isolateAnthropicEnv
-      ? ['ANTHROPIC_BASE_URL', ...Object.keys(ambientEnv).filter((key) => key.startsWith('ANTHROPIC_'))]
-      : []),
+    ...Object.keys(ambientEnv).filter((key) => isolateEnvPrefixes.some((prefix) => key.startsWith(prefix))),
   ];
   return [...new Set(keys)]
     .sort()

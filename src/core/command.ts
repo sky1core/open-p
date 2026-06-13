@@ -12,7 +12,7 @@ export function execFileText(
   options: {
     readonly input?: string;
     readonly env?: Readonly<Record<string, string>>;
-    readonly isolateAnthropicEnv?: boolean;
+    readonly isolateEnvPrefixes?: readonly string[];
     readonly unsetEnv?: readonly string[];
     readonly cwd?: string;
   } = {},
@@ -20,8 +20,8 @@ export function execFileText(
   return new Promise((resolve, reject) => {
     const child = spawn(command, [...args], {
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: (options.env || options.isolateAnthropicEnv || options.unsetEnv)
-        ? buildChildEnv(options.env ?? {}, options.isolateAnthropicEnv ?? false, options.unsetEnv ?? [])
+      env: (options.env || options.isolateEnvPrefixes?.length || options.unsetEnv)
+        ? buildChildEnv(options.env ?? {}, options.isolateEnvPrefixes ?? [], options.unsetEnv ?? [])
         : undefined,
       cwd: options.cwd,
     });
@@ -66,13 +66,13 @@ export function execFileText(
 
 export function buildChildEnv(
   env: Readonly<Record<string, string>>,
-  isolateAnthropicEnv: boolean,
+  isolateEnvPrefixes: readonly string[] = [],
   unsetEnv: readonly string[] = [],
 ): NodeJS.ProcessEnv {
   const childEnv = { ...process.env };
-  if (isolateAnthropicEnv) {
+  if (isolateEnvPrefixes.length > 0) {
     for (const key of Object.keys(childEnv)) {
-      if (key.startsWith('ANTHROPIC_')) {
+      if (isolateEnvPrefixes.some((prefix) => key.startsWith(prefix))) {
         delete childEnv[key];
       }
     }

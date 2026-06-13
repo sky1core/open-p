@@ -851,11 +851,11 @@ test('persistent Claude Code startup failure gracefully exits the started PTY', 
 
 test('persistent Claude Code startup launch isolates ambient Anthropic env', async () => {
   const session = new StartupFailureSession(true, true);
-  let capturedIsolateAnthropicEnv: boolean | undefined;
+  let capturedIsolateEnvPrefixes: readonly string[] | undefined;
   let capturedEnv: Readonly<Record<string, string>> | undefined;
   const provider: PtyProvider = {
     start: async (_command: string, _args: readonly string[], options: PtyStartOptions) => {
-      capturedIsolateAnthropicEnv = options.isolateAnthropicEnv;
+      capturedIsolateEnvPrefixes = options.isolateEnvPrefixes;
       capturedEnv = options.env;
       return session;
     },
@@ -881,7 +881,7 @@ test('persistent Claude Code startup launch isolates ambient Anthropic env', asy
   });
 
   await started.shutdown();
-  assert.equal(capturedIsolateAnthropicEnv, true);
+  assert.deepEqual(capturedIsolateEnvPrefixes, ['ANTHROPIC_']);
   assert.equal(capturedEnv?.ANTHROPIC_BASE_URL, 'http://127.0.0.1:9999');
   assert.equal('ANTHROPIC_API_KEY' in (capturedEnv ?? {}), false);
   assert.equal('ANTHROPIC_AUTH_TOKEN' in (capturedEnv ?? {}), false);
@@ -920,7 +920,9 @@ test('persistent Claude Code instance startup injects configured Claude config d
 
   await started.shutdown();
   assert.equal(capturedEnv?.CLAUDE_CONFIG_DIR, configDir);
-  assert.deepEqual(capturedUnsetEnv, ['CLAUDE_CONFIG_DIR']);
+  // The launch unsets the ambient config dir plus ANTHROPIC_BASE_URL (the latter is always unset before
+  // the explicit endpoint value is re-injected), so both keys travel through the launch unsetEnv list.
+  assert.deepEqual(capturedUnsetEnv, ['CLAUDE_CONFIG_DIR', 'ANTHROPIC_BASE_URL']);
 });
 
 test('readiness timeout stays bounded when turn timeout is disabled', () => {

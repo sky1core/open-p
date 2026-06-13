@@ -32,7 +32,8 @@ import { buildClaudeToolsArgs } from './tools.js';
 import { createClaudePtyInterrupter } from './pty-interrupt.js';
 import {
   appendClaudeCodePtySuppressionArgs,
-  CLAUDE_CODE_ACCOUNT_UNSET_ENV,
+  CLAUDE_CODE_ISOLATED_ENV_PREFIXES,
+  CLAUDE_CODE_LAUNCH_UNSET_ENV,
   withClaudeCodeAccountLaunchEnv,
 } from './launch-safety.js';
 import { createClaudeSessionLogIdleDebugLogger } from './diagnostics.js';
@@ -105,8 +106,8 @@ export class ClaudeCodeBackend implements Backend {
     await assertClaudeCodeBin(claudeCodeBin, {
       cwd: options.cwd,
       env: launchEnv,
-      isolateAnthropicEnv: true,
-      unsetEnv: CLAUDE_CODE_ACCOUNT_UNSET_ENV,
+      isolateEnvPrefixes: CLAUDE_CODE_ISOLATED_ENV_PREFIXES,
+      unsetEnv: CLAUDE_CODE_LAUNCH_UNSET_ENV,
     });
     const nativeSessionId = options.resume ? options.backendSessionId : null;
     const expectedLogPath = nativeSessionId ? resolveClaudeCodeSessionLogPath(nativeSessionId, options.cwd, this.configDir) : null;
@@ -121,8 +122,8 @@ export class ClaudeCodeBackend implements Backend {
       cwd: options.cwd,
       sessionName,
       env: launchEnv,
-      isolateAnthropicEnv: true,
-      unsetEnv: CLAUDE_CODE_ACCOUNT_UNSET_ENV,
+      isolateEnvPrefixes: CLAUDE_CODE_ISOLATED_ENV_PREFIXES,
+      unsetEnv: CLAUDE_CODE_LAUNCH_UNSET_ENV,
     });
 
     let primaryError: unknown = null;

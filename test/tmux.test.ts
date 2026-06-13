@@ -38,7 +38,7 @@ test('tmux shell command can isolate Anthropic env for local backends', () => {
   assert.equal(
     buildTmuxShellCommand('claude', ['--resume', 'session id'], {
       ANTHROPIC_BASE_URL: 'http://127.0.0.1:9999',
-    }, true, {
+    }, ['ANTHROPIC_'], {
       ANTHROPIC_BASE_URL: 'ambient-base',
       ANTHROPIC_TEST_ENV: 'ambient-extra',
     }),
@@ -46,11 +46,24 @@ test('tmux shell command can isolate Anthropic env for local backends', () => {
   );
 });
 
+// ANTHROPIC_BASE_URL is always unset (even when absent from the ambient env) via the backend-injected
+// unsetEnv list — this preserves the prior hardcoded behavior of forcing the key onto the unset list.
+test('tmux shell command always unsets ANTHROPIC_BASE_URL via unsetEnv even when ambient lacks it', () => {
+  assert.equal(
+    buildTmuxShellCommand('claude', [], {
+      ANTHROPIC_BASE_URL: 'http://127.0.0.1:9999',
+    }, ['ANTHROPIC_'], {
+      OTHER_ENV: 'present',
+    }, ['CLAUDE_CONFIG_DIR', 'ANTHROPIC_BASE_URL']),
+    'env -u ANTHROPIC_BASE_URL -u CLAUDE_CONFIG_DIR ANTHROPIC_BASE_URL=http://127.0.0.1:9999 claude',
+  );
+});
+
 test('tmux shell command can unset ambient Claude config dir while injecting an instance config dir', () => {
   assert.equal(
     buildTmuxShellCommand('claude', [], {
       CLAUDE_CONFIG_DIR: '/tmp/openp-claude-alt',
-    }, true, {
+    }, ['ANTHROPIC_'], {
       ANTHROPIC_BASE_URL: 'ambient-base',
       CLAUDE_CONFIG_DIR: '/tmp/ambient-claude',
     }, ['CLAUDE_CONFIG_DIR']),
@@ -60,7 +73,7 @@ test('tmux shell command can unset ambient Claude config dir while injecting an 
 
 test('tmux shell command does not strip Anthropic env unless isolation is requested', () => {
   assert.equal(
-    buildTmuxShellCommand('claude', [], {}, false),
+    buildTmuxShellCommand('claude', [], {}, []),
     'env claude',
   );
 });
@@ -406,4 +419,70 @@ process.exit(0);
   const commandLog = await readFile(logPath, 'utf8');
   assert.match(commandLog, /"display-message","-p","-t","fake-session","#\{pane_pid\}"/);
   assert.match(commandLog, /"kill-session","-t","fake-session"/);
+});
+
+// The backend artifact rules require a multiline-prompt transport regression test, and the Claude
+// prompt-submission contract mandates a byte-level transport test: a multiline prompt
+// must reach the backend as a single caller turn, so prompt-internal line breaks must travel through the
+// paste path (load-buffer bytes + bracketed/literal paste-buffer) and must NOT be turned into Enter/submit
+// actions. This drives the real TmuxSession.write/submit production path through a fake tmux that records
+// the exact stdin bytes it loaded and every command it received.
+test('tmux session transports a multiline prompt as one paste with no submit, then submits exactly once', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-fake-tmux-'));
+  const fakeTmux = join(dir, 'fake-tmux.js');
+  const logPath = join(dir, 'commands.log');
+  const bufferPath = join(dir, 'buffer.txt');
+  // A prompt with several lines, an internal blank line, leading/trailing spaces, and a CRLF segment.
+  // Every one of these line breaks is prompt data, not a submit boundary.
+  const multilinePrompt = 'first line\nsecond line\n\n  indented third\nline with CR\r\nlast line';
+  await writeFile(fakeTmux, `#!/usr/bin/env node
+const fs = require('node:fs');
+const logPath = ${JSON.stringify(logPath)};
+const bufferPath = ${JSON.stringify(bufferPath)};
+const args = process.argv.slice(2);
+fs.appendFileSync(logPath, JSON.stringify(args) + '\\n');
+if (args[0] === 'load-buffer') {
+  // Capture the exact bytes tmux would store in the paste buffer.
+  fs.writeFileSync(bufferPath, fs.readFileSync(0));
+  process.exit(0);
+}
+process.exit(0);
+`);
+  await chmod(fakeTmux, 0o755);
+
+  const session = new TmuxSession(fakeTmux, 'fake-session', 10);
+  // Production prompt-submission order: adapter.ts calls pty.write(prompt) then pty.submit().
+  await session.write(multilinePrompt);
+  const afterWriteLog = await readFile(logPath, 'utf8');
+  await session.submit();
+
+  // 1. Byte-level fidelity: the loaded buffer must equal the original prompt bytes exactly, so no line
+  //    break is dropped, collapsed, or converted before it reaches tmux.
+  const loadedBuffer = await readFile(bufferPath);
+  assert.equal(loadedBuffer.toString('utf8'), multilinePrompt);
+  assert.deepEqual(loadedBuffer, Buffer.from(multilinePrompt, 'utf8'));
+
+  // 2. write() must not emit any Enter/submit: prompt-internal newlines are not submit actions. If write
+  //    split the prompt by newline into per-line send-keys, this would fail.
+  const writeCommands = afterWriteLog.trim().split('\n').map((line) => JSON.parse(line) as string[]);
+  assert.equal(writeCommands.filter((cmd) => cmd[0] === 'send-keys').length, 0);
+
+  // 3. The whole prompt travels through one paste-buffer, with the literal/bracketed flags (-p -r) that
+  //    preserve LF instead of tmux's default LF->CR replacement (plain paste-buffer is invalid here).
+  const allCommands = (await readFile(logPath, 'utf8')).trim().split('\n').map((line) => JSON.parse(line) as string[]);
+  const loadBufferCount = allCommands.filter((cmd) => cmd[0] === 'load-buffer').length;
+  const pasteCommands = allCommands.filter((cmd) => cmd[0] === 'paste-buffer');
+  assert.equal(loadBufferCount, 1);
+  assert.equal(pasteCommands.length, 1);
+  assert.deepEqual(pasteCommands[0]!.slice(0, 3), ['paste-buffer', '-p', '-r']);
+
+  // 4. submit() is the only operation that produces an Enter, and it does so exactly once.
+  const enterCommands = allCommands.filter((cmd) => cmd[0] === 'send-keys' && cmd[cmd.length - 1] === 'Enter');
+  assert.equal(enterCommands.length, 1);
+  assert.deepEqual(enterCommands[0], ['send-keys', '-t', 'fake-session', 'Enter']);
+
+  // 5. The single Enter happens after the paste, never interleaved with the prompt bytes.
+  const pasteIndex = allCommands.findIndex((cmd) => cmd[0] === 'paste-buffer');
+  const enterIndex = allCommands.findIndex((cmd) => cmd[0] === 'send-keys' && cmd[cmd.length - 1] === 'Enter');
+  assert.ok(pasteIndex >= 0 && enterIndex > pasteIndex);
 });

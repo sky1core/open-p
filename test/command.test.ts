@@ -26,7 +26,7 @@ test('execFileText preserves ambient Anthropic env unless isolation is requested
 
     const isolated = await execFileText(process.execPath, PRINT_ANTHROPIC_ENV, {
       env: {},
-      isolateAnthropicEnv: true,
+      isolateEnvPrefixes: ['ANTHROPIC_'],
     });
     assert.deepEqual(JSON.parse(isolated.stdout), {
       base: null,
@@ -35,7 +35,7 @@ test('execFileText preserves ambient Anthropic env unless isolation is requested
 
     const explicit = await execFileText(process.execPath, PRINT_ANTHROPIC_ENV, {
       env: { ANTHROPIC_BASE_URL: 'explicit-base' },
-      isolateAnthropicEnv: true,
+      isolateEnvPrefixes: ['ANTHROPIC_'],
     });
     assert.deepEqual(JSON.parse(explicit.stdout), {
       base: 'explicit-base',

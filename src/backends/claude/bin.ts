@@ -9,7 +9,7 @@ export async function assertClaudeCodeBin(
   command: string,
   options: {
     readonly env?: Readonly<Record<string, string>>;
-    readonly isolateAnthropicEnv?: boolean;
+    readonly isolateEnvPrefixes?: readonly string[];
     readonly unsetEnv?: readonly string[];
     readonly cwd?: string;
   } = {},

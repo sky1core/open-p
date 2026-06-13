@@ -10,6 +10,19 @@ export const CLAUDE_CODE_RESUME_MODAL_SUPPRESSION_ENV: Readonly<Record<string, s
 export const CLAUDE_CONFIG_DIR_ENV_KEY = 'CLAUDE_CONFIG_DIR';
 export const CLAUDE_CODE_ACCOUNT_UNSET_ENV = [CLAUDE_CONFIG_DIR_ENV_KEY] as const;
 
+// Ambient env name prefix that the Claude launch isolates from the child. This is the backend-owned
+// value injected into the backend-neutral launch transport (core command / tmux), so that core/runners
+// never hardcode a provider name. The Claude child is launched with every ambient ANTHROPIC_* removed.
+export const CLAUDE_CODE_ISOLATED_ENV_PREFIXES = ['ANTHROPIC_'] as const;
+
+// Keys the Claude launch always unsets at the launch boundary, even when no ambient value is present.
+// CLAUDE_CONFIG_DIR (via CLAUDE_CODE_ACCOUNT_UNSET_ENV): ambient config dir would silently disagree with
+//   the injected one (see SPEC).
+// ANTHROPIC_BASE_URL: the single ANTHROPIC_* key the launch re-injects explicitly (endpoint config, not a
+//   credential — see SAFE_ANTHROPIC_ENV_KEYS). Always unsetting it before the explicit value is injected
+//   matches the prior tmux behavior of forcing this key onto the unset list regardless of ambient state.
+export const CLAUDE_CODE_LAUNCH_UNSET_ENV = [...CLAUDE_CODE_ACCOUNT_UNSET_ENV, 'ANTHROPIC_BASE_URL'] as const;
+
 const SAFE_ANTHROPIC_ENV_KEYS = new Set(['ANTHROPIC_BASE_URL']);
 
 export const CLAUDE_CODE_PTY_DISALLOWED_TOOLS = 'Monitor,Workflow,AskUserQuestion';

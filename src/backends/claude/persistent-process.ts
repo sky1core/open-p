@@ -38,7 +38,8 @@ import { withThinkingSummariesSettings } from './settings.js';
 import { buildClaudeToolsArgs } from './tools.js';
 import {
   appendClaudeCodePtySuppressionArgs,
-  CLAUDE_CODE_ACCOUNT_UNSET_ENV,
+  CLAUDE_CODE_ISOLATED_ENV_PREFIXES,
+  CLAUDE_CODE_LAUNCH_UNSET_ENV,
   CLAUDE_CONFIG_DIR_ENV_KEY,
   withClaudeCodeAccountLaunchEnv,
 } from './launch-safety.js';
@@ -374,8 +375,8 @@ export async function startPersistentClaudeCodeProcess(
   const env = withClaudeCodeAccountLaunchEnv(options.launchSignature.env, configDir);
   await assertClaudeCodeBin(options.launchSignature.bin, {
     env,
-    isolateAnthropicEnv: true,
-    unsetEnv: CLAUDE_CODE_ACCOUNT_UNSET_ENV,
+    isolateEnvPrefixes: CLAUDE_CODE_ISOLATED_ENV_PREFIXES,
+    unsetEnv: CLAUDE_CODE_LAUNCH_UNSET_ENV,
     cwd: options.cwd,
   });
   const nativeSessionId = options.resume ? options.sessionId : null;
@@ -390,8 +391,8 @@ export async function startPersistentClaudeCodeProcess(
     cwd: options.cwd,
     sessionName,
     env,
-    isolateAnthropicEnv: true,
-    unsetEnv: CLAUDE_CODE_ACCOUNT_UNSET_ENV,
+    isolateEnvPrefixes: CLAUDE_CODE_ISOLATED_ENV_PREFIXES,
+    unsetEnv: CLAUDE_CODE_LAUNCH_UNSET_ENV,
   });
   const process = new PersistentClaudeCodeProcess(
     options.sessionId,
