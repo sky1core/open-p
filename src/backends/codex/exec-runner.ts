@@ -80,18 +80,6 @@ export function runCodexExec(options: CodexExecOptions): Promise<CodexExecResult
       interrupter.requestKillNow();
     };
 
-    const settle = (result: CodexExecResult): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeoutTimer);
-      clearTimeout(closeGraceTimer);
-      interrupter.clear();
-      options.signal?.removeEventListener('abort', onAbort);
-      options.forceSignal?.removeEventListener('abort', onForce);
-      options.killSignal?.removeEventListener('abort', onKill);
-      resolve(result);
-    };
-
     const rl = createInterface({ input: child.stdout!, crlfDelay: Infinity });
     rl.on('line', (line: string) => {
       if (settled) {
@@ -106,6 +94,24 @@ export function runCodexExec(options: CodexExecOptions): Promise<CodexExecResult
         // callback errors must not crash the runner
       }
     });
+
+    const settle = (result: CodexExecResult): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutTimer);
+      clearTimeout(closeGraceTimer);
+      // The result is final; stop reading inherited stdout lines explicitly so
+      // the intent is clear. settle() only runs after the result is decided
+      // (close event or post-exit grace timer), never during the grace window,
+      // so closing the reader here cannot drop grandchild lines collected by
+      // the grace path.
+      rl.close();
+      interrupter.clear();
+      options.signal?.removeEventListener('abort', onAbort);
+      options.forceSignal?.removeEventListener('abort', onForce);
+      options.killSignal?.removeEventListener('abort', onKill);
+      resolve(result);
+    };
 
     child.stderr?.setEncoding('utf8');
     child.stderr?.on('data', (chunk: string) => {
