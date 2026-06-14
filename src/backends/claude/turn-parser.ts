@@ -848,6 +848,12 @@ function isLocalCommandTranscriptEvent(
     return true;
   }
   const promptId = stringOrNull(event.promptId);
+  // A real caller prompt always carries a promptId; a `! …` shell transcript does not. The absent
+  // promptId is what distinguishes a shell transcript from a caller prompt that merely starts with a
+  // bash tag, so only treat bash-tagged text as a shell transcript when the promptId is absent.
+  if (promptId === null && isShellCommandTranscriptText(texts[0]!)) {
+    return true;
+  }
   return promptId !== null &&
     localCommandTranscriptPromptIds.has(promptId) &&
     isLocalCommandTranscriptText(texts[0]!);
@@ -898,6 +904,18 @@ const LOCAL_COMMAND_TRANSCRIPT_PREFIXES = ['<command-name>', '<local-command-std
 
 export function isLocalCommandTranscriptText(text: string): boolean {
   return text === '/exit' || LOCAL_COMMAND_TRANSCRIPT_PREFIXES.some((prefix) => text.startsWith(prefix));
+}
+
+// A `! …` shell command run from the Claude Code prompt is written as `type:user` transcript events
+// (`<bash-input>`, `<bash-stdout>`, `<bash-stderr>`) with NO `promptId`. They are CLI activity, not a
+// caller prompt. Because they carry no promptId they cannot be matched through
+// localCommandTranscriptPromptIds, so they are recognized by their structural prefix alone (like a bare
+// `/exit`). Without this, a shell command run inside a turn's scoped segment is miscounted as an extra
+// caller user turn (exit 40 "multiple caller user-turn boundaries").
+const SHELL_COMMAND_TRANSCRIPT_PREFIXES = ['<bash-input>', '<bash-stdout>', '<bash-stderr>'];
+
+export function isShellCommandTranscriptText(text: string): boolean {
+  return SHELL_COMMAND_TRANSCRIPT_PREFIXES.some((prefix) => text.startsWith(prefix));
 }
 
 function isBackgroundTaskEnd(event: JsonObject): boolean {

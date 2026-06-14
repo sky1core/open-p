@@ -220,6 +220,37 @@ test('exposes stable rejection reason code for missing Claude caller turn bounda
   );
 });
 
+test('does not count `! …` shell command transcripts as caller user turns', () => {
+  // `! cmd` runs are written as type:user transcript events (<bash-input>/<bash-stdout>) with no
+  // promptId. They are CLI activity, not caller prompts; counting them as caller user turns makes a
+  // turn that ran a shell command fail with exit 40 "multiple caller user-turn boundaries".
+  const result = parseClaudeCodeJsonlTurn([
+    userLine('do the thing'),
+    userLine('<bash-input> git push origin main</bash-input>'),
+    userLine('<bash-stdout></bash-stdout><bash-stderr>pre-push: refused</bash-stderr>'),
+    assistantLine([{ type: 'text', text: 'ok' }], undefined, 'end_turn'),
+    durationLine(100),
+  ], TURN_ID);
+
+  assert.equal(result?.text, 'ok');
+});
+
+test('keeps a caller prompt that starts with a bash tag when it carries a promptId', () => {
+  // Only promptId-less shell transcripts are excluded; a real caller prompt (which carries a
+  // promptId) that merely starts with a bash tag must still count as the caller turn, not be dropped.
+  const result = parseClaudeCodeJsonlTurn([
+    JSON.stringify({
+      type: 'user',
+      promptId: 'real-prompt-1',
+      message: { role: 'user', content: '<bash-input> explain this transcript</bash-input>' },
+    }),
+    assistantLine([{ type: 'text', text: 'explained' }], undefined, 'end_turn'),
+    durationLine(10),
+  ], TURN_ID);
+
+  assert.equal(result?.text, 'explained');
+});
+
 test('parses result assistant text appended after completion metadata', () => {
   const result = parseClaudeCodeJsonlTurn([
     userLine('hello'),

@@ -5,7 +5,7 @@ import { createReadStream, watch } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { ARTIFACT_REJECTION_REASONS, EXIT_CODES, OpenPError } from '../../core/errors.js';
 import { isSafeSessionId } from '../../core/session-id.js';
-import { extractClaudeCodeIntermediateContent, isLocalCommandTranscriptText, parseClaudeCodeJsonlTurn } from './turn-parser.js';
+import { extractClaudeCodeIntermediateContent, isLocalCommandTranscriptText, isShellCommandTranscriptText, parseClaudeCodeJsonlTurn } from './turn-parser.js';
 import { isClaudeCodeTaskNotificationLine } from './background-parser.js';
 import type {
   AssistantContentBlock,
@@ -915,6 +915,12 @@ function isLocalCommandTranscriptEvent(
     return true;
   }
   const promptId = stringOrNull(event.promptId);
+  // A real caller prompt always carries a promptId; a `! …` shell transcript does not. The absent
+  // promptId is what distinguishes a shell transcript from a caller prompt that merely starts with a
+  // bash tag, so only treat bash-tagged text as a shell transcript when the promptId is absent.
+  if (promptId === null && isShellCommandTranscriptText(texts[0]!)) {
+    return true;
+  }
   return promptId !== null &&
     localCommandTranscriptPromptIds.has(promptId) &&
     isLocalCommandTranscriptText(texts[0]!);
