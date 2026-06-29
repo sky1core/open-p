@@ -3,6 +3,7 @@ import { chmod, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { OpenPError } from '../src/core/errors.js';
 import { buildTmuxShellCommand, selectReapableOpenpSessions, TmuxSession } from '../src/runners/tmux.js';
 
 test('reaper selects only same-session-id orphans, excluding the session being created', () => {
@@ -238,6 +239,52 @@ process.exit(0);
   assert.ok(interruptIndexes[1]! < clearIndexes[1]!);
   assert.ok(clearIndexes[1]! < pasteIndexes[1]!);
   assert.match(commandLog, /"send-keys","-t","fake-session","C-c"/);
+});
+
+test('tmux session exit failure reports pane diagnostics', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-fake-tmux-'));
+  const fakeTmux = join(dir, 'fake-tmux.js');
+  await writeFile(fakeTmux, `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[0] === 'has-session') {
+  process.exit(0);
+}
+if (args[0] === 'display-message' && args.includes('#{pane_dead}')) {
+  process.stdout.write('0\\n');
+  process.exit(0);
+}
+if (args[0] === 'display-message' && args.includes('#{pane_pid}')) {
+  process.stdout.write('12345\\n');
+  process.exit(0);
+}
+if (args[0] === 'display-message' && args.includes('#{pane_current_command}')) {
+  process.stdout.write('claude\\n');
+  process.exit(0);
+}
+if (args[0] === 'display-message' && args.includes('#{cursor_y}')) {
+  process.stdout.write('2\\n');
+  process.exit(0);
+}
+process.exit(0);
+`);
+  await chmod(fakeTmux, 0o755);
+
+  const session = new TmuxSession(fakeTmux, 'fake-session', 10);
+  await assert.rejects(
+    () => session.exit(),
+    (error) => {
+      assert.ok(error instanceof OpenPError);
+      assert.equal(error.details?.kind, 'tmux_exit_failure');
+      assert.equal(error.details?.sessionName, 'fake-session');
+      assert.equal(error.details?.exitTimeoutMs, 10);
+      assert.equal(error.details?.sessionAlive, true);
+      assert.equal(error.details?.paneDead, '0');
+      assert.equal(error.details?.panePid, 12345);
+      assert.equal(error.details?.paneCurrentCommand, 'claude');
+      assert.equal(error.details?.cursorY, '2');
+      return true;
+    },
+  );
 });
 
 test('tmux session clears multiline draft before submitting graceful exit', async () => {

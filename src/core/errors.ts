@@ -31,10 +31,12 @@ export type ArtifactRejectionReasonCode =
 
 export interface OpenPErrorOptions {
   readonly reasonCode?: ArtifactRejectionReasonCode | null;
+  readonly details?: Readonly<Record<string, unknown>>;
 }
 
 export class OpenPError extends Error {
   readonly reasonCode?: ArtifactRejectionReasonCode;
+  readonly details?: Readonly<Record<string, unknown>>;
 
   constructor(
     message: string,
@@ -48,6 +50,12 @@ export class OpenPError extends Error {
       : reasonCodeOrOptions?.reasonCode;
     if (reasonCode) {
       this.reasonCode = reasonCode;
+    }
+    const details = typeof reasonCodeOrOptions === 'string'
+      ? undefined
+      : reasonCodeOrOptions?.details;
+    if (details) {
+      this.details = details;
     }
   }
 }

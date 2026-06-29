@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { appendFile, chmod, mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -9,16 +9,39 @@ import { isAbortError } from '../src/core/abort.js';
 import { EXIT_CODES, OpenPError } from '../src/core/errors.js';
 import type { PtyProvider, PtySession, PtyStartOptions } from '../src/runners/types.js';
 
-test('single-turn backend propagates PTY exit failure after successful turn', async () => {
-  await assert.rejects(
-    () => exitPtyAfterTurn({
+test('single-turn backend preserves successful turn when PTY exit cleanup fails', async () => {
+  const warnings = await exitPtyAfterTurn({
+    exit: async () => {
+      throw new Error('exit failed');
+    },
+    isAlive: async () => false,
+    terminate: async () => undefined,
+  }, null);
+
+  assert.deepEqual(warnings, [{
+    severity: 'warning',
+    code: 'pty_cleanup_failure',
+    message: 'PTY cleanup failed after the result was confirmed; result was preserved. Backend process was already stopped when checked. Use --debug-log to record details.',
+  }]);
+});
+
+test('single-turn backend force terminates PTY cleanup after successful turn exit failure', async () => {
+  let alive = true;
+  const terminateSignals: NodeJS.Signals[] = [];
+
+  const warnings = await exitPtyAfterTurn({
       exit: async () => {
         throw new Error('exit failed');
       },
-      terminate: async () => undefined,
-    }, null),
-    /exit failed/,
-  );
+      isAlive: async () => alive,
+      terminate: async (signal = 'SIGTERM') => {
+        terminateSignals.push(signal);
+        alive = false;
+      },
+    }, null);
+
+  assert.equal(warnings[0]?.code, 'pty_cleanup_failure');
+  assert.deepEqual(terminateSignals, ['SIGTERM']);
 });
 
 test('single-turn backend does not mask the primary turn failure with PTY exit failure', async () => {
@@ -46,6 +69,49 @@ test('single-turn backend force terminates PTY cleanup after primary turn failur
   }, new Error('primary failed')));
 
   assert.deepEqual(terminateSignals, ['SIGTERM']);
+});
+
+test('single-turn backend returns result, warning, and escalates when cleanup fails after success', async () => {
+  await withSingleTurnBackend(
+    'openp-claude-adapter-cleanup-warning-',
+    (logPath, cwd, sessionId) => new SuccessfulTurnCleanupFailureSession(logPath, cwd, sessionId),
+    async ({ backend, cwd, session, sessionId }) => {
+      const debugLog = join(cwd, 'debug.jsonl');
+      const result = await backend.runTurn(
+        {
+          turnId: '22222222-2222-4222-8222-222222222229',
+          prompt: 'hello cleanup',
+          jsonSchema: null,
+        },
+        {
+          ...adapterRunOptions(cwd, sessionId, 5_000),
+          debugLog,
+        },
+      );
+
+      assert.equal(result.text, 'cleanup success result');
+      assert.equal(result.sessionId, sessionId);
+      assert.deepEqual(session.terminateSignals, ['SIGTERM']);
+      assert.equal(result.warnings?.length, 1);
+      assert.equal(result.warnings?.[0]?.code, 'pty_cleanup_failure');
+      const debugEntries = (await readFile(debugLog, 'utf8'))
+        .trimEnd()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+      const cleanupEntry = debugEntries.find((entry) => entry.event === 'pty_cleanup_failure');
+      assert.equal(cleanupEntry?.severity, 'warning');
+      assert.deepEqual(cleanupEntry?.exitError?.details, {
+        kind: 'tmux_exit_failure',
+        sessionName: 'fake-cleanup-session',
+        exitTimeoutMs: 10,
+        sessionAlive: true,
+        paneDead: '0',
+        panePid: 12345,
+        paneCurrentCommand: 'claude',
+        cursorY: '2',
+      });
+    },
+  );
 });
 
 test('single-turn backend escalates PTY cleanup from SIGTERM to SIGKILL', async () => {
@@ -546,6 +612,92 @@ class SingleSessionProvider implements PtyProvider {
 
   async start(_command: string, _args: readonly string[], _options: PtyStartOptions): Promise<PtySession> {
     return this.session;
+  }
+}
+
+class SuccessfulTurnCleanupFailureSession implements PtySession {
+  readonly id = 'fake-cleanup-session';
+  submitCount = 0;
+  readonly terminateSignals: NodeJS.Signals[] = [];
+  private alive = true;
+  private lastWrite = '';
+
+  constructor(
+    private readonly logPath: string,
+    private readonly cwd: string,
+    private readonly sessionId: string,
+  ) {}
+
+  async write(input: string): Promise<void> {
+    this.lastWrite = input;
+  }
+
+  async submit(): Promise<void> {
+    this.submitCount += 1;
+    await appendFile(this.logPath, [
+      eventLine({
+        type: 'user',
+        cwd: this.cwd,
+        sessionId: this.sessionId,
+        uuid: 'active-user',
+        message: { content: this.lastWrite },
+      }),
+      eventLine({
+        type: 'assistant',
+        cwd: this.cwd,
+        sessionId: this.sessionId,
+        parentUuid: 'active-user',
+        message: {
+          content: [{ type: 'text', text: 'cleanup success result' }],
+          stop_reason: 'end_turn',
+        },
+      }),
+      eventLine({
+        type: 'system',
+        subtype: 'turn_duration',
+        cwd: this.cwd,
+        sessionId: this.sessionId,
+        durationMs: 10,
+      }),
+    ].join('\n') + '\n');
+  }
+
+  async interrupt(): Promise<void> {}
+
+  async terminate(signal: NodeJS.Signals = 'SIGTERM'): Promise<void> {
+    this.terminateSignals.push(signal);
+    this.alive = false;
+  }
+
+  async exit(): Promise<void> {
+    throw new OpenPError(
+      'tmux session fake-cleanup-session did not exit after graceful /exit',
+      EXIT_CODES.backendExited,
+      {
+        details: {
+          kind: 'tmux_exit_failure',
+          sessionName: 'fake-cleanup-session',
+          exitTimeoutMs: 10,
+          sessionAlive: true,
+          paneDead: '0',
+          panePid: 12345,
+          paneCurrentCommand: 'claude',
+          cursorY: '2',
+        },
+      },
+    );
+  }
+
+  async isAlive(): Promise<boolean> {
+    return this.alive;
+  }
+
+  async captureText(): Promise<string> {
+    return '❯';
+  }
+
+  async captureCursorLine(): Promise<string> {
+    return '❯';
   }
 }
 

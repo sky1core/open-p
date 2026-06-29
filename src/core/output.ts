@@ -44,6 +44,7 @@ export function formatTurnResult(result: TurnResult, options: OutputOptions): st
     const text = textOutput.endsWith('\n') ? textOutput : `${textOutput}\n`;
     return `${text}${formatVerboseTextMarker(options.verbose)}${formatTextWarnings(options.warnings)}`;
   }
+  const warnings = mergeWarnings(result.warnings, options.warnings);
   const stopReason = result.diagnostics.stopReason ?? null;
   const effectiveModel = result.diagnostics.model ?? options.model ?? null;
   const resultUsage = result.diagnostics.usage;
@@ -197,7 +198,7 @@ export function formatTurnResult(result: TurnResult, options: OutputOptions): st
       contextWindow: effectiveContextWindow,
       lastSubturnContextTokens,
       model: effectiveModel,
-      warnings: options.warnings ?? [],
+      warnings,
     }))}\n`;
   }
 
@@ -229,7 +230,7 @@ export function formatTurnResult(result: TurnResult, options: OutputOptions): st
       contextWindow: effectiveContextWindow,
       lastSubturnContextTokens,
       model: effectiveModel,
-      warnings: options.warnings ?? [],
+      warnings,
     }),
   );
   return events.map((event) => `${JSON.stringify(event)}\n`).join('');
@@ -370,6 +371,7 @@ export function formatWorkerTurnResult(result: WorkerTurnResult, event: {
     outputTokens: result.diagnostics.outputTokens,
     cacheReadInputTokens: result.diagnostics.cacheReadInputTokens,
   };
+  const warnings = mergeWarnings(result.warnings, event.warnings);
   const effectiveModel = result.diagnostics.model ?? event.model ?? null;
   const lastSubturnUsage = result.diagnostics.lastSubturnUsage ?? null;
   const assistantEventUsage = usage;
@@ -576,7 +578,7 @@ export function formatWorkerTurnResult(result: WorkerTurnResult, event: {
       contextWindow: result.diagnostics.contextWindow,
       lastSubturnContextTokens,
       model: effectiveModel,
-      warnings: event.warnings ?? [],
+      warnings,
     }),
   ];
   return events.map((line) => `${JSON.stringify(line)}\n`).join('');
@@ -589,6 +591,12 @@ function formatTextWarnings(warnings: readonly OutputWarning[] | undefined): str
   return warnings
     .map((warning) => `[openp ${warning.severity}] ${warning.code}: ${warning.message}\n`)
     .join('');
+}
+
+function mergeWarnings(
+  ...sources: readonly (readonly OutputWarning[] | undefined)[]
+): readonly OutputWarning[] {
+  return sources.flatMap((warnings) => warnings ?? []);
 }
 
 function formatVerboseTextMarker(verbose: boolean | undefined): string {

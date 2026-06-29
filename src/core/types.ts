@@ -33,6 +33,12 @@ export interface AssistantEventSnapshot {
 
 export type AssistantContentBlock = Record<string, unknown>;
 
+export interface TurnResultWarning {
+  readonly severity: 'warning' | 'error';
+  readonly code: string;
+  readonly message: string;
+}
+
 export interface TurnResult {
   readonly turnId: string;
   readonly text: string;
@@ -41,6 +47,7 @@ export interface TurnResult {
   readonly requestId?: string | null;
   readonly sessionId?: string | null;
   readonly assistantEvents?: readonly AssistantEventSnapshot[];
+  readonly warnings?: readonly TurnResultWarning[];
   readonly diagnostics: TurnDiagnostics;
 }
 

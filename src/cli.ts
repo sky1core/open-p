@@ -269,7 +269,7 @@ async function main(argv: readonly string[]): Promise<number> {
         structuredOutputToolUseId,
         suppressAssistantSnapshots: emittedAssistantSnapshots,
         previouslyEmittedAssistantEvents: emittedAssistantEvents,
-        warnings: verboseWarnings,
+        warnings: verboseWarningsForResult(result, verboseWarnings, options),
         verbose: options.verbose,
         ...outputMetadata,
       });
@@ -289,7 +289,7 @@ async function main(argv: readonly string[]): Promise<number> {
     successOutput = formatTurnResult(result, {
       outputFormat: options.outputFormat,
       backendSessionId: resultSessionId,
-      warnings: verboseWarnings,
+      warnings: verboseWarningsForResult(result, verboseWarnings, options),
       verbose: options.verbose,
       ...outputMetadata,
     });
@@ -309,11 +309,13 @@ async function main(argv: readonly string[]): Promise<number> {
     const message = error instanceof Error ? error.message : String(error);
     const exitCode = toExitCode(error);
     const reasonCode = error instanceof OpenPError ? error.reasonCode : undefined;
+    const details = error instanceof OpenPError ? error.details : undefined;
     await appendDebugLog(debugLogPath, {
       event: 'error',
       message,
       exitCode,
       ...(reasonCode ? { reasonCode } : {}),
+      ...(details ? { details } : {}),
     }).catch(() => undefined);
     process.stderr.write(`${message}\n`);
     if (verbose) {
@@ -321,6 +323,17 @@ async function main(argv: readonly string[]): Promise<number> {
     }
     return exitCode;
   }
+}
+
+function verboseWarningsForResult(
+  result: TurnResult,
+  warnings: readonly OutputWarning[],
+  options: ResolvedCliOptions,
+): readonly OutputWarning[] {
+  if (options.outputFormat === 'text') {
+    return options.verbose ? [...(result.warnings ?? []), ...warnings] : warnings;
+  }
+  return warnings;
 }
 
 async function registerConfiguredBackendInstances(): Promise<void> {

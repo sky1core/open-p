@@ -1,11 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { runAbortableOperation, throwIfAborted } from '../../core/abort.js';
+import { appendDebugLog, type DebugLogEntry } from '../../core/debug-log.js';
 import { ARTIFACT_REJECTION_REASONS, EXIT_CODES, OpenPError } from '../../core/errors.js';
 import { DEFAULT_TERMINATE_GRACE_MS, shouldTerminateOnAbort } from '../../core/graceful-interrupt.js';
 import { SessionLockStore } from '../../core/session-lock.js';
 import { SessionStateStore, validateSessionStateCompatibility } from '../../core/session-state.js';
 import type { Backend } from '../../core/backend.js';
-import type { BackendRunOptions, TurnRequest, TurnResult } from '../../core/types.js';
+import type { BackendRunOptions, TurnRequest, TurnResult, TurnResultWarning } from '../../core/types.js';
 import type { PtyProvider, PtySession } from '../../runners/types.js';
 import {
   isClaudeCodeEmptyInputPromptLine,
@@ -293,16 +294,28 @@ export class ClaudeCodeBackend implements Backend {
         sessionLogPath: await findClaudeCodeSessionLog(resultSessionId, options.cwd, this.configDir) ?? expectedLogPath,
         lastTurnId: request.turnId,
       });
+      const cleanupWarnings = await exitPtyAfterTurn(pty, primaryError, DEFAULT_TERMINATE_GRACE_MS, {
+        debugLog: options.debugLog,
+        backend: this.backendId,
+        backendSessionId: resultSessionId,
+        turnId: request.turnId,
+      });
+      primaryError = CLEANUP_ALREADY_HANDLED;
       return {
         ...result,
         sessionId: resultSessionId,
+        ...(cleanupWarnings.length > 0 ? { warnings: mergeTurnWarnings(result.warnings, cleanupWarnings) } : {}),
       };
     } catch (error) {
       primaryError = error;
       throw error;
     } finally {
       try {
-        await exitPtyAfterTurn(pty, primaryError);
+        if (primaryError !== CLEANUP_ALREADY_HANDLED) {
+          // Failure path: exitPtyAfterTurn only escalates/propagates here; it emits
+          // warnings and debug entries solely when the turn itself succeeded.
+          await exitPtyAfterTurn(pty, primaryError);
+        }
       } finally {
         interrupter.clear();
         options.forceSignal?.removeEventListener('abort', forceHandler);
@@ -311,6 +324,8 @@ export class ClaudeCodeBackend implements Backend {
     }
   }
 }
+
+const CLEANUP_ALREADY_HANDLED = Symbol('cleanup already handled');
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -434,17 +449,25 @@ export async function exitPtyAfterTurn(
   },
   primaryError: unknown,
   terminateGraceMs = DEFAULT_TERMINATE_GRACE_MS,
-): Promise<void> {
+  diagnostics: {
+    readonly debugLog?: string | null;
+    readonly backend?: string | null;
+    readonly backendSessionId?: string | null;
+    readonly turnId?: string | null;
+  } = {},
+): Promise<readonly TurnResultWarning[]> {
   let exitError: unknown = null;
   let forceError: unknown = null;
+  let forceAttempted = false;
   try {
     await pty.exit();
   } catch (error) {
     exitError = error;
   }
 
-  if (primaryError !== null && await isPtyAlive(pty)) {
+  if ((exitError !== null || primaryError !== null) && await isPtyAlive(pty)) {
     try {
+      forceAttempted = true;
       await forcePtyStopWithEscalation(pty, terminateGraceMs);
     } catch (error) {
       forceError = error;
@@ -452,11 +475,85 @@ export async function exitPtyAfterTurn(
   }
 
   if (exitError !== null && primaryError === null) {
-    throw exitError;
+    await appendDebugLog(diagnostics.debugLog ?? null, cleanupFailureDebugEntry(
+      'pty_cleanup_failure',
+      exitError,
+      forceError,
+      diagnostics,
+    )).catch(() => undefined);
+    return [cleanupFailureWarning(diagnostics.debugLog ?? null, forceAttempted, forceError)];
   }
   if (forceError !== null && primaryError === null) {
-    throw forceError;
+    await appendDebugLog(diagnostics.debugLog ?? null, cleanupFailureDebugEntry(
+      'pty_cleanup_failure',
+      exitError,
+      forceError,
+      diagnostics,
+    )).catch(() => undefined);
+    return [cleanupFailureWarning(diagnostics.debugLog ?? null, forceAttempted, forceError)];
   }
+  return [];
+}
+
+function cleanupFailureWarning(
+  debugLogPath: string | null,
+  forceAttempted: boolean,
+  forceError: unknown,
+): TurnResultWarning {
+  const suffix = debugLogPath
+    ? ` See debug log: ${debugLogPath}.`
+    : ' Use --debug-log to record details.';
+  const forceSuffix = forceError
+    ? ' Forced backend shutdown was attempted but also reported an error.'
+    : forceAttempted
+      ? ' Forced backend shutdown was attempted.'
+      : ' Backend process was already stopped when checked.';
+  return {
+    severity: 'warning',
+    code: 'pty_cleanup_failure',
+    message: `PTY cleanup failed after the result was confirmed; result was preserved.${forceSuffix}${suffix}`,
+  };
+}
+
+function cleanupFailureDebugEntry(
+  event: string,
+  exitError: unknown,
+  forceError: unknown,
+  diagnostics: {
+    readonly backend?: string | null;
+    readonly backendSessionId?: string | null;
+    readonly turnId?: string | null;
+  },
+): DebugLogEntry {
+  return {
+    event,
+    severity: 'warning',
+    ...(diagnostics.backend ? { backend: diagnostics.backend } : {}),
+    ...(diagnostics.backendSessionId ? { backendSessionId: diagnostics.backendSessionId } : {}),
+    ...(diagnostics.turnId ? { turnId: diagnostics.turnId } : {}),
+    exitError: cleanupErrorDebugPayload(exitError),
+    ...(forceError ? { forceError: cleanupErrorDebugPayload(forceError) } : {}),
+  };
+}
+
+function cleanupErrorDebugPayload(error: unknown): Record<string, unknown> {
+  return {
+    message: errorMessage(error),
+    ...(error instanceof OpenPError ? { exitCode: error.exitCode } : {}),
+    ...(error instanceof OpenPError && error.reasonCode ? { reasonCode: error.reasonCode } : {}),
+    ...(error instanceof OpenPError && error.details ? { details: error.details } : {}),
+  };
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function mergeTurnWarnings(
+  left: readonly TurnResultWarning[] | undefined,
+  right: readonly TurnResultWarning[],
+): readonly TurnResultWarning[] {
+  return [...(left ?? []), ...right];
 }
 
 async function forcePtyStopWithEscalation(

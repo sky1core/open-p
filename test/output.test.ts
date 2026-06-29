@@ -221,6 +221,26 @@ test('formats json warnings under openp metadata only', () => {
   }]);
 });
 
+test('formats backend result warnings under openp metadata', () => {
+  const openp = parseJsonOpenP(formatTurnResult({
+    ...RESULT,
+    warnings: [{
+      severity: 'warning',
+      code: 'pty_cleanup_failure',
+      message: 'PTY cleanup failed after the result was confirmed; result was preserved.',
+    }],
+  }, {
+    outputFormat: 'json',
+    backendSessionId: '11111111-1111-4111-8111-111111111111',
+  }));
+
+  assert.deepEqual(metadata(openp).warnings, [{
+    severity: 'warning',
+    code: 'pty_cleanup_failure',
+    message: 'PTY cleanup failed after the result was confirmed; result was preserved.',
+  }]);
+});
+
 test('formats structured output as result toolCall and toolResult without answer prose', () => {
   const openp = parseJsonOpenP(formatTurnResult(RESULT, {
     outputFormat: 'json',
@@ -414,6 +434,26 @@ test('formats worker result with full diagnostics in openp metadata', () => {
   assert.equal(metadata(openp).numTurns, 2);
   assert.equal(metadata(openp).durationMs, 456);
   assert.equal(metadata(openp).stopReason, 'end_turn');
+});
+
+test('formats worker result warnings under openp metadata', () => {
+  const openp = parseSingleOpenPRecord(formatWorkerTurnResult({
+    ...WORKER_RESULT,
+    warnings: [{
+      severity: 'warning',
+      code: 'pty_cleanup_failure',
+      message: 'PTY cleanup failed after the result was confirmed; result was preserved.',
+    }],
+  }, {
+    turnId: 'public-turn-1',
+    model: 'claude-test',
+  }));
+
+  assert.deepEqual(metadata(openp).warnings, [{
+    severity: 'warning',
+    code: 'pty_cleanup_failure',
+    message: 'PTY cleanup failed after the result was confirmed; result was preserved.',
+  }]);
 });
 
 test('formats worker result unknown diagnostics as null, not fabricated defaults', () => {

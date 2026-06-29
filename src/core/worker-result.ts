@@ -29,6 +29,7 @@ export function toWorkerTurnResult(
     ...(result.structuredOutput !== undefined ? { structuredOutput: result.structuredOutput } : {}),
     ...(result.requestId ? { requestId: result.requestId } : {}),
     ...(result.assistantEvents ? { assistantEvents: result.assistantEvents } : {}),
+    ...(result.warnings && result.warnings.length > 0 ? { warnings: result.warnings } : {}),
     sessionId,
     diagnostics: {
       numTurns: options.numTurns ?? null,

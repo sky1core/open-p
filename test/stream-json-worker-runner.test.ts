@@ -2491,6 +2491,64 @@ test('stream-json worker keeps the primary turn error when shutdown also fails',
   );
 });
 
+test('stream-json worker preserves emitted result when shutdown fails afterward', async () => {
+  const debugLogPath = join(await mkdtemp(join(tmpdir(), 'openp-debug-')), 'debug.jsonl');
+  const output: string[] = [];
+  const bridge: StreamJsonWorkerBridge = {
+    async runTurn(request) {
+      return {
+        content: 'worker final',
+        reasoningContent: null,
+        sessionId: request.sessionId ?? SESSION_ID,
+        diagnostics: {
+          numTurns: 1,
+          inputTokens: 10,
+          outputTokens: 2,
+          cacheReadInputTokens: 3,
+          contextWindow: 200000,
+          lastSubturnContextTokens: 13,
+          durationMs: 25,
+          totalCostUsd: null,
+          stopReason: 'end_turn',
+          toolsUsed: [],
+          autoCompacted: false,
+          intermediateTextCount: 0,
+        },
+      };
+    },
+    async shutdown() {
+      throw new OpenPError('shutdown failed after result', EXIT_CODES.backendExited, {
+        details: {
+          kind: 'tmux_exit_failure',
+          sessionName: 'fake-session',
+        },
+      });
+    },
+  };
+  const state = await stateContext('/work/open-p');
+
+  const code = await runStreamJsonWorkerLines({
+    options: options({ debugLog: debugLogPath }),
+    lines: lines([userEvent('turn-a', 'prompt')]),
+    bridge,
+    ...state,
+    outputMetadata: metadata(),
+    write: (chunk) => output.push(chunk),
+  });
+
+  assert.equal(code, EXIT_CODES.success);
+  const events = parseEvents(output.join(''));
+  assert.equal(resultAnswerText(terminalOpenP(events)), 'worker final');
+  const entries = await readDebugEntries(debugLogPath);
+  const cleanupEntry = entries.find((entry) => entry.event === 'worker_shutdown_failure');
+  assert.equal(cleanupEntry?.severity, 'warning');
+  assert.equal(cleanupEntry?.message, 'shutdown failed after result');
+  assert.deepEqual(cleanupEntry?.details, {
+    kind: 'tmux_exit_failure',
+    sessionName: 'fake-session',
+  });
+});
+
 test('stream-json worker does not save resumable state when the first turn fails', async () => {
   const bridge: StreamJsonWorkerBridge = {
     async runTurn() {
@@ -2520,7 +2578,13 @@ test('stream-json worker debug log records artifact rejection reason code on err
       throw new OpenPError(
         'artifact candidate rejected',
         EXIT_CODES.protocolViolation,
-        'missing_completion',
+        {
+          reasonCode: 'missing_completion',
+          details: {
+            kind: 'tmux_exit_failure',
+            sessionName: 'fake-session',
+          },
+        },
       );
     },
   };
@@ -2542,6 +2606,10 @@ test('stream-json worker debug log records artifact rejection reason code on err
   const entries = await readDebugEntries(debugLogPath);
   const errorEntry = entries.find((entry) => entry.event === 'error');
   assert.equal(errorEntry?.reasonCode, 'missing_completion');
+  assert.deepEqual(errorEntry?.details, {
+    kind: 'tmux_exit_failure',
+    sessionName: 'fake-session',
+  });
 });
 
 test('stream-json worker does not emit terminal success when state save fails', async () => {

@@ -1,4 +1,10 @@
-import type { AssistantContentBlock, AssistantEventSnapshot, BackendUsage, IntermediateTextSource } from './types.js';
+import type {
+  AssistantContentBlock,
+  AssistantEventSnapshot,
+  BackendUsage,
+  IntermediateTextSource,
+  TurnResultWarning,
+} from './types.js';
 
 export interface WorkerTurnRequest {
   readonly sessionId: string | null;
@@ -61,6 +67,7 @@ export interface WorkerTurnResult {
   readonly structuredOutput?: unknown;
   readonly requestId?: string | null;
   readonly assistantEvents?: readonly import('./types.js').AssistantEventSnapshot[];
+  readonly warnings?: readonly TurnResultWarning[];
   readonly sessionId: string;
   readonly diagnostics: WorkerTurnDiagnostics;
 }

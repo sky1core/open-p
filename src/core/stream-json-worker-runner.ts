@@ -99,6 +99,7 @@ async function runStreamJsonWorkerLinesWithLock(input: {
   let publicSessionId: string | null = initialSessionId;
   let primaryError: unknown = null;
   let cleanupError: unknown = null;
+  let emittedResultRecord = false;
 
   try {
     for await (const line of input.lines) {
@@ -203,7 +204,7 @@ async function runStreamJsonWorkerLinesWithLock(input: {
         const resultLock = await lockStore.acquire(result.sessionId);
         const provisionalLock = lock;
         lock = resultLock;
-        await releaseSessionLock(provisionalLock, null);
+        await releaseSessionLock(provisionalLock, null, input.options.debugLog);
       }
       publicSessionId = result.sessionId;
       let verboseWarnings: readonly OutputWarning[] = [];
@@ -245,6 +246,7 @@ async function runStreamJsonWorkerLinesWithLock(input: {
       }
       await saveStreamWorkerSessionState(input, stateStore, existingState, publicTurnId, result.sessionId);
       input.write(successOutput);
+      emittedResultRecord = true;
       turnIndex += 1;
     }
   } catch (error) {
@@ -258,7 +260,14 @@ async function runStreamJsonWorkerLinesWithLock(input: {
       cleanupError = error;
     }
     if (lock) {
-      await releaseSessionLock(lock, primaryError ?? cleanupError);
+      await releaseSessionLock(lock, primaryError ?? cleanupError, input.options.debugLog);
+    }
+    if (primaryError === null && cleanupError) {
+      if (emittedResultRecord) {
+        await appendDebugLog(input.options.debugLog, cleanupDebugLogEntry('worker_shutdown_failure', cleanupError))
+          .catch(() => undefined);
+        cleanupError = null;
+      }
     }
     if (primaryError === null && cleanupError) {
       throw cleanupError;
@@ -276,11 +285,26 @@ async function runStreamJsonWorkerLinesWithLock(input: {
 
 function errorDebugLogEntry(error: unknown): DebugLogEntry {
   const reasonCode = error instanceof OpenPError ? error.reasonCode : undefined;
+  const details = error instanceof OpenPError ? error.details : undefined;
   return {
     event: 'error',
     message: errorMessage(error),
     exitCode: toExitCode(error),
     ...(reasonCode ? { reasonCode } : {}),
+    ...(details ? { details } : {}),
+  };
+}
+
+function cleanupDebugLogEntry(event: string, error: unknown): DebugLogEntry {
+  const reasonCode = error instanceof OpenPError ? error.reasonCode : undefined;
+  const details = error instanceof OpenPError ? error.details : undefined;
+  return {
+    event,
+    severity: 'warning',
+    message: errorMessage(error),
+    exitCode: toExitCode(error),
+    ...(reasonCode ? { reasonCode } : {}),
+    ...(details ? { details } : {}),
   };
 }
 
@@ -307,13 +331,19 @@ async function saveStreamWorkerSessionState(
   });
 }
 
-async function releaseSessionLock(lock: SessionLock, primaryError: unknown): Promise<void> {
+async function releaseSessionLock(
+  lock: SessionLock,
+  primaryError: unknown,
+  debugLog: string | null,
+): Promise<void> {
   try {
     await lock.release();
   } catch (releaseError) {
     if (primaryError === null) {
       throw releaseError;
     }
+    await appendDebugLog(debugLog, cleanupDebugLogEntry('session_lock_release_failure', releaseError))
+      .catch(() => undefined);
   }
 }
 

@@ -210,7 +210,11 @@ export class TmuxSession implements PtySession {
       this.markClosed();
       return;
     }
-    throw new OpenPError(`tmux session ${this.sessionName} did not exit after graceful /exit`, EXIT_CODES.backendExited);
+    throw new OpenPError(
+      `tmux session ${this.sessionName} did not exit after graceful /exit`,
+      EXIT_CODES.backendExited,
+      { details: await this.collectExitFailureDiagnostics() },
+    );
   }
 
   private async waitForExit(timeoutMs: number): Promise<boolean> {
@@ -289,6 +293,29 @@ export class TmuxSession implements PtySession {
     }
   }
 
+  private async collectExitFailureDiagnostics(): Promise<Record<string, unknown>> {
+    const diagnostics: Record<string, unknown> = {
+      kind: 'tmux_exit_failure',
+      sessionName: this.sessionName,
+      exitTimeoutMs: this.exitTimeoutMs,
+    };
+    await addDiagnostic(diagnostics, 'sessionAlive', () => this.isAlive());
+    await addDiagnostic(diagnostics, 'paneDead', async () => {
+      const result = await execFileText(this.tmuxBin, ['display-message', '-p', '-t', this.sessionName, '#{pane_dead}']);
+      return result.stdout.trim();
+    });
+    await addDiagnostic(diagnostics, 'panePid', () => this.resolvePanePid());
+    await addDiagnostic(diagnostics, 'paneCurrentCommand', async () => {
+      const result = await execFileText(this.tmuxBin, ['display-message', '-p', '-t', this.sessionName, '#{pane_current_command}']);
+      return result.stdout.trim();
+    });
+    await addDiagnostic(diagnostics, 'cursorY', async () => {
+      const result = await execFileText(this.tmuxBin, ['display-message', '-p', '-t', this.sessionName, '#{cursor_y}']);
+      return result.stdout.trim();
+    });
+    return diagnostics;
+  }
+
   private signalPaneProcess(panePid: number, signal: NodeJS.Signals): boolean {
     try {
       this.sendProcessSignal(-panePid, signal);
@@ -326,4 +353,16 @@ export class TmuxSession implements PtySession {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function addDiagnostic(
+  diagnostics: Record<string, unknown>,
+  key: string,
+  read: () => Promise<unknown>,
+): Promise<void> {
+  try {
+    diagnostics[key] = await read();
+  } catch (error) {
+    diagnostics[`${key}Error`] = error instanceof Error ? error.message : String(error);
+  }
 }
