@@ -9,7 +9,7 @@ export interface OpenCodeLocalProviderConfig {
 const LOCAL_MODEL_PROVIDER_CONFIGS = {
   'mlx-lm': {
     name: 'MLX-LM Server (local)',
-    baseURL: 'http://localhost:8080/v1',
+    baseURL: 'http://localhost:8091/v1',
   },
   lmstudio: {
     name: 'LM Studio (local)',

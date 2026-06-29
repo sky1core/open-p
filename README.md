@@ -137,7 +137,7 @@ Notes:
 
 The OpenCode backend is intended for local-provider use. On Apple Silicon, prefer `mlx-lm` because it keeps the runtime surface closest to the MLX model server. It requires `--model` with one of the configured local provider ids:
 
-- `mlx-lm/<model-id>` -> `http://localhost:8080/v1`
+- `mlx-lm/<model-id>` -> `http://localhost:8091/v1`
 - `lmstudio/<model-id>` -> `http://localhost:1234/v1`
 - `ollama/<model-id>` -> `http://localhost:11434/v1`
 - `llama.cpp/<model-id>` -> `http://localhost:8080/v1`

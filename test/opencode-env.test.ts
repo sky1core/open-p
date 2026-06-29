@@ -50,7 +50,7 @@ test('buildOpenCodePrivateEnv injects only the selected localhost provider confi
     assert.deepEqual(config.plugin, []);
     assert.deepEqual(Object.keys(config.provider), ['mlx-lm']);
     assert.equal(config.provider['mlx-lm'].npm, '@ai-sdk/openai-compatible');
-    assert.equal(config.provider['mlx-lm'].options.baseURL, 'http://localhost:8080/v1');
+    assert.equal(config.provider['mlx-lm'].options.baseURL, 'http://localhost:8091/v1');
     assert.deepEqual(Object.keys(config.provider['mlx-lm'].models), ['qwen-coder']);
     assert.equal(privateEnv.env.OPENCODE_DISABLE_AUTOUPDATE, '1');
     assert.equal(privateEnv.env.OPENCODE_DISABLE_MODELS_FETCH, '1');

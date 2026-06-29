@@ -62,7 +62,7 @@ test('requireLocalModel accepts MLX local provider prefixes', () => {
   assert.equal(model.model, 'mlx-lm/default_model');
   assert.equal(model.provider, 'mlx-lm');
   assert.equal(model.modelId, 'default_model');
-  assert.equal(model.providerConfig.baseURL, 'http://localhost:8080/v1');
+  assert.equal(model.providerConfig.baseURL, 'http://localhost:8091/v1');
 });
 
 test('requireLocalModel rejects ambiguous mlx provider id', () => {
