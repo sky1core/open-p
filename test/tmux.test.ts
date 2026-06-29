@@ -168,7 +168,7 @@ test('tmux session exit retries with interrupt before a second graceful exit', a
   const fakeTmux = join(dir, 'fake-tmux.js');
   const statePath = join(dir, 'state.json');
   const logPath = join(dir, 'commands.log');
-  await writeFile(statePath, JSON.stringify({ alive: true, interrupted: false }));
+  await writeFile(statePath, JSON.stringify({ alive: true, interrupted: false, exitAttempts: 0 }));
   await writeFile(fakeTmux, `#!/usr/bin/env node
 const fs = require('node:fs');
 const statePath = ${JSON.stringify(statePath)};
@@ -188,8 +188,13 @@ if (args[0] === 'load-buffer') {
 if (args[0] === 'paste-buffer') {
   const state = readState();
   const input = fs.readFileSync(${JSON.stringify(join(dir, 'buffer.txt'))}, 'utf8');
-  if (input.trim() === '/exit' && state.interrupted) {
+  if (input.trim() === '/exit') {
+    state.exitAttempts += 1;
+  }
+  if (input.trim() === '/exit' && state.interrupted && state.exitAttempts >= 2) {
     state.alive = false;
+    writeState(state);
+  } else {
     writeState(state);
   }
   process.exit(0);
@@ -214,36 +219,43 @@ process.exit(0);
     .map((args, index) => args[0] === 'paste-buffer' ? index : -1)
     .filter((index) => index >= 0);
   const pasteCommands = pasteIndexes.map((index) => commandLines[index]!);
-  const interruptIndex = commandLines.findIndex((args) => args[0] === 'send-keys' && args.includes('C-c'));
+  const interruptIndexes = commandLines
+    .map((args, index) => args[0] === 'send-keys' && args.includes('C-c') ? index : -1)
+    .filter((index) => index >= 0);
   const clearIndexes = commandLines
     .map((args, index) => args[0] === 'send-keys' && args.includes('C-u') ? index : -1)
     .filter((index) => index >= 0);
 
   assert.equal(pasteIndexes.length, 2);
   assert.equal(clearIndexes.length, 2);
+  assert.equal(interruptIndexes.length, 2);
   for (const pasteCommand of pasteCommands) {
     assert.deepEqual(pasteCommand.slice(0, 4), ['paste-buffer', '-p', '-r', '-b']);
   }
+  assert.ok(interruptIndexes[0]! < clearIndexes[0]!);
   assert.ok(clearIndexes[0]! < pasteIndexes[0]!);
-  assert.ok(pasteIndexes[0]! < interruptIndex);
-  assert.ok(interruptIndex < pasteIndexes[1]!);
+  assert.ok(pasteIndexes[0]! < interruptIndexes[1]!);
+  assert.ok(interruptIndexes[1]! < clearIndexes[1]!);
   assert.ok(clearIndexes[1]! < pasteIndexes[1]!);
   assert.match(commandLog, /"send-keys","-t","fake-session","C-c"/);
 });
 
-test('tmux session clears existing input before submitting graceful exit', async () => {
+test('tmux session clears multiline draft before submitting graceful exit', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'openp-fake-tmux-'));
   const fakeTmux = join(dir, 'fake-tmux.js');
   const statePath = join(dir, 'state.json');
   const bufferPath = join(dir, 'buffer.txt');
+  const logPath = join(dir, 'commands.log');
   const submissionsPath = join(dir, 'submissions.log');
-  await writeFile(statePath, JSON.stringify({ alive: true, draft: 'leftover draft' }));
+  await writeFile(statePath, JSON.stringify({ alive: true, draft: 'leftover first line\\n\\nleftover cursor line' }));
   await writeFile(fakeTmux, `#!/usr/bin/env node
 const fs = require('node:fs');
 const statePath = ${JSON.stringify(statePath)};
 const bufferPath = ${JSON.stringify(bufferPath)};
+const logPath = ${JSON.stringify(logPath)};
 const submissionsPath = ${JSON.stringify(submissionsPath)};
 const args = process.argv.slice(2);
+fs.appendFileSync(logPath, JSON.stringify(args) + '\\n');
 const readState = () => JSON.parse(fs.readFileSync(statePath, 'utf8'));
 const writeState = (state) => fs.writeFileSync(statePath, JSON.stringify(state));
 if (args[0] === 'has-session') {
@@ -263,9 +275,15 @@ if (args[0] === 'paste-buffer') {
   writeState(state);
   process.exit(0);
 }
-if (args[0] === 'send-keys' && args.includes('C-u')) {
+if (args[0] === 'send-keys' && args.includes('C-c')) {
   const state = readState();
   state.draft = '';
+  writeState(state);
+  process.exit(0);
+}
+if (args[0] === 'send-keys' && args.includes('C-u')) {
+  const state = readState();
+  state.draft = state.draft.replace(/[^\\n]*$/, '');
   writeState(state);
   process.exit(0);
 }
@@ -287,6 +305,49 @@ process.exit(0);
 
   assert.equal((await readFile(submissionsPath, 'utf8')).trim(), '/exit');
   assert.equal(await session.isAlive(), false);
+  const commandLog = await readFile(logPath, 'utf8');
+  assert.match(commandLog, /"send-keys","-t","fake-session","C-c"/);
+});
+
+test('tmux session marks closed when first interrupt exits the session', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-fake-tmux-'));
+  const fakeTmux = join(dir, 'fake-tmux.js');
+  const statePath = join(dir, 'state.json');
+  const logPath = join(dir, 'commands.log');
+  await writeFile(statePath, JSON.stringify({ alive: true }));
+  await writeFile(fakeTmux, `#!/usr/bin/env node
+const fs = require('node:fs');
+const statePath = ${JSON.stringify(statePath)};
+const logPath = ${JSON.stringify(logPath)};
+const args = process.argv.slice(2);
+fs.appendFileSync(logPath, JSON.stringify(args) + '\\n');
+const readState = () => JSON.parse(fs.readFileSync(statePath, 'utf8'));
+const writeState = (state) => fs.writeFileSync(statePath, JSON.stringify(state));
+if (args[0] === 'has-session') {
+  process.exit(readState().alive ? 0 : 1);
+}
+if (args[0] === 'send-keys' && args.includes('C-c')) {
+  writeState({ alive: false });
+  process.exit(0);
+}
+if (args[0] === 'load-buffer' || args[0] === 'paste-buffer') {
+  process.exit(2);
+}
+process.exit(0);
+`);
+  await chmod(fakeTmux, 0o755);
+  let closedCount = 0;
+
+  const session = new TmuxSession(fakeTmux, 'fake-session', 10, undefined, () => {
+    closedCount += 1;
+  });
+  await session.exit();
+
+  assert.equal(closedCount >= 1, true);
+  const commandLog = await readFile(logPath, 'utf8');
+  assert.match(commandLog, /"send-keys","-t","fake-session","C-c"/);
+  assert.doesNotMatch(commandLog, /"load-buffer"/);
+  assert.doesNotMatch(commandLog, /"paste-buffer"/);
 });
 
 test('tmux session marks closed after successful graceful exit', async () => {

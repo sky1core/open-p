@@ -184,6 +184,12 @@ export class TmuxSession implements PtySession {
       this.markClosed();
       return;
     }
+    await this.interrupt();
+    await sleep(250);
+    if (!(await this.isAlive())) {
+      this.markClosed();
+      return;
+    }
     await this.clearInputLine();
     await this.write('/exit');
     await this.submit();
