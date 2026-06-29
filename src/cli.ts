@@ -45,10 +45,12 @@ import { getOpenPVersion } from './core/version.js';
 import { claudeBackendProvider, createClaudeBackendProvider } from './backends/claude/index.js';
 import { codexBackendProvider } from './backends/codex/index.js';
 import { kiroBackendProvider } from './backends/kiro/index.js';
+import { opencodeBackendProvider } from './backends/opencode/index.js';
 
 registerBackend(claudeBackendProvider);
 registerBackend(codexBackendProvider);
 registerBackend(kiroBackendProvider);
+registerBackend(opencodeBackendProvider);
 
 const HELP = `openp
 
@@ -62,6 +64,7 @@ Backends:
   claude    Claude Code interactive backend
   codex     Codex exec backend
   kiro      Kiro ACP backend
+  opencode  OpenCode local-private backend
   Configured backend instances from \${XDG_CONFIG_HOME:-~/.config}/open-p/instances.yaml are selectable like built-in backends.
 
 Core options:

@@ -15,6 +15,7 @@ A local agent CLI compatibility layer for running prompt-driven turns through su
 | Claude | `claude` | [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) |
 | Codex | `codex` | [Codex CLI](https://github.com/openai/codex) |
 | Kiro | `kiro-cli` | [Kiro CLI](https://kiro.dev) |
+| OpenCode | `opencode` plus a local provider; MLX-LM is the recommended local path on Apple Silicon | [OpenCode](https://opencode.ai) |
 
 ## Install
 
@@ -33,6 +34,7 @@ openp --version
 openp claude "hello"
 openp codex "hello"
 openp kiro "hello"
+openp opencode --model mlx-lm/default_model "hello"
 ```
 
 The first positional argument selects the backend. There is no default backend.
@@ -130,6 +132,21 @@ Notes:
 - The base `claude` backend always uses the default Claude Code configuration directory; it does not read an ambient `CLAUDE_CONFIG_DIR`.
 - An instance reads user-scope skills, subagents, and `settings.json` (hooks, permissions) only from its own `configDir`; they are not inherited from the default `~/.claude` profile. Replicate them in the instance directory (copy, or symlink the `skills`/`agents` directories) if you want the same behavior.
 - Give the instance `configDir` its own `CLAUDE.md`. Without one, a workspace under `$HOME` makes Claude Code pick up the default `~/.claude/CLAUDE.md` as a project file, and any external `@` import it declares raises a per-workspace "Allow external CLAUDE.md file imports?" approval prompt that an unattended run cannot answer. A `CLAUDE.md` in the instance `configDir` loads the same imports as user scope and skips that prompt.
+
+## OpenCode Backend Notes
+
+The OpenCode backend is intended for local-provider use. On Apple Silicon, prefer `mlx-lm` because it keeps the runtime surface closest to the MLX model server. It requires `--model` with one of the configured local provider ids:
+
+- `mlx-lm/<model-id>` -> `http://localhost:8080/v1`
+- `lmstudio/<model-id>` -> `http://localhost:1234/v1`
+- `ollama/<model-id>` -> `http://localhost:11434/v1`
+- `llama.cpp/<model-id>` -> `http://localhost:8080/v1`
+
+OpenCode provider ids are config keys, so the provider id alone is not a privacy boundary. `openp` injects a private OpenCode config for the selected local provider and does not load ambient OpenCode provider credentials.
+
+Use `lmstudio`, `ollama`, or `llama.cpp` when you want their model management or runtime compatibility layer. They are local-provider options, not the primary MLX-LM path.
+
+On macOS, OpenCode runs under `sandbox-exec` with outbound network access limited to localhost. Ambient cloud/API credential variables are not passed to the child process. If the network guard is unavailable, the backend fails closed.
 
 ## Sessions
 

@@ -1,4 +1,4 @@
-export const BUILT_IN_BACKEND_IDS = ['claude', 'codex', 'kiro'] as const;
+export const BUILT_IN_BACKEND_IDS = ['claude', 'codex', 'kiro', 'opencode'] as const;
 
 export type BuiltInBackendId = typeof BUILT_IN_BACKEND_IDS[number];
 
