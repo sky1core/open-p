@@ -2,6 +2,10 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import { extractClaudeCodeIntermediateContent, extractClaudeCodeIntermediateText, parseClaudeCodeJsonlTurn } from '../src/backends/claude/turn-parser.js';
+import {
+  isCallerUserTurn,
+  rememberLocalCommandTranscriptPromptId,
+} from '../src/backends/claude/turn-boundary-predicates.js';
 import { EXIT_CODES, OpenPError } from '../src/core/errors.js';
 
 const TURN_ID = 'turn-1';
@@ -1039,6 +1043,56 @@ test('does not treat tool_result, meta, or local command user events as caller t
   assert.equal(toolResultContent[0].content, 'tool output');
 });
 
+test('classifies string-message local command transcripts the same in wait-loop and parser paths', () => {
+  assertLocalCommandTranscriptShapeIsNotCaller({
+    promptId: 'local-command-string-message',
+    caveatEvent: {
+      type: 'user',
+      isMeta: true,
+      promptId: 'local-command-string-message',
+      message: '<local-command-caveat>generated while running local commands</local-command-caveat>',
+    },
+    commandEvent: {
+      type: 'user',
+      promptId: 'local-command-string-message',
+      message: '<command-name>/compact</command-name>\n<command-message>compact</command-message>',
+    },
+  });
+});
+
+test('classifies kind-text data local command transcripts the same in wait-loop and parser paths', () => {
+  assertLocalCommandTranscriptShapeIsNotCaller({
+    promptId: 'local-command-kind-text-data',
+    caveatEvent: {
+      type: 'user',
+      isMeta: true,
+      promptId: 'local-command-kind-text-data',
+      message: {
+        role: 'user',
+        content: [
+          {
+            kind: 'text',
+            data: '<local-command-caveat>generated while running local commands</local-command-caveat>',
+          },
+        ],
+      },
+    },
+    commandEvent: {
+      type: 'user',
+      promptId: 'local-command-kind-text-data',
+      message: {
+        role: 'user',
+        content: [
+          {
+            kind: 'text',
+            data: '<command-name>/compact</command-name>\n<command-message>compact</command-message>',
+          },
+        ],
+      },
+    },
+  });
+});
+
 test('keeps seeded local-command prompt ids after the caller user turn', () => {
   const lines = [
     userLine('real prompt'),
@@ -1109,6 +1163,29 @@ test('treats prompt-id local-command-looking prompt text as caller input without
 
   assert.equal(result?.text, 'literal prompt with prompt id handled');
 });
+
+function assertLocalCommandTranscriptShapeIsNotCaller(options: {
+  readonly promptId: string;
+  readonly caveatEvent: Record<string, unknown>;
+  readonly commandEvent: Record<string, unknown>;
+}): void {
+  const waitLoopPromptIds = new Set<string>();
+  rememberLocalCommandTranscriptPromptId(waitLoopPromptIds, options.caveatEvent);
+  assert.equal(waitLoopPromptIds.has(options.promptId), true);
+  assert.equal(
+    isCallerUserTurn(options.commandEvent, waitLoopPromptIds, { isTaskNotification: false }),
+    false,
+  );
+
+  const parserResult = parseClaudeCodeJsonlTurn([
+    userLine('real prompt'),
+    JSON.stringify(options.caveatEvent),
+    JSON.stringify(options.commandEvent),
+    assistantLine([{ type: 'text', text: 'result answer' }], undefined, 'end_turn'),
+    durationLine(10),
+  ], TURN_ID);
+  assert.equal(parserResult?.text, 'result answer');
+}
 
 function userLine(content: string, uuid?: string, parentUuid?: string): string {
   return JSON.stringify({

@@ -5,8 +5,16 @@ import { createReadStream, watch } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { ARTIFACT_REJECTION_REASONS, EXIT_CODES, OpenPError } from '../../core/errors.js';
 import { isSafeSessionId } from '../../core/session-id.js';
-import { extractClaudeCodeIntermediateContent, isLocalCommandTranscriptText, isShellCommandTranscriptText, parseClaudeCodeJsonlTurn } from './turn-parser.js';
+import { extractClaudeCodeIntermediateContent, parseClaudeCodeJsonlTurn } from './turn-parser.js';
 import { isClaudeCodeTaskNotificationLine } from './background-parser.js';
+import {
+  collectUserText,
+  isCallerUserTurn,
+  isLocalCommandTranscriptText,
+  isShellCommandTranscriptText,
+  isStablePrefixOfLongerText,
+  rememberLocalCommandTranscriptPromptId,
+} from './turn-boundary-predicates.js';
 import type {
   AssistantContentBlock,
   AssistantEventSnapshot,
@@ -395,7 +403,10 @@ export async function waitForClaudeCodeTurnResult(options: {
             completionWithoutResultObserved = true;
           }
           rememberLocalCommandTranscriptPromptId(activeTurnLocalCommandPromptIds, event);
-          if (isCallerUserTurn(event, line, activeTurnLocalCommandPromptIds)) {
+          if (isCallerUserTurn(event, activeTurnLocalCommandPromptIds, {
+            // Guarded so non-user lines skip the raw-line reparse inside the notification check.
+            isTaskNotification: event.type === 'user' && isClaudeCodeTaskNotificationLine(line),
+          })) {
             sawCallerUserTurn = true;
             callerUserTurnLineIndex = lines.length;
             completionWithoutResultObserved = false;
@@ -567,7 +578,9 @@ export async function hasClaudeCodeCallerUserTurnInSessionLogSegment(
   for (const line of parts) {
     const event = parseLineObject(line);
     rememberLocalCommandTranscriptPromptId(localCommandTranscriptPromptIds, event);
-    if (isCallerUserTurn(event, line, localCommandTranscriptPromptIds)) {
+    if (isCallerUserTurn(event, localCommandTranscriptPromptIds, {
+      isTaskNotification: event.type === 'user' && isClaudeCodeTaskNotificationLine(line),
+    })) {
       return true;
     }
   }
@@ -759,7 +772,9 @@ async function analyzeLogDiscoveryCandidate(
     if (typeof event.cwd === 'string' && validCwds.has(event.cwd)) {
       hasWorkspaceCwd = true;
     }
-    if (isCallerUserTurn(event, line, localCommandTranscriptPromptIds)) {
+    if (isCallerUserTurn(event, localCommandTranscriptPromptIds, {
+      isTaskNotification: event.type === 'user' && isClaudeCodeTaskNotificationLine(line),
+    })) {
       if (typeof event.cwd === 'string' && validCwds.has(event.cwd)) {
         callerUserTurnCount += 1;
       } else {
@@ -829,101 +844,6 @@ async function logFileHasCwd(path: string, validCwds: ReadonlySet<string>): Prom
     }
   }
   return false;
-}
-
-function isCallerUserTurn(
-  event: Record<string, unknown>,
-  rawLine: string,
-  localCommandTranscriptPromptIds: ReadonlySet<string>,
-): boolean {
-  if (event.type !== 'user') {
-    return false;
-  }
-  if (isClaudeCodeTaskNotificationLine(rawLine)) {
-    return false;
-  }
-  if (event.isMeta === true) {
-    return false;
-  }
-  if (event.isCompactSummary === true) {
-    return false; // context-compaction continuation message, not a caller prompt (see turn-parser.ts)
-  }
-  if (userEventHasToolResult(event)) {
-    return false;
-  }
-  if (isLocalCommandTranscriptEvent(event, localCommandTranscriptPromptIds)) {
-    return false;
-  }
-  return true;
-}
-
-function collectUserText(event: Record<string, unknown>): string[] {
-  const message = event.message;
-  if (typeof message === 'string') {
-    return [message];
-  }
-  if (!message || typeof message !== 'object' || Array.isArray(message)) {
-    return [];
-  }
-  const content = (message as Record<string, unknown>).content;
-  if (typeof content === 'string') {
-    return [content];
-  }
-  if (!Array.isArray(content)) {
-    return [];
-  }
-  const texts: string[] = [];
-  for (const block of content) {
-    if (typeof block === 'string') {
-      texts.push(block);
-      continue;
-    }
-    if (!block || typeof block !== 'object' || Array.isArray(block)) {
-      continue;
-    }
-    const item = block as Record<string, unknown>;
-    if (item.type === 'text' && typeof item.text === 'string') {
-      texts.push(item.text);
-    }
-  }
-  return texts;
-}
-
-function userEventHasToolResult(event: Record<string, unknown>): boolean {
-  const message = event.message;
-  if (!message || typeof message !== 'object' || Array.isArray(message)) {
-    return false;
-  }
-  const content = (message as Record<string, unknown>).content;
-  return Array.isArray(content) && content.some((block) => {
-    if (!block || typeof block !== 'object' || Array.isArray(block)) {
-      return false;
-    }
-    return (block as Record<string, unknown>).type === 'tool_result';
-  });
-}
-
-function isLocalCommandTranscriptEvent(
-  event: Record<string, unknown>,
-  localCommandTranscriptPromptIds: ReadonlySet<string>,
-): boolean {
-  const texts = collectUserText(event).map((text) => text.trim()).filter(Boolean);
-  if (texts.length !== 1) {
-    return false;
-  }
-  if (texts[0] === '/exit') {
-    return true;
-  }
-  const promptId = stringOrNull(event.promptId);
-  // A real caller prompt always carries a promptId; a `! …` shell transcript does not. The absent
-  // promptId is what distinguishes a shell transcript from a caller prompt that merely starts with a
-  // bash tag, so only treat bash-tagged text as a shell transcript when the promptId is absent.
-  if (promptId === null && isShellCommandTranscriptText(texts[0]!)) {
-    return true;
-  }
-  return promptId !== null &&
-    localCommandTranscriptPromptIds.has(promptId) &&
-    isLocalCommandTranscriptText(texts[0]!);
 }
 
 function isPreCallerTerminalLocalCommandEvent(
@@ -1102,23 +1022,6 @@ function unpackLocalCommandOutputWrapper(text: string): string {
 
 function stripAnsiCsi(text: string): string {
   return text.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, '');
-}
-
-function rememberLocalCommandTranscriptPromptId(
-  promptIds: Set<string>,
-  event: Record<string, unknown>,
-): void {
-  if (event.type !== 'user' || event.isMeta !== true) {
-    return;
-  }
-  const promptId = stringOrNull(event.promptId);
-  if (promptId === null) {
-    return;
-  }
-  const texts = collectUserText(event).map((text) => text.trim()).filter(Boolean);
-  if (texts.length === 1 && texts[0]!.startsWith('<local-command-caveat>')) {
-    promptIds.add(promptId);
-  }
 }
 
 function stringOrNull(value: unknown): string | null {
@@ -1318,16 +1221,4 @@ function shouldPublishIntermediate(candidate: string | null, lastPublished: stri
     return false;
   }
   return !isStablePrefixOfLongerText(candidate, lastPublished);
-}
-
-function isStablePrefixOfLongerText(candidate: string, previous: string): boolean {
-  const normalizedCandidate = normalizeForPrefixComparison(candidate);
-  const normalizedPrevious = normalizeForPrefixComparison(previous);
-  return normalizedCandidate.length > 0 &&
-    normalizedPrevious.length > normalizedCandidate.length &&
-    normalizedPrevious.startsWith(normalizedCandidate);
-}
-
-function normalizeForPrefixComparison(text: string): string {
-  return text.trim().replace(/\s+/g, ' ');
 }

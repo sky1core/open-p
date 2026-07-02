@@ -8,6 +8,12 @@ import type {
 import { ARTIFACT_REJECTION_REASONS, EXIT_CODES, OpenPError } from '../../core/errors.js';
 import { validateStructuredOutput } from '../../core/json-schema.js';
 import { isSafeSessionId } from '../../core/session-id.js';
+import {
+  isCallerUserTurn,
+  isStablePrefixOfLongerText,
+  rememberLocalCommandTranscriptPromptId,
+  userEventHasToolResult,
+} from './turn-boundary-predicates.js';
 
 interface JsonObject {
   readonly [key: string]: unknown;
@@ -271,7 +277,9 @@ export function extractClaudeCodeIntermediateContent(
       }
       continue;
     }
-    if (isCallerUserTurn(event, localCommandTranscriptPromptIds)) {
+    if (isCallerUserTurn(event, localCommandTranscriptPromptIds, {
+      isTaskNotification: isTaskNotification(event),
+    })) {
       inBackgroundTask = false;
       clearTextState();
       clearReasoningState();
@@ -359,7 +367,9 @@ function consumeEvent(state: ParserState, event: JsonObject, turnId: string): vo
   rememberSessionId(state, event, turnId);
   rememberLocalCommandTranscriptPromptId(state.localCommandTranscriptPromptIds, event);
 
-  if (isCallerUserTurn(event, state.localCommandTranscriptPromptIds)) {
+  if (isCallerUserTurn(event, state.localCommandTranscriptPromptIds, {
+    isTaskNotification: isTaskNotification(event),
+  })) {
     state.callerUserTurnCount += 1;
     if (state.callerUserTurnCount > 1) {
       throw new OpenPError(
@@ -805,119 +815,6 @@ function isTaskNotification(event: JsonObject): boolean {
   return origin?.kind === 'task-notification';
 }
 
-function isCallerUserTurn(event: JsonObject, localCommandTranscriptPromptIds: ReadonlySet<string>): boolean {
-  if (event.type !== 'user') {
-    return false;
-  }
-  if (isTaskNotification(event)) {
-    return false;
-  }
-  if (event.isMeta === true) {
-    return false;
-  }
-  // The context-compaction continuation message (`isCompactSummary: true`) is a `type:user` event Claude
-  // injects after a `/compact`; it is not a caller prompt. Without this, a compaction inside a turn's scoped
-  // segment is miscounted as an extra caller user turn (exit 40 "multiple caller user-turn boundaries").
-  if (event.isCompactSummary === true) {
-    return false;
-  }
-  if (userEventHasToolResult(event)) {
-    return false;
-  }
-  if (isLocalCommandTranscriptEvent(event, localCommandTranscriptPromptIds)) {
-    return false;
-  }
-  return true;
-}
-
-function userEventHasToolResult(event: JsonObject): boolean {
-  const message = asObject(event.message);
-  const content = Array.isArray(message?.content) ? message.content : [];
-  return content.some((block) => asObject(block)?.type === 'tool_result');
-}
-
-function isLocalCommandTranscriptEvent(
-  event: JsonObject,
-  localCommandTranscriptPromptIds: ReadonlySet<string>,
-): boolean {
-  const texts = collectUserText(event);
-  if (texts.length !== 1) {
-    return false;
-  }
-  if (texts[0] === '/exit') {
-    return true;
-  }
-  const promptId = stringOrNull(event.promptId);
-  // A real caller prompt always carries a promptId; a `! …` shell transcript does not. The absent
-  // promptId is what distinguishes a shell transcript from a caller prompt that merely starts with a
-  // bash tag, so only treat bash-tagged text as a shell transcript when the promptId is absent.
-  if (promptId === null && isShellCommandTranscriptText(texts[0]!)) {
-    return true;
-  }
-  return promptId !== null &&
-    localCommandTranscriptPromptIds.has(promptId) &&
-    isLocalCommandTranscriptText(texts[0]!);
-}
-
-function rememberLocalCommandTranscriptPromptId(promptIds: Set<string>, event: JsonObject): void {
-  if (event.type !== 'user' || event.isMeta !== true) {
-    return;
-  }
-  const promptId = stringOrNull(event.promptId);
-  if (promptId === null || !isLocalCommandCaveatEvent(event)) {
-    return;
-  }
-  promptIds.add(promptId);
-}
-
-function isLocalCommandCaveatEvent(event: JsonObject): boolean {
-  const texts = collectUserText(event);
-  return texts.length === 1 && texts[0]!.startsWith('<local-command-caveat>');
-}
-
-function collectUserText(event: JsonObject): string[] {
-  const message = asObject(event.message);
-  const content = Array.isArray(message?.content) ? message.content : [];
-  const textBlocks = content
-    .map((block) => asObject(block))
-    .filter((block): block is JsonObject => Boolean(block))
-    .map((block) => {
-      if (block.type === 'text' && typeof block.text === 'string') {
-        return block.text.trim();
-      }
-      if (block.kind === 'text' && typeof block.data === 'string') {
-        return block.data.trim();
-      }
-      return '';
-    })
-    .filter(Boolean);
-  if (textBlocks.length === 0 && typeof message?.content === 'string') {
-    textBlocks.push(message.content.trim());
-  }
-  return textBlocks;
-}
-
-// A Claude Code local-command transcript (e.g. `/exit`, `/compact`) is a `type:user` event written when a
-// local slash command runs; it is not a caller prompt. Bare `/exit` plus the tagged transcript forms
-// (`<command-name>…`, `<local-command-stdout>…`, `<local-command-stderr>…`) all count.
-const LOCAL_COMMAND_TRANSCRIPT_PREFIXES = ['<command-name>', '<local-command-stdout>', '<local-command-stderr>'];
-
-export function isLocalCommandTranscriptText(text: string): boolean {
-  return text === '/exit' || LOCAL_COMMAND_TRANSCRIPT_PREFIXES.some((prefix) => text.startsWith(prefix));
-}
-
-// A `! …` shell command run from the Claude Code prompt is written as `type:user` transcript events
-// (`<bash-input>`, `<bash-stdout>`, `<bash-stderr>`) with NO `promptId`. They are CLI activity, not a
-// caller prompt. Because they carry no promptId they cannot be matched through
-// localCommandTranscriptPromptIds, so they are recognized by their structural prefix alone (like a bare
-// `/exit`). Without this, a shell command run inside a turn's scoped segment is miscounted as an extra
-// caller user turn (exit 40 "multiple caller user-turn boundaries").
-const SHELL_COMMAND_TRANSCRIPT_PREFIXES = ['<bash-input>', '<bash-stdout>', '<bash-stderr>'];
-
-export function isShellCommandTranscriptText(text: string): boolean {
-  return SHELL_COMMAND_TRANSCRIPT_PREFIXES.some((prefix) => text.startsWith(prefix));
-}
-
 function isBackgroundTaskEnd(event: JsonObject): boolean {
   if (event.type === 'result') {
     return true;
@@ -1063,18 +960,6 @@ function extractTextLike(value: unknown): string | null {
 
 function joinTextBlocks(blocks: readonly string[]): string {
   return blocks.filter((block) => block.trim()).join('\n\n');
-}
-
-function normalizeText(text: string): string {
-  return text.trim().replace(/\s+/g, ' ');
-}
-
-function isStablePrefixOfLongerText(candidate: string, previous: string): boolean {
-  const normalizedCandidate = normalizeText(candidate);
-  const normalizedPrevious = normalizeText(previous);
-  return normalizedCandidate.length > 0 &&
-    normalizedPrevious.length > normalizedCandidate.length &&
-    normalizedPrevious.startsWith(normalizedCandidate);
 }
 
 function parseJsonObject(line: string): JsonObject | null {
