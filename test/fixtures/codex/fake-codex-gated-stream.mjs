@@ -18,6 +18,15 @@ if (process.env.OPENP_FAKE_CODEX_READY_FILE) {
 
 await waitForRelease();
 
+// Optional mid-turn streaming item emitted only after the release gate. Tests use this to force an
+// openp stdout write while the turn is still in progress (e.g. after the pipe reader died), with a
+// pause afterwards so an EPIPE from that write surfaces before the turn completes.
+const postReleaseItemText = process.env.OPENP_FAKE_CODEX_POST_RELEASE_ITEM;
+if (postReleaseItemText) {
+  writeJson({ type: 'item.completed', item: { id: 'item_1', type: 'agent_message', text: postReleaseItemText } });
+  await new Promise((resolve) => setTimeout(resolve, 300));
+}
+
 writeJson({
   type: 'turn.completed',
   usage: { input_tokens: 10, cached_input_tokens: 5, output_tokens: 2 },

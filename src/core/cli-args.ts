@@ -25,6 +25,8 @@ export interface CliOptions {
   readonly tools: string | null;
   readonly jsonSchema: string | null;
   readonly streaming: boolean;
+  readonly runId: string | null;
+  readonly eventLogPath: string | null;
   readonly verbose: boolean;
   readonly backendArgs: readonly string[];
   readonly promptArg: string | null;
@@ -49,6 +51,8 @@ const VALUE_FLAGS = new Set([
   '--effort',
   '--tools',
   '--json-schema',
+  '--run-id',
+  '--event-log',
 ]);
 
 const BOOLEAN_FLAGS = new Set([
@@ -70,6 +74,8 @@ export function parseCliArgs(argv: readonly string[], knownBackends?: ReadonlySe
   let tools: string | null = null;
   let jsonSchema: string | null = null;
   let streaming = false;
+  let runId: string | null = null;
+  let eventLogPath: string | null = null;
   let verbose = false;
   const backendArgs: string[] = [];
   const promptParts: string[] = [];
@@ -158,11 +164,24 @@ export function parseCliArgs(argv: readonly string[], knownBackends?: ReadonlySe
         parseJsonSchemaText(value);
         jsonSchema = value;
         break;
+      case '--run-id':
+        validateRunId(value);
+        runId = value;
+        break;
+      case '--event-log':
+        eventLogPath = value;
+        break;
     }
   }
 
   if (streaming && outputFormat !== 'stream-json') {
     throw new OpenPError('--streaming requires --output-format stream-json', EXIT_CODES.usage);
+  }
+  if (eventLogPath !== null && outputFormat !== 'stream-json') {
+    throw new OpenPError('--event-log requires --output-format stream-json', EXIT_CODES.usage);
+  }
+  if (eventLogPath !== null && inputFormat === 'stream-json') {
+    throw new OpenPError('--event-log does not support --input-format stream-json', EXIT_CODES.usage);
   }
 
   if (!backend) {
@@ -187,6 +206,8 @@ export function parseCliArgs(argv: readonly string[], knownBackends?: ReadonlySe
     tools,
     jsonSchema,
     streaming,
+    runId,
+    eventLogPath,
     verbose,
     backendArgs,
     promptArg: promptParts.length > 0 ? promptParts.join(' ') : null,
@@ -332,6 +353,12 @@ function parseTimeoutMs(value: string): number {
 function validateSessionId(value: string, flag: string): void {
   if (!isSafeSessionId(value)) {
     throw new OpenPError(`invalid ${flag}: expected safe session id`, EXIT_CODES.usage);
+  }
+}
+
+function validateRunId(value: string): void {
+  if (!/^[A-Za-z0-9._-]{1,128}$/.test(value)) {
+    throw new OpenPError('invalid --run-id: expected 1-128 characters matching [A-Za-z0-9._-]', EXIT_CODES.usage);
   }
 }
 

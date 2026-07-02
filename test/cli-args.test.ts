@@ -22,7 +22,13 @@ test('parses supported options and prompt args', () => {
     'high',
     '--tools',
     'Read,Bash',
+    '--run-id',
+    'turn_2026.07-02',
     'claude',
+    '--event-log',
+    '/tmp/openp-events.jsonl',
+    '--output-format',
+    'stream-json',
     'hello',
     'world',
   ], KNOWN_BACKENDS);
@@ -35,8 +41,11 @@ test('parses supported options and prompt args', () => {
   assert.equal(options.reasoningEffort, 'high');
   assert.equal(options.tools, 'Read,Bash');
   assert.equal(options.jsonSchema, null);
+  assert.equal(options.outputFormat, 'stream-json');
   assert.deepEqual(options.debugLog, { kind: 'off' });
   assert.equal(options.streaming, false);
+  assert.equal(options.runId, 'turn_2026.07-02');
+  assert.equal(options.eventLogPath, '/tmp/openp-events.jsonl');
   assert.equal(options.verbose, false);
   assert.deepEqual(options.backendArgs, []);
   assert.equal(options.promptArg, 'hello world');
@@ -226,6 +235,54 @@ test('parses streaming together with structured output because streaming and res
   assert.equal(options.outputFormat, 'stream-json');
   assert.equal(options.streaming, true);
   assert.equal(options.jsonSchema, schema);
+});
+
+test('accepts run id without event log for any output format', () => {
+  const textOptions = parseCliArgs(['--run-id', 'run-1_OK.2', 'claude', 'hello'], KNOWN_BACKENDS);
+  const jsonOptions = parseCliArgs(['--run-id', 'run-2', '--output-format', 'json', 'claude', 'hello'], KNOWN_BACKENDS);
+
+  assert.equal(textOptions.runId, 'run-1_OK.2');
+  assert.equal(textOptions.eventLogPath, null);
+  assert.equal(jsonOptions.runId, 'run-2');
+  assert.equal(jsonOptions.outputFormat, 'json');
+});
+
+test('rejects invalid run ids as usage errors', () => {
+  for (const value of ['', 'has space', 'slash/value', 'x'.repeat(129)]) {
+    assert.throws(
+      () => parseCliArgs(['--run-id', value, 'claude', 'hello'], KNOWN_BACKENDS),
+      (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.usage,
+    );
+  }
+});
+
+test('rejects event log outside single-turn stream-json output', () => {
+  assert.throws(
+    () => parseCliArgs(['--event-log', '/tmp/openp-events.jsonl', 'claude', 'hello'], KNOWN_BACKENDS),
+    (error) => error instanceof OpenPError &&
+      error.exitCode === EXIT_CODES.usage &&
+      error.message.includes('--event-log requires --output-format stream-json'),
+  );
+  assert.throws(
+    () => parseCliArgs(['--event-log', '/tmp/openp-events.jsonl', '--output-format', 'json', 'claude', 'hello'], KNOWN_BACKENDS),
+    (error) => error instanceof OpenPError &&
+      error.exitCode === EXIT_CODES.usage &&
+      error.message.includes('--event-log requires --output-format stream-json'),
+  );
+  assert.throws(
+    () => parseCliArgs([
+      '--event-log',
+      '/tmp/openp-events.jsonl',
+      '--input-format',
+      'stream-json',
+      '--output-format',
+      'stream-json',
+      'claude',
+    ], KNOWN_BACKENDS),
+    (error) => error instanceof OpenPError &&
+      error.exitCode === EXIT_CODES.usage &&
+      error.message.includes('--event-log does not support --input-format stream-json'),
+  );
 });
 
 test('rejects raw Claude system prompt options as public openp options', () => {

@@ -8,14 +8,17 @@ import test from 'node:test';
 import { resolveOpenPStateRoot } from '../src/core/state-root.js';
 import { SessionStateStore } from '../src/core/session-state.js';
 import {
+  CODEX_SESSION_ID,
   SESSION_ID,
   collectChild,
   escapeRegExp,
   parseOutputLine,
   readDebugEntries,
   runCommand,
+  tsxLoaderArgs,
   waitForFile,
   waitForOutput,
+  withFakeCommandEnv,
 } from './helpers/cli-integration.js';
 
 test('built cli.js has execute permission', async () => {
@@ -66,6 +69,8 @@ test('help exposes public streaming and reasoning effort options', async () => {
   assert.doesNotMatch(result.stdout, /--include-partial-messages/);
   assert.match(result.stdout, /--effort <level>/);
   assert.match(result.stdout, /--tools <tools>/);
+  assert.match(result.stdout, /--run-id <id>/);
+  assert.match(result.stdout, /--event-log <path>/);
   assert.match(result.stdout, /--verbose/);
   assert.match(result.stdout, /--debug-log\s+Write runner diagnostics/);
   assert.doesNotMatch(result.stdout, /--debug-log\s+\[path\]/);
@@ -242,12 +247,12 @@ test('busy session lock fails before backend launch', async () => {
     sessionLogPath: null,
     lastTurnId: 'previous-turn',
   });
-  const holder = spawn(tsxBin, [
+  const holder = spawn(process.execPath, tsxLoaderArgs(repoRoot, [
     join(repoRoot, 'test', 'helpers', 'hold-session-lock.ts'),
     projectRoot,
     SESSION_ID,
     '1500',
-  ], {
+  ]), {
     cwd: repoRoot,
     env: { ...process.env, XDG_STATE_HOME: stateRoot },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -480,6 +485,274 @@ test('stream-json input errors do not emit system init on stdout', async () => {
   assert.match(result.stderr, /invalid stream-json input line 1/);
 });
 
+test('event log mirrors stream-json stdout lines and records lifecycle events', async () => {
+  const repoRoot = process.cwd();
+  const tsxBin = join(repoRoot, 'node_modules', '.bin', 'tsx');
+  const projectRoot = await realpath(await mkdtemp(join(tmpdir(), 'openp-cli-')));
+  const stateRoot = await mkdtemp(join(tmpdir(), 'openp-cli-state-'));
+  const eventLogPath = join(stateRoot, 'openp-events.jsonl');
+  const env = await withFakeCommandEnv('codex', join(repoRoot, 'test', 'fixtures', 'codex', 'fake-codex-item-progress-final.mjs'), {
+    XDG_STATE_HOME: stateRoot,
+  });
+
+  const result = await runCommand(tsxBin, [
+    join(repoRoot, 'src/cli.ts'),
+    'codex',
+    '--output-format',
+    'stream-json',
+    '--streaming',
+    '--run-id',
+    'mirror-run.1',
+    '--event-log',
+    eventLogPath,
+    'hello',
+  ], projectRoot, env);
+  const stdoutLines = nonEmptyLines(result.stdout);
+  const eventLogLines = nonEmptyLines(await readFile(eventLogPath, 'utf8'));
+  const lifecycleRecords = eventLogLines
+    .filter((line) => Object.prototype.hasOwnProperty.call(JSON.parse(line), 'openpRun'))
+    .map((line) => JSON.parse(line));
+  const mirrorLines = eventLogLines.filter((line) => Object.prototype.hasOwnProperty.call(JSON.parse(line), 'openp'));
+
+  assert.equal(result.code, 0);
+  assert.equal(result.stderr, '');
+  assert.ok(stdoutLines.length >= 2);
+  assert.deepEqual(mirrorLines, stdoutLines);
+  assert.equal(result.stdout.includes('openpRun'), false);
+  assert.deepEqual(Object.keys(JSON.parse(eventLogLines[0]!)), ['openpRun']);
+  assert.deepEqual(Object.keys(JSON.parse(eventLogLines.at(-1)!)), ['openpRun']);
+  assert.equal(lifecycleRecords.length, 2);
+  assert.equal(lifecycleRecords[0].openpRun.schemaVersion, 1);
+  assert.deepEqual(Object.keys(lifecycleRecords[0].openpRun).sort(), ['header', 'schemaVersion'].sort());
+  assert.equal(lifecycleRecords[0].openpRun.header.runId, 'mirror-run.1');
+  assert.equal(lifecycleRecords[0].openpRun.header.backend, 'codex');
+  assert.equal(lifecycleRecords[0].openpRun.header.resume, null);
+  assert.equal(typeof lifecycleRecords[0].openpRun.header.pid, 'number');
+  assert.match(lifecycleRecords[0].openpRun.header.startedAt, /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(lifecycleRecords[1].openpRun.schemaVersion, 1);
+  assert.deepEqual(Object.keys(lifecycleRecords[1].openpRun).sort(), ['schemaVersion', 'terminal'].sort());
+  assert.deepEqual(lifecycleRecords[1].openpRun.terminal, {
+    status: 'succeeded',
+    exitCode: 0,
+    reasonCode: null,
+    message: null,
+    endedAt: lifecycleRecords[1].openpRun.terminal.endedAt,
+  });
+  assert.match(lifecycleRecords[1].openpRun.terminal.endedAt, /^\d{4}-\d{2}-\d{2}T/);
+});
+
+test('event log keeps detached codex turn alive after stdout reader exits', async () => {
+  const repoRoot = process.cwd();
+  const projectRoot = await realpath(await mkdtemp(join(tmpdir(), 'openp-cli-')));
+  const stateRoot = await mkdtemp(join(tmpdir(), 'openp-cli-state-'));
+  const releaseFile = join(stateRoot, 'release-codex-turn');
+  const readyFile = join(stateRoot, 'ready-codex-turn');
+  const eventLogPath = join(stateRoot, 'detached-events.jsonl');
+  const pidFile = join(stateRoot, 'openp-child.pid');
+  const wrapperPath = join(stateRoot, 'spawn-detached-openp.mjs');
+  const env = await withFakeCommandEnv('codex', join(repoRoot, 'test', 'fixtures', 'codex', 'fake-codex-gated-stream.mjs'), {
+    ...process.env,
+    XDG_STATE_HOME: stateRoot,
+    OPENP_FAKE_CODEX_RELEASE_FILE: releaseFile,
+    OPENP_FAKE_CODEX_READY_FILE: readyFile,
+    // Forces a streaming stdout write after the reader is dead, while the turn is still running.
+    // Without the EPIPE tolerance this crashes openp mid-turn and the terminal never records
+    // "succeeded", so the assertions below discriminate the safe-stdio mechanism.
+    OPENP_FAKE_CODEX_POST_RELEASE_ITEM: 'post release answer',
+  });
+
+  await writeFile(wrapperPath, `
+import { spawn } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
+
+const child = spawn(process.execPath, [
+  '--import',
+  ${JSON.stringify(join(repoRoot, 'node_modules', 'tsx', 'dist', 'loader.mjs'))},
+  ${JSON.stringify(join(repoRoot, 'src/cli.ts'))},
+  'codex',
+  '--output-format',
+  'stream-json',
+  '--streaming',
+  '--run-id',
+  'detached-run',
+  '--event-log',
+  ${JSON.stringify(eventLogPath)},
+  'hello',
+], {
+  cwd: ${JSON.stringify(projectRoot)},
+  detached: true,
+  env: { ...process.env, ...${JSON.stringify(env)} },
+  stdio: ['ignore', 'pipe', 'pipe'],
+});
+
+if (!child.pid) {
+  throw new Error('missing child pid');
+}
+child.stdout.on('data', () => {});
+child.stderr.on('data', () => {});
+child.unref();
+writeFileSync(${JSON.stringify(pidFile)}, String(child.pid), 'utf8');
+setInterval(() => {}, 1000);
+`, 'utf8');
+  const wrapper = spawn(process.execPath, [wrapperPath], {
+    cwd: repoRoot,
+    env: process.env,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const wrapperResultPromise = collectChild(wrapper);
+
+  try {
+    await waitForFile(pidFile);
+    await waitForFile(readyFile);
+    wrapper.kill('SIGTERM');
+    await wrapperResultPromise;
+    await writeFile(releaseFile, 'go', 'utf8');
+    const eventLogLines = await waitForEventLogTerminal(eventLogPath);
+    const lifecycleRecords = eventLogLines
+      .filter((line) => Object.prototype.hasOwnProperty.call(JSON.parse(line), 'openpRun'))
+      .map((line) => JSON.parse(line));
+    const mirrorRecords = eventLogLines
+      .filter((line) => Object.prototype.hasOwnProperty.call(JSON.parse(line), 'openp'))
+      .map((line) => JSON.parse(line));
+
+    assert.equal(lifecycleRecords[0].openpRun.header.runId, 'detached-run');
+    assert.equal(lifecycleRecords[0].openpRun.header.backend, 'codex');
+    assert.equal(lifecycleRecords.at(-1).openpRun.terminal.status, 'succeeded');
+    assert.equal(lifecycleRecords.at(-1).openpRun.terminal.exitCode, 0);
+    assert.equal(mirrorRecords.some((record) => record.openp?.form === 'streaming'), true);
+    assert.equal(
+      mirrorRecords.some((record) =>
+        record.openp?.form === 'streaming' &&
+        typeof record.openp.output?.answer === 'string' &&
+        record.openp.output.answer.includes('post release answer')),
+      true,
+      'expected a streaming record written after the stdout reader died to reach the event log',
+    );
+    assert.equal(mirrorRecords.some((record) => record.openp?.form === 'result'), true);
+    assert.equal(mirrorRecords.find((record) => record.openp?.form === 'result')?.openp.sessionId, CODEX_SESSION_ID);
+  } catch (error) {
+    wrapper.kill('SIGTERM');
+    await wrapperResultPromise.catch(() => undefined);
+    throw error;
+  }
+});
+
+test('event log records interrupted terminal while preserving exit 130', async () => {
+  const repoRoot = process.cwd();
+  const projectRoot = await realpath(await mkdtemp(join(tmpdir(), 'openp-cli-')));
+  const stateRoot = await mkdtemp(join(tmpdir(), 'openp-cli-state-'));
+  const eventLogPath = join(stateRoot, 'interrupt-events.jsonl');
+  const env = await withFakeCommandEnv('codex', join(repoRoot, 'test', 'fixtures', 'codex', 'fake-codex-slow.sh'), {
+    XDG_STATE_HOME: stateRoot,
+  });
+  const child = spawn(process.execPath, tsxLoaderArgs(repoRoot, [
+    join(repoRoot, 'src/cli.ts'),
+    'codex',
+    '--output-format',
+    'stream-json',
+    '--event-log',
+    eventLogPath,
+    'hello',
+  ]), {
+    cwd: projectRoot,
+    env: { ...process.env, ...env },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const childResultPromise = collectChild(child);
+
+  await waitForFile(eventLogPath);
+  child.kill('SIGINT');
+  const result = await childResultPromise;
+  const terminal = JSON.parse(nonEmptyLines(await readFile(eventLogPath, 'utf8')).at(-1)!).openpRun.terminal;
+
+  assert.equal(result.code, 130);
+  assert.equal(result.stdout, '');
+  assert.match(result.stderr, /operation aborted/);
+  assert.equal(terminal.status, 'interrupted');
+  assert.equal(terminal.exitCode, 130);
+  assert.equal(terminal.reasonCode, null);
+  assert.equal(terminal.message, 'operation aborted');
+});
+
+test('event log and run id CLI validation rejects invalid combinations', async () => {
+  const repoRoot = process.cwd();
+  const tsxBin = join(repoRoot, 'node_modules', '.bin', 'tsx');
+  const projectRoot = await realpath(await mkdtemp(join(tmpdir(), 'openp-cli-')));
+  const stateRoot = await mkdtemp(join(tmpdir(), 'openp-cli-state-'));
+
+  for (const args of [
+    ['codex', '--run-id', '', 'hello'],
+    ['codex', '--run-id', 'bad/value', 'hello'],
+    ['codex', '--run-id', 'x'.repeat(129), 'hello'],
+    ['codex', '--event-log', join(stateRoot, 'text-events.jsonl'), '--output-format', 'text', 'hello'],
+    ['codex', '--event-log', join(stateRoot, 'json-events.jsonl'), '--output-format', 'json', 'hello'],
+    ['codex', '--event-log', join(stateRoot, 'worker-events.jsonl'), '--input-format', 'stream-json', '--output-format', 'stream-json'],
+  ]) {
+    const result = await runCommand(tsxBin, [
+      join(repoRoot, 'src/cli.ts'),
+      ...args,
+    ], projectRoot, { XDG_STATE_HOME: stateRoot }, `${JSON.stringify({ type: 'user', message: { content: 'hello' } })}\n`);
+    assert.equal(result.code, 2);
+    assert.equal(result.stdout, '');
+  }
+});
+
+test('run id without event log does not change normal codex turn output', async () => {
+  const repoRoot = process.cwd();
+  const tsxBin = join(repoRoot, 'node_modules', '.bin', 'tsx');
+  const projectRoot = await realpath(await mkdtemp(join(tmpdir(), 'openp-cli-')));
+  const stateRoot = await mkdtemp(join(tmpdir(), 'openp-cli-state-'));
+  const env = await withFakeCommandEnv('codex', join(repoRoot, 'test', 'fixtures', 'codex', 'fake-codex-success.sh'), {
+    XDG_STATE_HOME: stateRoot,
+  });
+
+  const result = await runCommand(tsxBin, [
+    join(repoRoot, 'src/cli.ts'),
+    'codex',
+    '--run-id',
+    'argv-marker-1',
+    'hello',
+  ], projectRoot, env);
+
+  assert.equal(result.code, 0);
+  assert.equal(result.stdout, 'final answer here\n');
+  assert.equal(result.stderr, '');
+});
+
+test('event log records failed terminal for backend executable not found after header', async () => {
+  const repoRoot = process.cwd();
+  const projectRoot = await realpath(await mkdtemp(join(tmpdir(), 'openp-cli-')));
+  const stateRoot = await mkdtemp(join(tmpdir(), 'openp-cli-state-'));
+  const missingBinDir = await mkdtemp(join(tmpdir(), 'openp-empty-bin-'));
+  const eventLogPath = join(stateRoot, 'backend-not-found-events.jsonl');
+
+  const result = await runCommand(process.execPath, [
+    '--import',
+    join(repoRoot, 'node_modules', 'tsx', 'dist', 'loader.mjs'),
+    join(repoRoot, 'src/cli.ts'),
+    'codex',
+    '--output-format',
+    'stream-json',
+    '--event-log',
+    eventLogPath,
+    'hello',
+  ], projectRoot, {
+    PATH: missingBinDir,
+    XDG_STATE_HOME: stateRoot,
+  });
+  const eventLogLines = nonEmptyLines(await readFile(eventLogPath, 'utf8'));
+  const terminal = JSON.parse(eventLogLines.at(-1)!).openpRun.terminal;
+
+  assert.equal(result.code, 10);
+  assert.equal(result.stdout, '');
+  assert.match(result.stderr, /backend executable not found: codex/);
+  assert.equal(JSON.parse(eventLogLines[0]!).openpRun.header.backend, 'codex');
+  assert.equal(terminal.status, 'failed');
+  assert.equal(terminal.exitCode, 10);
+  assert.equal(terminal.reasonCode, null);
+  assert.equal(terminal.message, 'backend executable not found: codex');
+});
+
 async function writeInstanceConfig(instanceId: string): Promise<string> {
   const configHome = await mkdtemp(join(tmpdir(), 'openp-cli-config-'));
   await mkdir(join(configHome, 'open-p'), { recursive: true });
@@ -490,4 +763,28 @@ instances:
     configDir: ${join(configHome, `${instanceId}-config`)}
 `);
   return configHome;
+}
+
+function nonEmptyLines(text: string): string[] {
+  return text.trimEnd().split('\n').filter(Boolean);
+}
+
+async function waitForEventLogTerminal(path: string): Promise<string[]> {
+  const deadline = Date.now() + 8000;
+  while (Date.now() < deadline) {
+    try {
+      const lines = nonEmptyLines(await readFile(path, 'utf8'));
+      const last = lines.at(-1);
+      if (last) {
+        const parsed = JSON.parse(last);
+        if (parsed.openpRun?.terminal) {
+          return lines;
+        }
+      }
+    } catch {
+      // Keep polling until the detached child writes the terminal record.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`timed out waiting for terminal record in ${path}`);
 }

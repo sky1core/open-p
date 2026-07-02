@@ -16,13 +16,36 @@ export function runCommand(
   env: NodeJS.ProcessEnv = {},
   input = '',
 ): Promise<{ code: number | null; stdout: string; stderr: string }> {
-  const child = spawn(command, [...args], {
+  const normalized = normalizeTsxCommand(command, args);
+  const child = spawn(normalized.command, normalized.args, {
     cwd,
     env: { ...process.env, ...env },
     stdio: ['pipe', 'pipe', 'pipe'],
   });
   child.stdin?.end(input);
   return collectChild(child);
+}
+
+export function tsxLoaderArgs(repoRoot: string, args: readonly string[]): string[] {
+  return [
+    '--import',
+    join(repoRoot, 'node_modules', 'tsx', 'dist', 'loader.mjs'),
+    ...args,
+  ];
+}
+
+function normalizeTsxCommand(command: string, args: readonly string[]): { readonly command: string; readonly args: string[] } {
+  if (
+    command === 'tsx' ||
+    command.endsWith('/node_modules/.bin/tsx') ||
+    command.endsWith('\\node_modules\\.bin\\tsx')
+  ) {
+    return {
+      command: process.execPath,
+      args: tsxLoaderArgs(process.cwd(), args),
+    };
+  }
+  return { command, args: [...args] };
 }
 
 export async function withFakeCommandEnv(

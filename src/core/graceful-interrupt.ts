@@ -99,10 +99,25 @@ export interface InstalledProcessSignalHandlers {
   readonly signal: AbortSignal;
   readonly forceSignal: AbortSignal;
   readonly killSignal: AbortSignal;
+  /** Feeds one signal into the interrupt escalation chain, as if a process listener had fired. */
+  handleSignal(signal: NodeJS.Signals): void;
   dispose(): void;
 }
 
-export function installProcessSignalHandlers(): InstalledProcessSignalHandlers {
+export interface InstallProcessSignalHandlersOptions {
+  /**
+   * When false, no process SIGINT/SIGTERM listeners are registered; the caller must forward
+   * signals through `handleSignal`. Used when the caller already owns a longer-lived process
+   * listener, because removing and re-adding process signal listeners drops signals that were
+   * received but not yet dispatched.
+   */
+  readonly registerProcessListeners?: boolean;
+}
+
+export function installProcessSignalHandlers(
+  options: InstallProcessSignalHandlersOptions = {},
+): InstalledProcessSignalHandlers {
+  const registerProcessListeners = options.registerProcessListeners ?? true;
   const abortController = new AbortController();
   const forceController = new AbortController();
   const killController = new AbortController();
@@ -122,16 +137,21 @@ export function installProcessSignalHandlers(): InstalledProcessSignalHandlers {
     process.exitCode = 130;
   };
 
-  process.on('SIGINT', handleSignal);
-  process.on('SIGTERM', handleSignal);
+  if (registerProcessListeners) {
+    process.on('SIGINT', handleSignal);
+    process.on('SIGTERM', handleSignal);
+  }
 
   return {
     signal: abortController.signal,
     forceSignal: forceController.signal,
     killSignal: killController.signal,
+    handleSignal,
     dispose: () => {
-      process.removeListener('SIGINT', handleSignal);
-      process.removeListener('SIGTERM', handleSignal);
+      if (registerProcessListeners) {
+        process.removeListener('SIGINT', handleSignal);
+        process.removeListener('SIGTERM', handleSignal);
+      }
     },
   };
 }

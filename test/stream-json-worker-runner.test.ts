@@ -3060,6 +3060,8 @@ function options(overrides: Partial<ResolvedCliOptions> = {}): ResolvedCliOption
     tools: null,
     jsonSchema: null,
     streaming: false,
+    runId: null,
+    eventLogPath: null,
     verbose: false,
     backendArgs: [],
     promptArg: null,

@@ -184,6 +184,8 @@ openp claude --timeout 60 "prompt"
 | `--json-schema <json>` | Structured output schema where supported |
 | `--streaming` | Active-turn streaming opt-in |
 | `--dangerously-skip-permissions` | Trust backend tool execution |
+| `--run-id <id>` | Caller-supplied invocation identifier for external process discovery |
+| `--event-log <path>` | Mirror stream-json records plus run lifecycle records to a caller-owned file |
 | `--debug-log` | Write diagnostics to the open-p state log |
 | `--verbose` | Include diagnostic markers in output |
 
