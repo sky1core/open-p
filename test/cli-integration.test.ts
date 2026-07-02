@@ -642,8 +642,17 @@ test('event log records interrupted terminal while preserving exit 130', async (
   const projectRoot = await realpath(await mkdtemp(join(tmpdir(), 'openp-cli-')));
   const stateRoot = await mkdtemp(join(tmpdir(), 'openp-cli-state-'));
   const eventLogPath = join(stateRoot, 'interrupt-events.jsonl');
-  const env = await withFakeCommandEnv('codex', join(repoRoot, 'test', 'fixtures', 'codex', 'fake-codex-slow.sh'), {
+  const readyFile = join(stateRoot, 'ready-interrupt-turn');
+  const releaseFile = join(stateRoot, 'release-interrupt-turn');
+  // The gated fixture writes the ready file only from inside the running turn, so the SIGINT
+  // below deterministically lands mid-turn (graceful interrupt path with "operation aborted"
+  // stderr). Sending it earlier can legitimately hit the pre-turn guard path instead, which
+  // exits 130 with an interrupted terminal but an empty stderr. The release file is never
+  // written; the abort escalation stops the gated backend child.
+  const env = await withFakeCommandEnv('codex', join(repoRoot, 'test', 'fixtures', 'codex', 'fake-codex-gated-stream.mjs'), {
     XDG_STATE_HOME: stateRoot,
+    OPENP_FAKE_CODEX_READY_FILE: readyFile,
+    OPENP_FAKE_CODEX_RELEASE_FILE: releaseFile,
   });
   const child = spawn(process.execPath, tsxLoaderArgs(repoRoot, [
     join(repoRoot, 'src/cli.ts'),
@@ -660,7 +669,7 @@ test('event log records interrupted terminal while preserving exit 130', async (
   });
   const childResultPromise = collectChild(child);
 
-  await waitForFile(eventLogPath);
+  await waitForFile(readyFile);
   child.kill('SIGINT');
   const result = await childResultPromise;
   const terminal = JSON.parse(nonEmptyLines(await readFile(eventLogPath, 'utf8')).at(-1)!).openpRun.terminal;

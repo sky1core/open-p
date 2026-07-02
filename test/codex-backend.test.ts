@@ -160,17 +160,17 @@ test('CodexBackend.runTurn succeeds on first turn', withFakeBin('fake-codex-succ
 
   assert.equal(result.text, 'final answer here');
   assert.equal(result.reasoningContent, 'Thinking about it...');
-  assert.equal(result.diagnostics.usage.inputTokens, 1700);
+  assert.equal(result.diagnostics.usage.inputTokens, 800);
   assert.equal(result.diagnostics.usage.outputTokens, 340);
   assert.equal(result.diagnostics.usage.cacheReadInputTokens, 900);
   assert.equal(result.diagnostics.model, 'codex-test-model');
   assert.equal(result.diagnostics.contextWindow, 200000);
   assert.deepEqual(result.diagnostics.lastSubturnUsage, {
-    inputTokens: 1500,
+    inputTokens: 700,
     outputTokens: 300,
     cacheReadInputTokens: 800,
   });
-  assert.equal(result.diagnostics.lastSubturnContextTokens, 2300);
+  assert.equal(result.diagnostics.lastSubturnContextTokens, 1500);
   assert.equal(result.diagnostics.stopReason, null);
   assert.equal(result.sessionId, FAKE_CODEX_SESSION_ID);
   assert.ok(result.diagnostics.durationMs! >= 0);
@@ -350,17 +350,17 @@ test('CodexBackend.runTurn keeps Codex session log out of streaming and uses it 
   assert.equal(result.text, 'session log final answer');
   assert.equal(result.diagnostics.model, 'codex-log-model');
   assert.deepEqual(result.diagnostics.usage, {
-    inputTokens: 444,
+    inputTokens: 378,
     outputTokens: 8,
     cacheReadInputTokens: 66,
   });
   assert.deepEqual(result.diagnostics.lastSubturnUsage, {
-    inputTokens: 333,
+    inputTokens: 289,
     outputTokens: 5,
     cacheReadInputTokens: 44,
   });
   assert.equal(result.diagnostics.contextWindow, 258400);
-  assert.equal(result.diagnostics.lastSubturnContextTokens, 377);
+  assert.equal(result.diagnostics.lastSubturnContextTokens, 333);
 }));
 
 test('CodexBackend.runTurn does not mix stdout aggregate usage when session log only has token count', withFakeBin('fake-codex-session-log-token-count-only.mjs', async () => {
@@ -374,17 +374,17 @@ test('CodexBackend.runTurn does not mix stdout aggregate usage when session log 
   assert.equal(result.text, 'session log final answer');
   assert.equal(result.diagnostics.model, 'codex-log-model');
   assert.deepEqual(result.diagnostics.usage, {
-    inputTokens: 333,
+    inputTokens: 289,
     outputTokens: 5,
     cacheReadInputTokens: 44,
   });
   assert.deepEqual(result.diagnostics.lastSubturnUsage, {
-    inputTokens: 333,
+    inputTokens: 289,
     outputTokens: 5,
     cacheReadInputTokens: 44,
   });
   assert.equal(result.diagnostics.contextWindow, 258400);
-  assert.equal(result.diagnostics.lastSubturnContextTokens, 377);
+  assert.equal(result.diagnostics.lastSubturnContextTokens, 333);
 }));
 
 test('CodexBackend.runTurn streams stdout only when the session log mirrors stdout items', withFakeBin('fake-codex-stdout-session-log-mirror.mjs', async () => {
@@ -437,7 +437,7 @@ test('CodexBackend.runTurn streams stdout only when the session log mirrors stdo
   );
   assert.equal(result.diagnostics.model, 'codex-mirror-model');
   assert.deepEqual(result.diagnostics.lastSubturnUsage, {
-    inputTokens: 444,
+    inputTokens: 389,
     outputTokens: 6,
     cacheReadInputTokens: 55,
   });
@@ -675,7 +675,7 @@ test('CodexBackend.runTurn falls back to stdout when resume session log is absen
   assert.equal(result.assistantEvents?.length, 1);
   assert.equal(assistantEventText(result, 0), 'stdout-only commentary');
   assert.deepEqual(result.diagnostics.usage, {
-    inputTokens: 120,
+    inputTokens: 90,
     outputTokens: 12,
     cacheReadInputTokens: 30,
   });
@@ -730,12 +730,12 @@ test('CodexBackend.runTurn uses a newly created resume session log when none exi
   assert.equal(result.diagnostics.model, 'codex-current-model');
   assert.equal(result.diagnostics.contextWindow, 200000);
   assert.deepEqual(result.diagnostics.usage, {
-    inputTokens: 2000,
+    inputTokens: 1700,
     outputTokens: 40,
     cacheReadInputTokens: 300,
   });
   assert.deepEqual(result.diagnostics.lastSubturnUsage, {
-    inputTokens: 200,
+    inputTokens: 150,
     outputTokens: 10,
     cacheReadInputTokens: 50,
   });
@@ -774,12 +774,12 @@ test('CodexBackend.runTurn reads resumed turn result after the previous log offs
   // Aggregate usage sums the resumed turn's last_token_usage values only;
   // session-cumulative total_token_usage (2100/320/50) must not leak in.
   assert.deepEqual(result.diagnostics.usage, {
-    inputTokens: 2000,
+    inputTokens: 1700,
     outputTokens: 40,
     cacheReadInputTokens: 300,
   });
   assert.deepEqual(result.diagnostics.lastSubturnUsage, {
-    inputTokens: 200,
+    inputTokens: 150,
     outputTokens: 10,
     cacheReadInputTokens: 50,
   });

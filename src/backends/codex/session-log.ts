@@ -457,15 +457,23 @@ function extractTokenCountFromPayload(
   const usage = info.last_token_usage && typeof info.last_token_usage === 'object'
     ? info.last_token_usage as Record<string, unknown>
     : null;
-  const inputTokens = typeof usage?.input_tokens === 'number' ? usage.input_tokens : null;
-  if (inputTokens === null || inputTokens <= 0) return null;
+  const rawInputTokens = typeof usage?.input_tokens === 'number' ? usage.input_tokens : null;
+  if (rawInputTokens === null || rawInputTokens <= 0) return null;
+  const cacheReadInputTokens = typeof usage?.cached_input_tokens === 'number' ? usage.cached_input_tokens : null;
   return {
     model,
-    inputTokens,
+    inputTokens: normalizeCodexInputTokens(rawInputTokens, cacheReadInputTokens),
     outputTokens: typeof usage?.output_tokens === 'number' ? usage.output_tokens : null,
-    cacheReadInputTokens: typeof usage?.cached_input_tokens === 'number' ? usage.cached_input_tokens : null,
+    cacheReadInputTokens,
     contextWindow: typeof info.model_context_window === 'number' ? info.model_context_window : null,
   };
+}
+
+function normalizeCodexInputTokens(rawInputTokens: number, cacheReadInputTokens: number | null): number {
+  // Codex token_count input_tokens includes cached_input_tokens; normalize to
+  // the root Anthropic-style contract where inputTokens excludes cache reads.
+  // Evidence: a live codex run's session log, where total_tokens = input_tokens + output_tokens.
+  return Math.max(0, rawInputTokens - (cacheReadInputTokens ?? 0));
 }
 
 function addSubturnUsage(
@@ -566,16 +574,17 @@ export function extractLatestTokenCount(rawLog: string): CodexSessionDiagnostics
       ? info.last_token_usage as Record<string, unknown>
       : null;
 
-    const inputTokens = typeof usage?.input_tokens === 'number' ? usage.input_tokens : null;
+    const rawInputTokens = typeof usage?.input_tokens === 'number' ? usage.input_tokens : null;
+    const cacheReadInputTokens = typeof usage?.cached_input_tokens === 'number' ? usage.cached_input_tokens : null;
     const contextWindow = typeof info.model_context_window === 'number' ? info.model_context_window : null;
 
-    if (inputTokens === null || inputTokens <= 0) continue;
+    if (rawInputTokens === null || rawInputTokens <= 0) continue;
 
     latest = {
       model: currentTurnModel,
-      inputTokens,
+      inputTokens: normalizeCodexInputTokens(rawInputTokens, cacheReadInputTokens),
       outputTokens: typeof usage?.output_tokens === 'number' ? usage.output_tokens : null,
-      cacheReadInputTokens: typeof usage?.cached_input_tokens === 'number' ? usage.cached_input_tokens : null,
+      cacheReadInputTokens,
       contextWindow,
     };
   }

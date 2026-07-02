@@ -92,11 +92,39 @@ test('extractLatestTokenCount extracts diagnostics from token_count event', () =
 
   const result = extractLatestTokenCount(log);
   assert.ok(result);
-  assert.equal(result.inputTokens, 1500);
+  assert.equal(result.inputTokens, 700);
   assert.equal(result.outputTokens, 300);
   assert.equal(result.cacheReadInputTokens, 800);
   assert.equal(result.contextWindow, 200000);
   assert.equal(result.model, 'codex-test-model');
+});
+
+test('extractLatestTokenCount normalizes cached Codex input tokens', () => {
+  const log = JSON.stringify({
+    type: 'event_msg',
+    payload: {
+      type: 'token_count',
+      info: {
+        model_context_window: 258400,
+        last_token_usage: {
+          input_tokens: 23425,
+          cached_input_tokens: 22912,
+          output_tokens: 9,
+          total_tokens: 23434,
+        },
+      },
+    },
+  });
+
+  const result = extractLatestTokenCount(log);
+  assert.ok(result);
+  assert.deepEqual(result, {
+    model: null,
+    inputTokens: 513,
+    outputTokens: 9,
+    cacheReadInputTokens: 22912,
+    contextWindow: 258400,
+  });
 });
 
 test('extractLatestTokenCount uses the last token_count event', () => {
@@ -125,7 +153,7 @@ test('extractLatestTokenCount uses the last token_count event', () => {
 
   const result = extractLatestTokenCount(log);
   assert.ok(result);
-  assert.equal(result.inputTokens, 2000);
+  assert.equal(result.inputTokens, 800);
   assert.equal(result.outputTokens, 500);
   assert.equal(result.cacheReadInputTokens, 1200);
 });
@@ -462,8 +490,8 @@ test('extractSessionLogResult extracts content, reasoning, commentary, usage, an
   assert.equal(result.contextWindow, 128000);
   // usage comes from token_count last_token_usage sums; turn.completed.usage
   // (a stdout-only shape absent from real session logs) must be ignored here.
-  assert.deepEqual(result.usage, { inputTokens: 500, outputTokens: 20, cacheReadInputTokens: 100 });
-  assert.deepEqual(result.lastSubturnUsage, { inputTokens: 500, outputTokens: 20, cacheReadInputTokens: 100 });
+  assert.deepEqual(result.usage, { inputTokens: 400, outputTokens: 20, cacheReadInputTokens: 100 });
+  assert.deepEqual(result.lastSubturnUsage, { inputTokens: 400, outputTokens: 20, cacheReadInputTokens: 100 });
   assert.equal(result.commentaryEvents.length, 8);
   const c0 = result.commentaryEvents[0]!.message.content as any[];
   assert.equal(c0[0].text, 'checking files...');
@@ -522,7 +550,7 @@ test('extractSessionLogResult preserves redacted Codex tool-use session-log fixt
   assert.equal(result.model, 'gpt-5.5');
   assert.equal(result.contextWindow, 258400);
   assert.deepEqual(result.lastSubturnUsage, {
-    inputTokens: 29269,
+    inputTokens: 725,
     outputTokens: 517,
     cacheReadInputTokens: 28544,
   });
@@ -541,7 +569,7 @@ test('extractSessionLogResult preserves redacted Codex structured-output session
   assert.equal(result.model, 'gpt-5.5');
   assert.equal(result.contextWindow, 258400);
   assert.deepEqual(result.lastSubturnUsage, {
-    inputTokens: 27939,
+    inputTokens: 25507,
     outputTokens: 664,
     cacheReadInputTokens: 2432,
   });
@@ -827,8 +855,33 @@ test('extractSessionLogResult fills aggregate usage from a single token_count la
 
   const result = extractSessionLogResult(log);
   assert.equal(result.content, 'single subturn answer');
-  assert.deepEqual(result.usage, { inputTokens: 500, outputTokens: 20, cacheReadInputTokens: 100 });
-  assert.deepEqual(result.lastSubturnUsage, { inputTokens: 500, outputTokens: 20, cacheReadInputTokens: 100 });
+  assert.deepEqual(result.usage, { inputTokens: 400, outputTokens: 20, cacheReadInputTokens: 100 });
+  assert.deepEqual(result.lastSubturnUsage, { inputTokens: 400, outputTokens: 20, cacheReadInputTokens: 100 });
+});
+
+test('extractSessionLogResult keeps fully cached token_count subturns valid', () => {
+  const log = [
+    codexUserTurn(),
+    codexTokenCount({ input: 23425, cached: 22912, output: 9 }, { input: 23425, cached: 22912, output: 9 }),
+    JSON.stringify({
+      type: 'event_msg',
+      payload: { type: 'agent_message', phase: 'final_answer', message: 'cached answer' },
+    }),
+    JSON.stringify({ type: 'event_msg', payload: { type: 'task_complete' } }),
+  ].join('\n');
+
+  const result = extractSessionLogResult(log);
+  assert.equal(result.content, 'cached answer');
+  assert.deepEqual(result.lastSubturnUsage, {
+    inputTokens: 513,
+    outputTokens: 9,
+    cacheReadInputTokens: 22912,
+  });
+  assert.equal(
+    (result.lastSubturnUsage?.inputTokens ?? 0) + (result.lastSubturnUsage?.cacheReadInputTokens ?? 0),
+    23425,
+  );
+  assert.equal(result.contextWindow, 258400);
 });
 
 test('extractSessionLogResult sums aggregate usage across multi-subturn token_count events', () => {
@@ -848,12 +901,12 @@ test('extractSessionLogResult sums aggregate usage across multi-subturn token_co
 
   const result = extractSessionLogResult(log);
   assert.deepEqual(result.usage, {
-    inputTokens: 114826,
+    inputTokens: 26762,
     outputTokens: 1375,
     cacheReadInputTokens: 88064,
   });
   assert.deepEqual(result.lastSubturnUsage, {
-    inputTokens: 29269,
+    inputTokens: 725,
     outputTokens: 517,
     cacheReadInputTokens: 28544,
   });
@@ -875,7 +928,7 @@ test('extractSessionLogResult scoped resume tail reports the resumed turn usage 
   const result = extractSessionLogResult(resumedTail);
   assert.equal(result.content, 'resumed turn answer');
   assert.deepEqual(result.usage, {
-    inputTokens: 26318,
+    inputTokens: 21326,
     outputTokens: 18,
     cacheReadInputTokens: 4992,
   });

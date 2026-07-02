@@ -78,7 +78,7 @@ test('parseCodexOutput preserves redacted Codex long-answer stdout fixture', () 
   assert.equal(parsed.content?.length, 1311);
   assert.equal(parsed.sessionId, '019e0000-0000-7000-8000-000000000001');
   assert.deepEqual(parsed.usage, {
-    inputTokens: 27915,
+    inputTokens: 24459,
     outputTokens: 1059,
     cacheReadInputTokens: 3456,
   });
@@ -149,7 +149,7 @@ test('parseCodexOutput preserves redacted Codex structured-output stdout fixture
   assert.equal(structured.answer.includes('에이전트 CLI reference artifact'), true);
   assert.equal(Array.isArray(structured.checks), true);
   assert.deepEqual(parsed.usage, {
-    inputTokens: 27939,
+    inputTokens: 25507,
     outputTokens: 664,
     cacheReadInputTokens: 2432,
   });
@@ -162,7 +162,7 @@ test('parseCodexOutput extracts content and session id from turn.completed', () 
   const parsed = parseCodexOutput(stdout, null);
   assert.equal(parsed.content, 'result answer');
   assert.equal(parsed.sessionId, '00000000-0000-4000-8000-000000000001');
-  assert.equal(parsed.usage.inputTokens, 100);
+  assert.equal(parsed.usage.inputTokens, 50);
   assert.equal(parsed.usage.outputTokens, 20);
   assert.equal(parsed.usage.cacheReadInputTokens, 50);
 });
@@ -563,7 +563,7 @@ test('parseCodexOutput promotes unphased item.completed agent_message text in co
   const parsed = parseCodexOutput(stdout, null);
   assert.equal(parsed.content, 'RAW_SHAPE_OK');
   assert.equal(parsed.sessionId, '019e460f-bfc8-7c12-ae80-281798743e5b');
-  assert.equal(parsed.usage.inputTokens, 10);
+  assert.equal(parsed.usage.inputTokens, 5);
   assert.equal(parsed.assistantEvents.length, 1);
   assert.equal((parsed.assistantEvents[0]!.message.content as any[])[0].text, 'RAW_SHAPE_OK');
 });

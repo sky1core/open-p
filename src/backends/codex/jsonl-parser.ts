@@ -252,11 +252,22 @@ function extractUsageFromTurnCompleted(event: Record<string, unknown>): CodexPar
   const usage = asObject(event.usage);
   if (!usage) return { inputTokens: null, outputTokens: null, cacheReadInputTokens: null };
 
+  const rawInputTokens = typeof usage.input_tokens === 'number' ? usage.input_tokens : null;
+  const cacheReadInputTokens = typeof usage.cached_input_tokens === 'number' ? usage.cached_input_tokens : null;
   return {
-    inputTokens: typeof usage.input_tokens === 'number' ? usage.input_tokens : null,
+    inputTokens: rawInputTokens === null ? null : normalizeCodexInputTokens(rawInputTokens, cacheReadInputTokens),
     outputTokens: typeof usage.output_tokens === 'number' ? usage.output_tokens : null,
-    cacheReadInputTokens: typeof usage.cached_input_tokens === 'number' ? usage.cached_input_tokens : null,
+    cacheReadInputTokens,
   };
+}
+
+function normalizeCodexInputTokens(rawInputTokens: number, cacheReadInputTokens: number | null): number {
+  // Codex turn.completed.usage uses the same TokenUsage field family as
+  // session-log token_count, where input_tokens includes cached_input_tokens.
+  // Evidence (cross-proof): codex.stdout.raw turn.completed.usage matches
+  // codex-session-log.jsonl total_token_usage exactly, and the session log's
+  // total_tokens arithmetic proves the inclusion.
+  return Math.max(0, rawInputTokens - (cacheReadInputTokens ?? 0));
 }
 
 function extractReasoningSummaryText(payload: Record<string, unknown>): string | null {
