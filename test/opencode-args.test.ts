@@ -96,3 +96,22 @@ test('buildOpenCodeArgs rejects unsupported options instead of falling back', ()
     (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.unsupportedOption,
   );
 });
+
+test('buildOpenCodeArgs rejects an empty --tools value (not silently ignored)', () => {
+  assert.throws(
+    () => buildOpenCodeArgs({
+      message: 'hello',
+      sessionId: null,
+      isFirstTurn: true,
+      options: {
+        model: 'ollama/qwen-coder',
+        reasoningEffort: null,
+        executionMode: null,
+        tools: '',
+        jsonSchema: null,
+        backendArgs: [],
+      },
+    }),
+    (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.unsupportedOption,
+  );
+});

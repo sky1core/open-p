@@ -100,7 +100,7 @@ function validateOpenCodeOptions(options: OpenCodeArgsOptions): void {
   if (options.backendArgs.length > 0) {
     throw new OpenPError('OpenCode backend does not support backend passthrough args', EXIT_CODES.unsupportedOption);
   }
-  if (options.tools) {
+  if (options.tools !== null) {
     throw new OpenPError('OpenCode backend does not support public --tools yet', EXIT_CODES.unsupportedOption);
   }
   if (options.jsonSchema) {
