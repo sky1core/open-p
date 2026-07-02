@@ -8,11 +8,12 @@ import { isSafeSessionId } from '../../core/session-id.js';
 import { extractClaudeCodeIntermediateContent, parseClaudeCodeJsonlTurn } from './turn-parser.js';
 import { isClaudeCodeTaskNotificationLine } from './background-parser.js';
 import {
-  collectUserText,
+  collectLocalCommandTranscriptText,
+  extractLocalCommandName,
   isCallerUserTurn,
-  isLocalCommandTranscriptText,
-  isShellCommandTranscriptText,
   isStablePrefixOfLongerText,
+  isSystemLocalCommandEvent,
+  isTerminalLocalCommandTranscriptText,
   rememberLocalCommandTranscriptPromptId,
 } from './turn-boundary-predicates.js';
 import type {
@@ -20,6 +21,7 @@ import type {
   AssistantEventSnapshot,
   IntermediateTextSource,
   TurnResult,
+  TurnResultWarning,
 } from '../../core/types.js';
 
 const SESSION_LOG_DISCOVERY_POLL_INTERVAL_MS = 250;
@@ -39,6 +41,13 @@ export interface ClaudeCodeSessionLogIdleDiagnostic {
   readonly idleMs: number;
   readonly observedLogFile: boolean;
   readonly sawCallerUserTurn: boolean;
+}
+
+export interface ClaudeCodeLocalCommandNameMismatchDiagnostic {
+  readonly turnId: string;
+  readonly promptLocalCommandName: string;
+  readonly loggedCommandName: string;
+  readonly logPath: string | null;
 }
 
 export class MissingCallerAfterLocalCommandError extends OpenPError {
@@ -203,6 +212,9 @@ export async function waitForClaudeCodeTurnResult(options: {
   ) => void;
   readonly onTimeout?: () => Promise<void> | void;
   readonly onSessionLogIdle?: (diagnostic: ClaudeCodeSessionLogIdleDiagnostic) => Promise<void> | void;
+  readonly onLocalCommandNameMismatch?: (
+    diagnostic: ClaudeCodeLocalCommandNameMismatchDiagnostic,
+  ) => Promise<void> | void;
 }): Promise<TurnResult> {
   const deadline = options.timeoutMs === 0 ? null : Date.now() + options.timeoutMs;
   const discoveryDeadline = resolveDiscoveryDeadlineMs(
@@ -423,6 +435,14 @@ export async function waitForClaudeCodeTurnResult(options: {
             });
             mostRecentPreCallerCommandGroup = preCallerLocalCommandObservation.mostRecentCommandGroup;
             if (preCallerLocalCommandObservation.result) {
+              if (preCallerLocalCommandObservation.nameMismatch) {
+                await options.onLocalCommandNameMismatch?.({
+                  turnId: options.turnId,
+                  promptLocalCommandName: preCallerLocalCommandObservation.nameMismatch.promptLocalCommandName,
+                  loggedCommandName: preCallerLocalCommandObservation.nameMismatch.loggedCommandName,
+                  logPath,
+                });
+              }
               await assertDiscoveredLogStillUnambiguous(options, logPath);
               return preCallerLocalCommandObservation.result;
             }
@@ -850,35 +870,30 @@ function isPreCallerTerminalLocalCommandEvent(
   event: Record<string, unknown>,
   localCommandTranscriptPromptIds: ReadonlySet<string>,
 ): boolean {
-  const texts = collectTranscriptText(event);
+  const texts = collectLocalCommandTranscriptText(event);
   if (texts.length !== 1 || !isTerminalLocalCommandTranscriptText(texts[0]!)) {
     return false;
   }
-  if (event.type === 'system' && event.subtype === 'local_command') {
+  if (isSystemLocalCommandEvent(event)) {
     return true;
   }
   const promptId = stringOrNull(event.promptId);
   return promptId !== null && localCommandTranscriptPromptIds.has(promptId);
 }
 
-function collectTranscriptText(event: Record<string, unknown>): string[] {
-  const texts = collectUserText(event).map((text) => text.trim()).filter(Boolean);
-  const content = event.content;
-  if (typeof content === 'string' && content.trim().length > 0) {
-    texts.push(content.trim());
-  }
-  return texts;
-}
-
-function isTerminalLocalCommandTranscriptText(text: string): boolean {
-  return text.startsWith('<local-command-stdout>') || text.startsWith('<local-command-stderr>');
-}
+type LocalCommandTranscriptGroupSource = 'caller-prompt-id' | 'system';
 
 interface LocalCommandTranscriptGroup {
-  readonly promptId: string;
+  readonly promptId: string | null;
+  readonly source: LocalCommandTranscriptGroupSource;
   commandName: string | null;
   sessionId: string | null;
   terminalOutputs: string[];
+}
+
+export interface ClaudeCodeLocalCommandNameMismatch {
+  readonly promptLocalCommandName: string;
+  readonly loggedCommandName: string;
 }
 
 function observePreCallerLocalCommandEvent(options: {
@@ -893,6 +908,7 @@ function observePreCallerLocalCommandEvent(options: {
   readonly terminalOutputObserved: boolean;
   readonly mostRecentCommandGroup: LocalCommandTranscriptGroup | null;
   readonly result: TurnResult | null;
+  readonly nameMismatch: ClaudeCodeLocalCommandNameMismatch | null;
 } {
   const promptId = stringOrNull(options.event.promptId);
   let mostRecentCommandGroup = options.mostRecentCommandGroup;
@@ -904,6 +920,21 @@ function observePreCallerLocalCommandEvent(options: {
       group.commandName = commandName;
       mostRecentCommandGroup = group;
     }
+  } else if (isSystemLocalCommandEvent(options.event)) {
+    // A `system` `local_command` command-name event carries no promptId and no caveat wrapper, so it can
+    // never join a promptId-anchored group. It forms its own system-sourced group and becomes the most
+    // recent command group so the following `system` terminal output attributes to it. This is the shape
+    // the live `/code-review ultra` failure produced (command-name + stdout, both `system`, no user turn).
+    const commandName = extractLocalCommandName(options.event);
+    if (commandName !== null) {
+      mostRecentCommandGroup = {
+        promptId: null,
+        source: 'system',
+        commandName,
+        sessionId: stringOrNull(options.event.sessionId),
+        terminalOutputs: [],
+      };
+    }
   }
 
   const terminal = resolveLocalCommandTerminalOutput(options.event, options.groups, mostRecentCommandGroup);
@@ -912,21 +943,67 @@ function observePreCallerLocalCommandEvent(options: {
       terminalOutputObserved: false,
       mostRecentCommandGroup,
       result: null,
+      nameMismatch: null,
     };
   }
 
   terminal.group.terminalOutputs.push(terminal.text);
   terminal.group.sessionId = terminal.group.sessionId ?? stringOrNull(options.event.sessionId);
-  // A group with no observed <command-name> must never match: with a normal prompt both sides would
-  // be null and `null === null` would misclassify the turn as a Local Command Turn.
-  const result = terminal.group.commandName !== null &&
-    terminal.group.commandName === options.promptLocalCommandName
-    ? buildLocalCommandTurnResult(options.turnId, terminal.group, options.rawEventCount)
-    : null;
+  const completion = resolveLocalCommandTurnCompletion(
+    terminal.group,
+    options.promptLocalCommandName,
+    options.turnId,
+    options.rawEventCount,
+  );
   return {
     terminalOutputObserved: true,
     mostRecentCommandGroup,
-    result,
+    result: completion?.result ?? null,
+    nameMismatch: completion?.nameMismatch ?? null,
+  };
+}
+
+function resolveLocalCommandTurnCompletion(
+  group: LocalCommandTranscriptGroup,
+  promptLocalCommandName: string | null,
+  turnId: string,
+  rawEventCount: number,
+): { readonly result: TurnResult; readonly nameMismatch: ClaudeCodeLocalCommandNameMismatch | null } | null {
+  // A group with no observed <command-name> must never match: with a normal prompt both sides would be
+  // null and `null === null` would misclassify the turn as a Local Command Turn.
+  if (group.commandName === null) {
+    return null;
+  }
+  // A normal prompt (no leading `/token`) never completes as a Local Command Turn. Keeping this guard is
+  // what preserves the external-local-command preemption recovery path (`prompt_not_executed`): when the
+  // caller did not submit a local command, an unrelated local command that ran first must not be reported
+  // as the answer.
+  if (promptLocalCommandName === null) {
+    return null;
+  }
+  if (group.commandName === promptLocalCommandName) {
+    return { result: buildLocalCommandTurnResult(turnId, group, rawEventCount), nameMismatch: null };
+  }
+  // Name mismatch. Only a system-sourced group is completed here, and only with a bounded warning: the
+  // command the caller typed (e.g. `/code-review`) can differ from the logged command name (e.g.
+  // `/ultrareview`) because of a command alias, and an infinite hang is the worst outcome. A
+  // promptId-anchored group still requires an exact command-name match (existing behavior unchanged).
+  if (group.source !== 'system') {
+    return null;
+  }
+  const nameMismatch: ClaudeCodeLocalCommandNameMismatch = {
+    promptLocalCommandName,
+    loggedCommandName: group.commandName,
+  };
+  const warning: TurnResultWarning = {
+    severity: 'warning',
+    code: 'local_command_name_mismatch',
+    message: `Submitted local command "${promptLocalCommandName}" completed as "${group.commandName}" ` +
+      '(likely a command alias); the turn was completed with the logged command output.',
+  };
+  return {
+    result: buildLocalCommandTurnResult(turnId, group, rawEventCount, [warning]),
+    nameMismatch,
   };
 }
 
@@ -940,6 +1017,7 @@ function getLocalCommandTranscriptGroup(
   }
   const group: LocalCommandTranscriptGroup = {
     promptId,
+    source: 'caller-prompt-id',
     commandName: null,
     sessionId: null,
     terminalOutputs: [],
@@ -948,26 +1026,16 @@ function getLocalCommandTranscriptGroup(
   return group;
 }
 
-function extractLocalCommandName(event: Record<string, unknown>): string | null {
-  const texts = collectTranscriptText(event);
-  if (texts.length !== 1) {
-    return null;
-  }
-  const match = /<command-name>([\s\S]*?)<\/command-name>/.exec(texts[0]!);
-  const commandName = match?.[1]?.trim() ?? '';
-  return commandName.length > 0 ? commandName : null;
-}
-
 function resolveLocalCommandTerminalOutput(
   event: Record<string, unknown>,
   groups: Map<string, LocalCommandTranscriptGroup>,
   mostRecentCommandGroup: LocalCommandTranscriptGroup | null,
 ): { readonly group: LocalCommandTranscriptGroup; readonly text: string } | null {
-  const texts = collectTranscriptText(event);
+  const texts = collectLocalCommandTranscriptText(event);
   if (texts.length !== 1 || !isTerminalLocalCommandTranscriptText(texts[0]!)) {
     return null;
   }
-  if (event.type === 'system' && event.subtype === 'local_command') {
+  if (isSystemLocalCommandEvent(event)) {
     return mostRecentCommandGroup ? { group: mostRecentCommandGroup, text: texts[0]! } : null;
   }
   const promptId = stringOrNull(event.promptId);
@@ -982,6 +1050,7 @@ function buildLocalCommandTurnResult(
   turnId: string,
   group: LocalCommandTranscriptGroup,
   rawEventCount: number,
+  warnings: readonly TurnResultWarning[] = [],
 ): TurnResult {
   return {
     turnId,
@@ -989,6 +1058,7 @@ function buildLocalCommandTurnResult(
     reasoningContent: null,
     sessionId: group.sessionId,
     assistantEvents: [],
+    ...(warnings.length > 0 ? { warnings } : {}),
     diagnostics: {
       durationMs: null,
       stopReason: null,

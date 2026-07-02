@@ -1,5 +1,8 @@
 import { appendDebugLog } from '../../core/debug-log.js';
-import type { ClaudeCodeSessionLogIdleDiagnostic } from './session-log.js';
+import type {
+  ClaudeCodeLocalCommandNameMismatchDiagnostic,
+  ClaudeCodeSessionLogIdleDiagnostic,
+} from './session-log.js';
 
 export function createClaudeSessionLogIdleDebugLogger(input: {
   readonly debugLog: string | null;
@@ -12,6 +15,26 @@ export function createClaudeSessionLogIdleDebugLogger(input: {
     await appendDebugLog(input.debugLog, {
       event: 'claude_session_log_waiting',
       severity: 'info',
+      backend: input.backendId ?? 'claude',
+      backendSessionId: input.backendSessionId,
+      nativeSessionId: input.nativeSessionId,
+      ptySessionId: input.ptySessionId,
+      ...diagnostic,
+    }).catch(() => undefined);
+  };
+}
+
+export function createClaudeLocalCommandNameMismatchDebugLogger(input: {
+  readonly debugLog: string | null;
+  readonly backendId?: string;
+  readonly backendSessionId: string;
+  readonly nativeSessionId: string | null;
+  readonly ptySessionId: string;
+}): (diagnostic: ClaudeCodeLocalCommandNameMismatchDiagnostic) => Promise<void> {
+  return async (diagnostic) => {
+    await appendDebugLog(input.debugLog, {
+      event: 'claude_local_command_name_mismatch',
+      severity: 'warning',
       backend: input.backendId ?? 'claude',
       backendSessionId: input.backendSessionId,
       nativeSessionId: input.nativeSessionId,

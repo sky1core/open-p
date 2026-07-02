@@ -37,7 +37,10 @@ import {
   CLAUDE_CODE_LAUNCH_UNSET_ENV,
   withClaudeCodeAccountLaunchEnv,
 } from './launch-safety.js';
-import { createClaudeSessionLogIdleDebugLogger } from './diagnostics.js';
+import {
+  createClaudeLocalCommandNameMismatchDebugLogger,
+  createClaudeSessionLogIdleDebugLogger,
+} from './diagnostics.js';
 import { extractPromptLocalCommandName } from './prompt-command.js';
 
 // The non-interactive PTY turn cannot survive tools that outlive the synchronous turn or that block on
@@ -249,6 +252,13 @@ export class ClaudeCodeBackend implements Backend {
                   ? retryLocalCommandTranscriptPromptIds
                   : undefined,
                 onSessionLogIdle: createClaudeSessionLogIdleDebugLogger({
+                  debugLog: options.debugLog,
+                  backendId: this.backendId,
+                  backendSessionId: options.backendSessionId,
+                  nativeSessionId,
+                  ptySessionId: pty.id,
+                }),
+                onLocalCommandNameMismatch: createClaudeLocalCommandNameMismatchDebugLogger({
                   debugLog: options.debugLog,
                   backendId: this.backendId,
                   backendSessionId: options.backendSessionId,

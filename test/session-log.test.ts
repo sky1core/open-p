@@ -810,6 +810,243 @@ test('local command result backfills session id from command-name event', async 
   assert.equal(result.sessionId, sessionId);
 });
 
+// Live-observed regression: `/code-review ultra` failed inside Claude Code and left only two
+// `system` `local_command` records — a `<command-name>/ultrareview</command-name>` (the alias of the
+// submitted `/code-review`) and a `<local-command-stdout>` error — with no user-type event, no
+// promptId, and no caller user turn. The old wait loop could not build a group from a system-sourced
+// command name, discarded the stdout, and hung until manual abort. The turn must now complete with a
+// bounded name-mismatch warning instead of hanging.
+test('system-sourced local command with an aliased name completes with a mismatch warning', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-session-log-local-command-'));
+  const logPath = join(dir, 'session.jsonl');
+  const sessionId = randomUUID();
+  const parentUuid = randomUUID();
+  const commandUuid = randomUUID();
+  const stdout = "Could not find merge-base with main. Pass the base branch explicitly " +
+    "(e.g. `/code-review ultra develop`) or make sure you're in a git repo with a main branch.";
+  const mismatches: Array<{ promptLocalCommandName: string; loggedCommandName: string }> = [];
+  await writeFile(logPath, [
+    line({
+      type: 'system',
+      subtype: 'local_command',
+      content: '<command-name>/ultrareview</command-name>\n            <command-message>ultrareview</command-message>\n            <command-args></command-args>',
+      level: 'info',
+      isMeta: false,
+      userType: 'external',
+      entrypoint: 'cli',
+      cwd: '/tmp/openp-demo-workspace',
+      sessionId,
+      version: '2.1.198',
+      gitBranch: 'clean-main',
+      parentUuid,
+      uuid: commandUuid,
+      timestamp: '2026-07-02T13:02:26.842Z',
+    }),
+    line({
+      type: 'system',
+      subtype: 'local_command',
+      content: `<local-command-stdout>${stdout}</local-command-stdout>`,
+      level: 'info',
+      isMeta: false,
+      userType: 'external',
+      entrypoint: 'cli',
+      cwd: '/tmp/openp-demo-workspace',
+      sessionId,
+      version: '2.1.198',
+      gitBranch: 'clean-main',
+      parentUuid: commandUuid,
+      uuid: randomUUID(),
+      timestamp: '2026-07-02T13:02:27.010Z',
+    }),
+  ].join(''));
+
+  const result = await waitForClaudeCodeTurnResult({
+    sessionId,
+    turnId: 'turn-1',
+    timeoutMs: 10_000,
+    initialOffset: 0,
+    knownLogPath: logPath,
+    promptLocalCommandName: '/code-review',
+    isBackendAlive: async () => true,
+    onLocalCommandNameMismatch: (diagnostic) => {
+      mismatches.push({
+        promptLocalCommandName: diagnostic.promptLocalCommandName,
+        loggedCommandName: diagnostic.loggedCommandName,
+      });
+    },
+  });
+
+  assert.equal(result.text, stdout);
+  assert.equal(result.sessionId, sessionId);
+  assert.equal(result.warnings?.length, 1);
+  assert.equal(result.warnings?.[0]?.code, 'local_command_name_mismatch');
+  assert.equal(result.warnings?.[0]?.severity, 'warning');
+  assert.equal(result.warnings?.[0]?.message.includes('/code-review'), true);
+  assert.equal(result.warnings?.[0]?.message.includes('/ultrareview'), true);
+  assert.deepEqual(mismatches, [
+    { promptLocalCommandName: '/code-review', loggedCommandName: '/ultrareview' },
+  ]);
+});
+
+test('system-sourced local command with an exact name match completes without a warning', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-session-log-local-command-'));
+  const logPath = join(dir, 'session.jsonl');
+  const sessionId = randomUUID();
+  const mismatches: unknown[] = [];
+  await writeFile(logPath, [
+    line({
+      type: 'system',
+      subtype: 'local_command',
+      sessionId,
+      content: '<command-name>/cost</command-name>\n            <command-message>cost</command-message>',
+    }),
+    line({
+      type: 'system',
+      subtype: 'local_command',
+      sessionId,
+      content: '<local-command-stdout>Total cost: $0.42</local-command-stdout>',
+    }),
+  ].join(''));
+
+  const result = await waitForClaudeCodeTurnResult({
+    sessionId,
+    turnId: 'turn-1',
+    timeoutMs: 10_000,
+    initialOffset: 0,
+    knownLogPath: logPath,
+    promptLocalCommandName: '/cost',
+    isBackendAlive: async () => true,
+    onLocalCommandNameMismatch: (diagnostic) => {
+      mismatches.push(diagnostic);
+    },
+  });
+
+  assert.equal(result.text, 'Total cost: $0.42');
+  assert.equal(result.sessionId, sessionId);
+  assert.equal(result.warnings, undefined);
+  assert.deepEqual(mismatches, []);
+});
+
+test('normal prompt never completes on a system-sourced local command group', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-session-log-local-command-'));
+  const logPath = join(dir, 'session.jsonl');
+  const sessionId = randomUUID();
+  await writeFile(logPath, [
+    line({
+      type: 'system',
+      subtype: 'local_command',
+      sessionId,
+      content: '<command-name>/cost</command-name>\n            <command-message>cost</command-message>',
+    }),
+    line({
+      type: 'system',
+      subtype: 'local_command',
+      sessionId,
+      content: '<local-command-stdout>Total cost: $0.42</local-command-stdout>',
+    }),
+  ].join(''));
+
+  await assert.rejects(
+    () => waitForClaudeCodeTurnResult({
+      sessionId,
+      turnId: 'turn-1',
+      timeoutMs: 10_000,
+      initialOffset: 0,
+      knownLogPath: logPath,
+      promptLocalCommandName: null,
+      isBackendAlive: async () => true,
+    }),
+    (error) => error instanceof OpenPError &&
+      error.exitCode === EXIT_CODES.protocolViolation &&
+      error.reasonCode === 'prompt_not_executed',
+  );
+});
+
+test('user-type promptId local command still requires an exact name match', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-session-log-local-command-'));
+  const logPath = join(dir, 'session.jsonl');
+  const sessionId = randomUUID();
+  const mismatches: unknown[] = [];
+  await writeFile(logPath, [
+    line({
+      type: 'user',
+      sessionId,
+      promptId: 'compact-command',
+      isMeta: true,
+      message: { content: '<local-command-caveat>Caveat</local-command-caveat>' },
+    }),
+    line({
+      type: 'user',
+      sessionId,
+      promptId: 'compact-command',
+      message: {
+        content: '<command-name>/compact</command-name>\n            <command-message>compact</command-message>',
+      },
+    }),
+    line({
+      type: 'user',
+      sessionId,
+      promptId: 'compact-command',
+      message: {
+        content: '<local-command-stdout>Compacted (ctrl+o to see full summary)</local-command-stdout>',
+      },
+    }),
+  ].join(''));
+
+  await assert.rejects(
+    () => waitForClaudeCodeTurnResult({
+      sessionId,
+      turnId: 'turn-1',
+      timeoutMs: 10_000,
+      initialOffset: 0,
+      knownLogPath: logPath,
+      promptLocalCommandName: '/code-review',
+      isBackendAlive: async () => true,
+      onLocalCommandNameMismatch: (diagnostic) => {
+        mismatches.push(diagnostic);
+      },
+    }),
+    (error) => error instanceof OpenPError &&
+      error.exitCode === EXIT_CODES.protocolViolation &&
+      error.reasonCode === 'prompt_not_executed',
+  );
+  assert.deepEqual(mismatches, []);
+});
+
+// Regression: a `<command-name>` string merely QUOTED inside a stdout payload must not mint a phantom
+// system command group. Without start-of-text anchoring, this single stdout-only event self-minted a
+// group from its own quoted `<command-name>/other</command-name>`, attributed itself as that group's
+// terminal output, and falsely completed the turn through the name-mismatch relaxation.
+test('system stdout-only event with an embedded command-name string never completes the turn', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-session-log-local-command-'));
+  const logPath = join(dir, 'session.jsonl');
+  const sessionId = randomUUID();
+  const mismatches: unknown[] = [];
+  await writeFile(logPath, line({
+    type: 'system',
+    subtype: 'local_command',
+    sessionId,
+    content: '<local-command-stdout>log excerpt: <command-name>/other</command-name> was seen earlier</local-command-stdout>',
+  }));
+
+  await assert.rejects(
+    () => waitForClaudeCodeTurnResult({
+      sessionId,
+      turnId: 'turn-1',
+      timeoutMs: 300,
+      initialOffset: 0,
+      knownLogPath: logPath,
+      promptLocalCommandName: '/mycommand',
+      isBackendAlive: async () => true,
+      onLocalCommandNameMismatch: (diagnostic) => {
+        mismatches.push(diagnostic);
+      },
+    }),
+    (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.timeout,
+  );
+  assert.deepEqual(mismatches, []);
+});
+
 test('local command turn does not publish pre-caller assistant callbacks', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'openp-session-log-local-command-'));
   const logPath = join(dir, 'session.jsonl');

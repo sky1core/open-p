@@ -45,7 +45,10 @@ import {
 } from './launch-safety.js';
 import { createClaudePtyInterrupter } from './pty-interrupt.js';
 import { assertClaudeCodeBin } from './bin.js';
-import { createClaudeSessionLogIdleDebugLogger } from './diagnostics.js';
+import {
+  createClaudeLocalCommandNameMismatchDebugLogger,
+  createClaudeSessionLogIdleDebugLogger,
+} from './diagnostics.js';
 import { extractPromptLocalCommandName } from './prompt-command.js';
 
 const PRE_CALLER_LOCAL_COMMAND_PROMPT_RETRY_LIMIT = 1;
@@ -241,6 +244,13 @@ export class PersistentClaudeCodeProcess implements ManagedBackendProcess {
                 },
                 onIntermediateAssistantSnapshot: options.onIntermediateAssistantSnapshot,
                 onSessionLogIdle: createClaudeSessionLogIdleDebugLogger({
+                  debugLog: options.debugLog ?? null,
+                  backendId: this.launchSignature.backendId,
+                  backendSessionId: this.sessionId,
+                  nativeSessionId: this.nativeSessionId,
+                  ptySessionId: this.pty.id,
+                }),
+                onLocalCommandNameMismatch: createClaudeLocalCommandNameMismatchDebugLogger({
                   debugLog: options.debugLog ?? null,
                   backendId: this.launchSignature.backendId,
                   backendSessionId: this.sessionId,

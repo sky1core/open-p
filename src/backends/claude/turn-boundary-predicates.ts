@@ -134,6 +134,49 @@ export function isShellCommandTranscriptText(text: string): boolean {
   return SHELL_COMMAND_TRANSCRIPT_PREFIXES.some((prefix) => text.startsWith(prefix));
 }
 
+// Shared local-command classification/extraction used by BOTH state machines (the session-log wait loop
+// and the JSONL turn parser) so the two never drift on what a local-command event is. A local command
+// can be sourced either as `type:user` promptId-anchored transcript events (caveat wrapper + command
+// name + terminal output) or as `type:system` `subtype:local_command` events whose payload lives on
+// `event.content`. Both surfaces are recognized here by structural markers only, never by comparing free
+// text content.
+export function isSystemLocalCommandEvent(event: ClaudeSessionLogEvent): boolean {
+  return event.type === 'system' && event.subtype === 'local_command';
+}
+
+// A local-command transcript text either lives inside the user message (promptId-anchored transcript) or
+// on the top-level `content` string (`system` `local_command`). Collect both so a single classifier can
+// read either surface.
+export function collectLocalCommandTranscriptText(event: ClaudeSessionLogEvent): string[] {
+  const texts = collectComparableUserText(event);
+  const content = event.content;
+  if (typeof content === 'string' && content.trim().length > 0) {
+    texts.push(content.trim());
+  }
+  return texts;
+}
+
+// The command name of a local-command command-name event (`<command-name>/foo</command-name>`), read from
+// whichever transcript surface carries it. Returns null when the event is not a single command-name
+// transcript. The extraction is anchored to the start of the transcript text: every observed
+// command-name transcript (user-type and system) begins with `<command-name>`, and an unanchored match
+// would also fire on a `<command-name>` string merely QUOTED inside a terminal output payload
+// (`<local-command-stdout>...`), letting a stdout-only event mint a phantom command group and falsely
+// complete the turn with its own quoted content.
+export function extractLocalCommandName(event: ClaudeSessionLogEvent): string | null {
+  const texts = collectLocalCommandTranscriptText(event);
+  if (texts.length !== 1 || !texts[0]!.startsWith('<command-name>')) {
+    return null;
+  }
+  const match = /^<command-name>([\s\S]*?)<\/command-name>/.exec(texts[0]!);
+  const commandName = match?.[1]?.trim() ?? '';
+  return commandName.length > 0 ? commandName : null;
+}
+
+export function isTerminalLocalCommandTranscriptText(text: string): boolean {
+  return text.startsWith('<local-command-stdout>') || text.startsWith('<local-command-stderr>');
+}
+
 function isLocalCommandCaveatEvent(event: ClaudeSessionLogEvent): boolean {
   const texts = collectComparableUserText(event);
   return texts.length === 1 && texts[0]!.startsWith('<local-command-caveat>');

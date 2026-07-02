@@ -3,7 +3,9 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import { extractClaudeCodeIntermediateContent, extractClaudeCodeIntermediateText, parseClaudeCodeJsonlTurn } from '../src/backends/claude/turn-parser.js';
 import {
+  extractLocalCommandName,
   isCallerUserTurn,
+  isSystemLocalCommandEvent,
   rememberLocalCommandTranscriptPromptId,
 } from '../src/backends/claude/turn-boundary-predicates.js';
 import { EXIT_CODES, OpenPError } from '../src/core/errors.js';
@@ -1091,6 +1093,45 @@ test('classifies kind-text data local command transcripts the same in wait-loop 
       },
     },
   });
+});
+
+test('classifies system local_command transcripts the same in wait-loop and parser paths', () => {
+  const commandEvent = {
+    type: 'system',
+    subtype: 'local_command',
+    content: '<command-name>/ultrareview</command-name>\n<command-message>ultrareview</command-message>\n<command-args></command-args>',
+  };
+  const stdoutEvent = {
+    type: 'system',
+    subtype: 'local_command',
+    content: '<local-command-stdout>Could not find merge-base with main.</local-command-stdout>',
+  };
+
+  // A system local_command event registers no promptId (it carries no `<local-command-caveat>` wrapper).
+  const waitLoopPromptIds = new Set<string>();
+  rememberLocalCommandTranscriptPromptId(waitLoopPromptIds, commandEvent);
+  rememberLocalCommandTranscriptPromptId(waitLoopPromptIds, stdoutEvent);
+  assert.equal(waitLoopPromptIds.size, 0);
+
+  // Wait-loop classification: neither system event is a caller user turn.
+  assert.equal(isCallerUserTurn(commandEvent, waitLoopPromptIds, { isTaskNotification: false }), false);
+  assert.equal(isCallerUserTurn(stdoutEvent, waitLoopPromptIds, { isTaskNotification: false }), false);
+
+  // Shared recognizer surface both state machines read from.
+  assert.equal(isSystemLocalCommandEvent(commandEvent), true);
+  assert.equal(extractLocalCommandName(commandEvent), '/ultrareview');
+  assert.equal(extractLocalCommandName(stdoutEvent), null);
+
+  // Parser path: the same system events are ignored and do not become a second caller boundary, so a
+  // normal turn with a real caller user turn still resolves to its assistant answer.
+  const parserResult = parseClaudeCodeJsonlTurn([
+    userLine('real prompt'),
+    JSON.stringify(commandEvent),
+    JSON.stringify(stdoutEvent),
+    assistantLine([{ type: 'text', text: 'result answer' }], undefined, 'end_turn'),
+    durationLine(10),
+  ], TURN_ID);
+  assert.equal(parserResult?.text, 'result answer');
 });
 
 test('keeps seeded local-command prompt ids after the caller user turn', () => {
