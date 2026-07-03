@@ -216,6 +216,78 @@ test('stream-json worker uses open-p WorkerBridge instead of forwarding backend 
   }
 });
 
+class ProviderErrorInterruptedBridge implements StreamJsonWorkerBridge {
+  readonly requests: WorkerTurnRequest[] = [];
+  shutdownCount = 0;
+
+  async runTurn(request: WorkerTurnRequest): Promise<WorkerTurnResult> {
+    this.requests.push(request);
+    return {
+      content: 'partial answer',
+      reasoningContent: null,
+      warnings: [{
+        severity: 'warning',
+        code: 'provider_error_interrupted',
+        message: "provider error (status 429): You've hit your session limit · resets 8am (Asia/Seoul)",
+      }],
+      interruptedExitCode: EXIT_CODES.backendExited,
+      sessionId: request.sessionId ?? SESSION_ID,
+      diagnostics: {
+        numTurns: this.requests.length,
+        inputTokens: 10,
+        outputTokens: 2,
+        cacheReadInputTokens: 3,
+        contextWindow: 200000,
+        lastSubturnContextTokens: 13,
+        durationMs: 25,
+        totalCostUsd: null,
+        stopReason: 'provider_error',
+        toolsUsed: ['Write'],
+        autoCompacted: false,
+        intermediateTextCount: 0,
+      },
+    };
+  }
+
+  async shutdown(): Promise<void> {
+    this.shutdownCount += 1;
+  }
+}
+
+test('stream-json worker emits the interrupted result record and then exits non-zero without running later turns', async () => {
+  const bridge = new ProviderErrorInterruptedBridge();
+  const output: string[] = [];
+  const state = await stateContext('/work/open-p');
+
+  const code = await runStreamJsonWorkerLines({
+    options: options(),
+    lines: lines([
+      userEvent('turn-a', 'first prompt'),
+      userEvent('turn-b', 'second prompt'),
+    ]),
+    bridge,
+    ...state,
+    outputMetadata: metadata(),
+    write: (chunk) => output.push(chunk),
+  });
+
+  // Third emit path: the (partial) result record is emitted like a success, then exit is non-zero.
+  assert.equal(code, EXIT_CODES.backendExited);
+  // Only the interrupted turn produced a record; the second queued user event was not run.
+  assert.equal(bridge.requests.length, 1);
+  assert.equal(bridge.shutdownCount, 1);
+
+  const events = parseEvents(output.join(''));
+  assert.deepEqual(events.map((event) => event.openp.form), ['result']);
+  assert.equal(resultAnswerText(events[0]?.openp ?? {}), 'partial answer');
+  assert.equal(events[0]?.openp.metadata.stopReason, 'provider_error');
+  const warnings = resultWarnings(events[0]?.openp ?? {}) as Array<Record<string, unknown>>;
+  assert.equal(
+    Array.isArray(warnings) && warnings.some((warning) => warning.code === 'provider_error_interrupted'),
+    true,
+  );
+});
+
 test('stream-json worker forwards public reasoning effort to WorkerBridge', async () => {
   const bridge = new FakeBridge();
   const state = await stateContext('/work/open-p');

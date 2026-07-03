@@ -180,10 +180,70 @@ test('does not strip marker-looking assistant text', () => {
   assert.equal(result?.text, markerText);
 });
 
-test('fails closed on Claude Code synthetic API error assistant events', () => {
+test('preserves completed content when a provider error interrupts after the completion marker', () => {
+  // A rate-limit (429) provider error arrives as a synthetic assistant event AFTER the backend already
+  // closed sub-turns (answer text + tool_use/tool_result with a real file write) and still emitted the
+  // turn_duration completion marker. The completed content must be preserved, not discarded.
+  const lines = [
+    userLine('do the work'),
+    assistantLine([{ type: 'text', text: 'here is my plan' }], undefined, 'tool_use'),
+    assistantLine([{ type: 'tool_use', name: 'Write', id: 'toolu_1', input: { file_path: '/tmp/x' } }], undefined, 'tool_use'),
+    toolResultUserLine('toolu_1', 'wrote file'),
+    assistantLine([{ type: 'text', text: 'done writing' }], undefined, 'tool_use'),
+    claudeApiErrorAssistantLine("You've hit your session limit · resets 8am (Asia/Seoul)", 429, 'rate_limit'),
+    durationLine(1234),
+  ];
+
+  const result = parseClaudeCodeJsonlTurn(lines, TURN_ID);
+  assert.ok(result);
+  // (a) completed answer preserved; (c) the api-error notice text is NOT promoted into the answer.
+  assert.equal(result.text, 'here is my plan\n\ndone writing');
+  assert.equal(result.text.includes('session limit'), false);
+  // (b) toolCall + toolResult preserved.
+  assert.deepEqual(result.diagnostics.toolsUsed, ['Write']);
+  const hasToolResult = (result.assistantEvents ?? []).some((event) =>
+    (event.message.content as Array<Record<string, unknown>>).some((block) => block?.type === 'tool_result'));
+  assert.equal(hasToolResult, true);
+  // (d) single provider_error_interrupted warning carrying the status and the verbatim notice text.
+  const warnings = result.warnings ?? [];
+  assert.equal(warnings.length, 1);
+  const warning = warnings[0]!;
+  assert.equal(warning.code, 'provider_error_interrupted');
+  assert.match(warning.message, /429/);
+  assert.match(warning.message, /You've hit your session limit · resets 8am \(Asia\/Seoul\)/);
+  // (e) interruption stop reason + third emit-path exit code signal.
+  assert.equal(result.diagnostics.stopReason, 'provider_error');
+  assert.equal(result.interruptedExitCode, EXIT_CODES.backendExited);
+});
+
+test('emits an interrupted result with empty answer when only tool activity completed before a provider error', () => {
+  // No completed answer text, but a Write tool ran (real side effect). The empty answer must not block
+  // the result: the tool records must survive the interruption.
+  const lines = [
+    userLine('write the file'),
+    assistantLine([{ type: 'tool_use', name: 'Write', id: 'toolu_1', input: { file_path: '/tmp/x' } }], undefined, 'tool_use'),
+    toolResultUserLine('toolu_1', 'wrote file'),
+    claudeApiErrorAssistantLine("You've hit your session limit · resets 8am (Asia/Seoul)", 429, 'rate_limit'),
+    durationLine(1234),
+  ];
+
+  const result = parseClaudeCodeJsonlTurn(lines, TURN_ID);
+  assert.ok(result);
+  assert.equal(result.text, '');
+  assert.deepEqual(result.diagnostics.toolsUsed, ['Write']);
+  const hasToolResult = (result.assistantEvents ?? []).some((event) =>
+    (event.message.content as Array<Record<string, unknown>>).some((block) => block?.type === 'tool_result'));
+  assert.equal(hasToolResult, true);
+  assert.equal((result.warnings ?? []).some((warning) => warning.code === 'provider_error_interrupted'), true);
+  assert.equal(result.diagnostics.stopReason, 'provider_error');
+  assert.equal(result.interruptedExitCode, EXIT_CODES.backendExited);
+});
+
+test('still fails closed on a provider error with no completed answer or tool activity', () => {
+  // Nothing completed before the error: there is nothing to preserve, so the pre-existing fail-closed
+  // behavior (backend exit + the same message shape) is retained.
   const lines = [
     userLine('generate image'),
-    assistantLine([{ type: 'text', text: 'starting generation' }], undefined, 'tool_use'),
     claudeApiErrorAssistantLine(
       'Please run /login · API Error: 401 The socket connection was closed unexpectedly.',
       401,
@@ -201,9 +261,44 @@ test('fails closed on Claude Code synthetic API error assistant events', () => {
       error.message.includes('status 401') &&
       error.message.includes('authentication_failed'),
   );
+});
+
+test('preserves partial answer on provider-error interruption for a structured-output turn instead of failing JSON parsing', () => {
+  // structuredOutputRequested=true would normally run the JSON fallback on the answer text. Here the
+  // provider error interrupted before the answer was completed, so the partial answer is not valid JSON.
+  // The interruption must be preserved (answer + warning + exit code), not replaced by an exit-40 parse
+  // failure, and structuredOutput must stay absent (the turn never produced a complete one).
+  const lines = [
+    userLine('produce structured output'),
+    assistantLine([{ type: 'text', text: 'partial answer before the limit' }], undefined, 'tool_use'),
+    claudeApiErrorAssistantLine("You've hit your session limit · resets 8am (Asia/Seoul)", 429, 'rate_limit'),
+    durationLine(1234),
+  ];
+
+  const result = parseClaudeCodeJsonlTurn(lines, TURN_ID, { structuredOutputRequested: true });
+  assert.ok(result);
+  assert.equal(result.text, 'partial answer before the limit');
+  assert.equal(result.structuredOutput, undefined);
+  assert.equal(result.interruptedExitCode, EXIT_CODES.backendExited);
+  assert.equal((result.warnings ?? []).some((warning) => warning.code === 'provider_error_interrupted'), true);
+  assert.equal(result.diagnostics.stopReason, 'provider_error');
+});
+
+test('returns null (no result) when a provider error is not followed by a completion marker', () => {
+  // Without the turn_duration completion marker the parser does not synthesize a partial result; the
+  // wait loop keeps its fail-closed backend-exit / timeout behavior instead.
+  const lines = [
+    userLine('do the work'),
+    assistantLine([{ type: 'text', text: 'partial answer' }], undefined, 'tool_use'),
+    claudeApiErrorAssistantLine("You've hit your session limit", 429, 'rate_limit'),
+    // no turn_duration
+  ];
+
+  assert.equal(parseClaudeCodeJsonlTurn(lines, TURN_ID), null);
+  // The streaming path still skips the api-error notice and keeps the completed intermediate text.
   assert.equal(
     extractClaudeCodeIntermediateContent(lines, { includeTerminalAssistant: true }).text,
-    'starting generation',
+    'partial answer',
   );
 });
 
@@ -1236,6 +1331,16 @@ function userLine(content: string, uuid?: string, parentUuid?: string): string {
     message: {
       role: 'user',
       content,
+    },
+  });
+}
+
+function toolResultUserLine(toolUseId: string, content: string): string {
+  return JSON.stringify({
+    type: 'user',
+    message: {
+      role: 'user',
+      content: [{ tool_use_id: toolUseId, type: 'tool_result', content }],
     },
   });
 }

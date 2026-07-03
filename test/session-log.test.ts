@@ -242,7 +242,7 @@ test('readNewText does not advance past an incomplete UTF-8 tail byte sequence',
   assert.equal(second.text.includes('�'), false);
 });
 
-test('fails closed on Claude Code API error assistant without publishing it as intermediate text', async () => {
+test('preserves completed content when a Claude Code API error interrupts after the completion marker', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'openp-session-log-'));
   const logPath = join(dir, 'session.jsonl');
   const sessionId = randomUUID();
@@ -282,6 +282,69 @@ test('fails closed on Claude Code API error assistant without publishing it as i
   ].join(''));
 
   try {
+    const result = await waitForClaudeCodeTurnResult({
+      sessionId,
+      turnId: 'turn-1',
+      timeoutMs: 10_000,
+      initialOffset: 0,
+      knownLogPath: logPath,
+      isBackendAlive: async () => true,
+      onIntermediateText: (text) => {
+        intermediateTexts.push(text);
+      },
+    });
+    // Completed answer preserved; the api-error notice text is not promoted into the answer.
+    assert.equal(result.text, 'starting generation');
+    assert.equal(result.text.includes('Please run /login'), false);
+    assert.equal(result.diagnostics.stopReason, 'provider_error');
+    assert.equal(result.interruptedExitCode, EXIT_CODES.backendExited);
+    assert.equal(
+      (result.warnings ?? []).some((warning) => warning.code === 'provider_error_interrupted'),
+      true,
+    );
+    // The api-error notice is still never published as intermediate text.
+    assert.deepEqual(intermediateTexts, ['starting generation']);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('fails closed with backend exit when a Claude Code API error has no completion marker and the backend is dead', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-session-log-'));
+  const logPath = join(dir, 'session.jsonl');
+  const sessionId = randomUUID();
+  await writeFile(logPath, [
+    line({
+      type: 'user',
+      sessionId,
+      message: { role: 'user', content: 'generate image' },
+    }),
+    line({
+      type: 'assistant',
+      sessionId,
+      message: {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'starting generation' }],
+        stop_reason: 'tool_use',
+      },
+    }),
+    line({
+      type: 'assistant',
+      sessionId,
+      error: 'rate_limit',
+      isApiErrorMessage: true,
+      apiErrorStatus: 429,
+      message: {
+        model: '<synthetic>',
+        role: 'assistant',
+        stop_reason: 'stop_sequence',
+        content: [{ type: 'text', text: "You've hit your session limit · resets 8am (Asia/Seoul)" }],
+      },
+    }),
+    // no turn_duration completion marker
+  ].join(''));
+
+  try {
     await assert.rejects(
       () => waitForClaudeCodeTurnResult({
         sessionId,
@@ -289,18 +352,10 @@ test('fails closed on Claude Code API error assistant without publishing it as i
         timeoutMs: 10_000,
         initialOffset: 0,
         knownLogPath: logPath,
-        isBackendAlive: async () => true,
-        onIntermediateText: (text) => {
-          intermediateTexts.push(text);
-        },
+        isBackendAlive: async () => false,
       }),
-      (error) =>
-        error instanceof OpenPError &&
-        error.exitCode === EXIT_CODES.backendExited &&
-        error.message.includes('Claude Code API error for turn turn-1') &&
-        error.message.includes('status 401'),
+      (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.backendExited,
     );
-    assert.deepEqual(intermediateTexts, ['starting generation']);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

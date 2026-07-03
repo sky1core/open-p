@@ -68,6 +68,9 @@ export interface WorkerTurnResult {
   readonly requestId?: string | null;
   readonly assistantEvents?: readonly import('./types.js').AssistantEventSnapshot[];
   readonly warnings?: readonly TurnResultWarning[];
+  // Mirrors TurnResult.interruptedExitCode: present only for a provider-error interruption whose
+  // preserved content is emitted before the worker exits with this non-zero code.
+  readonly interruptedExitCode?: number;
   readonly sessionId: string;
   readonly diagnostics: WorkerTurnDiagnostics;
 }

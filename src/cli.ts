@@ -285,6 +285,10 @@ async function main(argv: readonly string[]): Promise<number> {
     if (!resultSessionId) {
       throw new OpenPError('backend did not return a session id', EXIT_CODES.protocolViolation);
     }
+    // Third emit path: a provider-error interruption returns a real (partial) result that is emitted like
+    // a success record, but the process then exits with the interruption's non-zero code instead of 0.
+    // On normal turns interruptedExitCode is undefined and finalExitCode stays success — path unchanged.
+    const finalExitCode = result.interruptedExitCode ?? EXIT_CODES.success;
     let successOutput = '';
     let verboseWarnings: readonly OutputWarning[] = [];
     if (options.outputFormat === 'stream-json' && options.streaming) {
@@ -325,13 +329,13 @@ async function main(argv: readonly string[]): Promise<number> {
       });
       writeStdout(successOutput, eventLog, safeStdio);
       eventLog?.writeTerminal({
-        status: 'succeeded',
-        exitCode: EXIT_CODES.success,
+        status: statusFromExitCode(finalExitCode),
+        exitCode: finalExitCode,
         reasonCode: null,
-        message: null,
+        message: interruptedTerminalMessage(result, finalExitCode),
         endedAt: new Date().toISOString(),
       });
-      return EXIT_CODES.success;
+      return finalExitCode;
     }
     successOutput = formatTurnResult(result, {
       outputFormat: options.outputFormat,
@@ -352,13 +356,13 @@ async function main(argv: readonly string[]): Promise<number> {
     });
     writeStdout(successOutput, eventLog, safeStdio);
     eventLog?.writeTerminal({
-      status: 'succeeded',
-      exitCode: EXIT_CODES.success,
+      status: statusFromExitCode(finalExitCode),
+      exitCode: finalExitCode,
       reasonCode: null,
-      message: null,
+      message: interruptedTerminalMessage(result, finalExitCode),
       endedAt: new Date().toISOString(),
     });
-    return EXIT_CODES.success;
+    return finalExitCode;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const exitCode = toExitCode(error);
@@ -528,6 +532,15 @@ function installRunEventLogUncaughtExceptionHandler(eventLog: RunEventLog): () =
   return () => {
     process.removeListener('uncaughtException', handler);
   };
+}
+
+// Terminal record message for the interrupted (non-zero) emit path. Reuses the provider-error warning
+// text already attached to the result so the event log records why the turn exited non-zero.
+function interruptedTerminalMessage(result: TurnResult, finalExitCode: number): string | null {
+  if (finalExitCode === EXIT_CODES.success) {
+    return null;
+  }
+  return result.warnings?.find((warning) => warning.code === 'provider_error_interrupted')?.message ?? null;
 }
 
 function verboseWarningsForResult(

@@ -100,6 +100,7 @@ async function runStreamJsonWorkerLinesWithLock(input: {
   let primaryError: unknown = null;
   let cleanupError: unknown = null;
   let emittedResultRecord = false;
+  let interruptedExitCode: number | null = null;
 
   try {
     for await (const line of input.lines) {
@@ -247,6 +248,13 @@ async function runStreamJsonWorkerLinesWithLock(input: {
       await saveStreamWorkerSessionState(input, stateStore, existingState, publicTurnId, result.sessionId);
       input.write(successOutput);
       emittedResultRecord = true;
+      // Third emit path: the result record is emitted like a success, then the worker stops and exits
+      // with the interruption's non-zero code. A provider error interrupted the session, so further
+      // queued user events are not run — the caller resumes the session instead of resubmitting.
+      if (result.interruptedExitCode !== undefined) {
+        interruptedExitCode = result.interruptedExitCode;
+        break;
+      }
       turnIndex += 1;
     }
   } catch (error) {
@@ -279,6 +287,9 @@ async function runStreamJsonWorkerLinesWithLock(input: {
   }
   if (!sawUserEvent) {
     throw new OpenPError('--input-format stream-json requires at least one user event', EXIT_CODES.usage);
+  }
+  if (interruptedExitCode !== null) {
+    return interruptedExitCode;
   }
   return EXIT_CODES.success;
 }

@@ -48,6 +48,12 @@ export interface TurnResult {
   readonly sessionId?: string | null;
   readonly assistantEvents?: readonly AssistantEventSnapshot[];
   readonly warnings?: readonly TurnResultWarning[];
+  // Set only when a provider error (e.g. rate limit) interrupted the turn after the backend had already
+  // completed some content (answer text and/or tool_use/tool_result with real side effects) and emitted
+  // its completion marker. The preserved content in this result MUST still be emitted as a normal result
+  // record, but the process MUST then exit with this non-zero code instead of success. Absent (undefined)
+  // on every normal successful turn, so the success path is unchanged.
+  readonly interruptedExitCode?: number;
   readonly diagnostics: TurnDiagnostics;
 }
 

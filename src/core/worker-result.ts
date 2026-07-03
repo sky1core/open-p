@@ -30,6 +30,7 @@ export function toWorkerTurnResult(
     ...(result.requestId ? { requestId: result.requestId } : {}),
     ...(result.assistantEvents ? { assistantEvents: result.assistantEvents } : {}),
     ...(result.warnings && result.warnings.length > 0 ? { warnings: result.warnings } : {}),
+    ...(result.interruptedExitCode !== undefined ? { interruptedExitCode: result.interruptedExitCode } : {}),
     sessionId,
     diagnostics: {
       numTurns: options.numTurns ?? null,

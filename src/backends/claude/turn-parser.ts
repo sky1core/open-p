@@ -4,6 +4,7 @@ import type {
   BackendUsage,
   TurnDiagnostics,
   TurnResult,
+  TurnResultWarning,
 } from '../../core/types.js';
 import { ARTIFACT_REJECTION_REASONS, EXIT_CODES, OpenPError } from '../../core/errors.js';
 import { validateStructuredOutput } from '../../core/json-schema.js';
@@ -33,10 +34,18 @@ interface ReasoningContentState {
   lastReasoningContentBlockCount: number;
 }
 
+interface ProviderErrorInterruption {
+  readonly apiErrorStatus: number | null;
+  readonly errorText: string | null;
+  readonly summary: string;
+}
+
 interface ParserState {
   inScope: boolean;
   resultText: string | null;
   completed: boolean;
+  interruption: ProviderErrorInterruption | null;
+  sawToolResult: boolean;
   toolsUsed: string[];
   usage: BackendUsage;
   rawUsage: Record<string, unknown> | null;
@@ -111,6 +120,8 @@ export function parseClaudeCodeJsonlTurn(
     inScope: true,
     resultText: null,
     completed: false,
+    interruption: null,
+    sawToolResult: false,
     toolsUsed: [],
     usage: EMPTY_USAGE,
     rawUsage: null,
@@ -160,26 +171,62 @@ export function parseClaudeCodeJsonlTurn(
       ARTIFACT_REJECTION_REASONS.missingTurnBoundary,
     );
   }
-  if (!state.completed || state.resultText === null) {
+  // Only the completion marker (turn_duration) makes a turn eligible for a result. A provider error
+  // without a completion marker leaves `completed` false, so the wait loop keeps its fail-closed
+  // behavior (backend-exit / timeout fast-fail); partial preservation happens only when the backend
+  // itself marked the turn complete.
+  if (!state.completed) {
     return null;
   }
-  if (state.resultText.trim().length === 0) {
-    throw new OpenPError(
-      `empty result content for turn ${turnId}`,
-      EXIT_CODES.protocolViolation,
-      ARTIFACT_REJECTION_REASONS.unsupportedArtifactShape,
-    );
+
+  // A provider error (rate limit etc.) can interrupt a turn AFTER the backend closed some sub-turns
+  // (assistant text, tool_use/tool_result with real side effects) and still emitted turn_duration. When
+  // that happens the already-completed content is preserved and returned with an interruption signal
+  // instead of being discarded.
+  const providerError = state.interruption;
+  const hasPreservableToolArtifacts = state.toolsUsed.length > 0 || state.sawToolResult;
+
+  if (state.resultText === null || state.resultText.trim().length === 0) {
+    if (providerError && hasPreservableToolArtifacts) {
+      // Empty answer text but real tool side effects: emit an empty-answer result so the tool_use /
+      // tool_result records (already in assistantEvents) survive the interruption.
+      state.resultText = state.resultText ?? '';
+    } else if (providerError) {
+      // Interrupted with nothing to preserve (no answer, no tool artifacts): keep the pre-existing
+      // fail-closed behavior and message shape.
+      throw new OpenPError(
+        `Claude Code API error for turn ${turnId}: ${providerError.summary}`,
+        EXIT_CODES.backendExited,
+      );
+    } else if (state.resultText === null) {
+      return null;
+    } else {
+      throw new OpenPError(
+        `empty result content for turn ${turnId}`,
+        EXIT_CODES.protocolViolation,
+        ARTIFACT_REJECTION_REASONS.unsupportedArtifactShape,
+      );
+    }
   }
+
+  const resultText = state.resultText;
+  // A provider-error interruption leaves the answer text partial, so it is not valid structured output.
+  // Running the JSON fallback on it would throw (exit 40) and discard the very content the interruption
+  // path is preserving, replacing the real cause (the provider error) with a bogus parse failure. Skip
+  // the fallback on interruption: structuredOutput stays undefined, which is correct for an incomplete
+  // turn. A fully captured StructuredOutput tool block (state.structuredOutput defined) is still kept.
   const structuredOutput = state.structuredOutput !== undefined
     ? state.structuredOutput
-    : (options.structuredOutputRequested ? parseStructuredOutputFallback(state.resultText, turnId) : undefined);
+    : (options.structuredOutputRequested && !providerError && resultText.trim().length > 0
+        ? parseStructuredOutputFallback(resultText, turnId)
+        : undefined);
   if (structuredOutput !== undefined && options.jsonSchema) {
     validateStructuredOutput(structuredOutput, options.jsonSchema, turnId);
   }
 
   const diagnostics: TurnDiagnostics = {
     durationMs: state.durationMs,
-    stopReason: state.stopReason,
+    stopReason: providerError ? 'provider_error' : state.stopReason,
     toolsUsed: state.toolsUsed,
     usage: state.usage,
     ...(state.lastSubturnUsage && hasUsageSnapshot(state.lastSubturnUsage) ? { lastSubturnUsage: state.lastSubturnUsage } : {}),
@@ -187,15 +234,46 @@ export function parseClaudeCodeJsonlTurn(
     rawEventCount: state.rawEventCount,
   };
 
+  const warnings = providerError ? [buildProviderErrorInterruptedWarning(providerError)] : null;
+
   return {
     turnId,
-    text: state.resultText,
+    text: resultText,
     reasoningContent: buildReasoningContent(state),
     ...(structuredOutput !== undefined ? { structuredOutput } : {}),
     ...(state.requestId ? { requestId: state.requestId } : {}),
     ...(state.sessionId ? { sessionId: state.sessionId } : {}),
     ...(state.assistantEvents.length > 0 ? { assistantEvents: state.assistantEvents } : {}),
+    ...(warnings ? { warnings } : {}),
+    ...(providerError ? { interruptedExitCode: EXIT_CODES.backendExited } : {}),
     diagnostics,
+  };
+}
+
+function recordProviderErrorInterruption(state: ParserState, event: JsonObject): void {
+  const apiErrorStatus = typeof event.apiErrorStatus === 'number' ? event.apiErrorStatus : null;
+  const textBlocks = assistantTextBlocks(event);
+  const errorText = textBlocks.length > 0 ? textBlocks.join('\n\n') : null;
+  state.interruption = {
+    apiErrorStatus,
+    errorText,
+    summary: claudeCodeApiErrorMessage(event),
+  };
+}
+
+// The reset time in a rate-limit notice ("resets 8am (Asia/Seoul)") exists only inside the human-readable
+// notice text, so it is passed through verbatim in `message` and never fabricated into a structured field.
+function buildProviderErrorInterruptedWarning(interruption: ProviderErrorInterruption): TurnResultWarning {
+  const statusPart = interruption.apiErrorStatus !== null ? ` (status ${interruption.apiErrorStatus})` : '';
+  const noticePart = interruption.errorText ? `: ${interruption.errorText}` : '';
+  return {
+    severity: 'warning',
+    code: 'provider_error_interrupted',
+    message:
+      `The backend reported a provider error${statusPart} before the turn finished${noticePart}. ` +
+      'The turn did not complete; only the already-completed answer and tool activity were preserved. ' +
+      'Continuing means resuming the existing backend session, not resubmitting the same prompt — ' +
+      're-sending the same prompt risks duplicating side effects that already ran.',
   };
 }
 
@@ -380,6 +458,8 @@ function consumeEvent(state: ParserState, event: JsonObject, turnId: string): vo
     }
     state.resultText = null;
     state.completed = false;
+    state.interruption = null;
+    state.sawToolResult = false;
     state.toolsUsed = [];
     state.usage = EMPTY_USAGE;
     state.rawUsage = null;
@@ -450,10 +530,12 @@ function consumeEvent(state: ParserState, event: JsonObject, turnId: string): vo
   }
 
   if (isClaudeCodeApiErrorAssistant(event)) {
-    throw new OpenPError(
-      `Claude Code API error for turn ${turnId}: ${claudeCodeApiErrorMessage(event)}`,
-      EXIT_CODES.backendExited,
-    );
+    // A provider error (e.g. rate limit) surfaces as a synthetic assistant event. Do not throw here and
+    // do not promote its notice text into the answer: record the interruption reason and skip the event
+    // (the streaming path in extractClaudeCodeIntermediateContent skips it the same way). Whether any
+    // already-completed content is preserved is decided at completion time in parseClaudeCodeJsonlTurn.
+    recordProviderErrorInterruption(state, event);
+    return;
   }
 
   if (isSyntheticNoResponseAssistant(event)) {
@@ -482,6 +564,7 @@ function consumeEvent(state: ParserState, event: JsonObject, turnId: string): vo
 function consumeUserToolResultEvent(state: ParserState, event: JsonObject): void {
   const snapshot = buildUserToolResultSnapshot(event);
   if (snapshot) {
+    state.sawToolResult = true;
     state.assistantEvents.push(snapshot);
   }
 }
