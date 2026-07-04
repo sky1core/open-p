@@ -174,6 +174,67 @@ test('formats result metadata with derived last subturn context token usage', ()
   });
 });
 
+test('treats null or missing cache creation tokens as zero context contribution', () => {
+  const missingCacheCreation = parseJsonOpenP(formatTurnResult({
+    ...RESULT,
+    structuredOutput: undefined,
+    diagnostics: {
+      ...RESULT.diagnostics,
+      usage: {
+        inputTokens: 100,
+        cacheReadInputTokens: 200,
+        outputTokens: 30,
+      },
+      lastSubturnUsage: {
+        inputTokens: 7,
+        cacheReadInputTokens: 3,
+        outputTokens: 2,
+      },
+    },
+  }, {
+    outputFormat: 'json',
+    backendSessionId: '11111111-1111-4111-8111-111111111111',
+    backend: 'codex',
+  }));
+  const nullCacheCreation = parseJsonOpenP(formatTurnResult({
+    ...RESULT,
+    structuredOutput: undefined,
+    diagnostics: {
+      ...RESULT.diagnostics,
+      usage: {
+        inputTokens: 100,
+        cacheReadInputTokens: 200,
+        cacheCreationInputTokens: null,
+        outputTokens: 30,
+      },
+      lastSubturnUsage: {
+        inputTokens: 7,
+        cacheReadInputTokens: 3,
+        cacheCreationInputTokens: null,
+        outputTokens: 2,
+      },
+    },
+  }, {
+    outputFormat: 'json',
+    backendSessionId: '11111111-1111-4111-8111-111111111111',
+    backend: 'claude',
+  }));
+
+  assert.equal(metadata(missingCacheCreation).lastSubturnContextTokens, 10);
+  assert.deepEqual(metadata(missingCacheCreation).lastSubturnUsage, {
+    inputTokens: 7,
+    outputTokens: 2,
+    cacheReadInputTokens: 3,
+  });
+  assert.equal(metadata(nullCacheCreation).lastSubturnContextTokens, 10);
+  assert.deepEqual(metadata(nullCacheCreation).lastSubturnUsage, {
+    inputTokens: 7,
+    outputTokens: 2,
+    cacheReadInputTokens: 3,
+    cacheCreationInputTokens: null,
+  });
+});
+
 test('does not derive last subturn context token usage from aggregate-only usage', () => {
   const openp = parseJsonOpenP(formatTurnResult({
     ...RESULT,

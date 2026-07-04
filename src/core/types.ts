@@ -7,6 +7,7 @@ export interface TurnRequest {
 export interface BackendUsage {
   readonly inputTokens: number | null;
   readonly cacheReadInputTokens: number | null;
+  readonly cacheCreationInputTokens?: number | null;
   readonly outputTokens: number | null;
 }
 

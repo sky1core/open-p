@@ -80,13 +80,17 @@ const EMPTY_USAGE: BackendUsage = {
 };
 
 function hasUsageSnapshot(usage: BackendUsage): boolean {
-  return usage.inputTokens !== null || usage.cacheReadInputTokens !== null || usage.outputTokens !== null;
+  return usage.inputTokens !== null ||
+    usage.cacheReadInputTokens !== null ||
+    typeof usage.cacheCreationInputTokens === 'number' ||
+    usage.outputTokens !== null;
 }
 
 function backendUsageFromRawUsage(usage: JsonObject): BackendUsage {
   return {
     inputTokens: numberOrNull(usage.input_tokens),
     cacheReadInputTokens: numberOrNull(usage.cache_read_input_tokens),
+    cacheCreationInputTokens: numberOrNull(usage.cache_creation_input_tokens),
     outputTokens: numberOrNull(usage.output_tokens),
   };
 }

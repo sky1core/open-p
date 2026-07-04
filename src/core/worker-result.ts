@@ -17,10 +17,11 @@ export function toWorkerTurnResult(
 ): WorkerTurnResult {
   const inputTokens = result.diagnostics.usage.inputTokens;
   const cacheReadInputTokens = result.diagnostics.usage.cacheReadInputTokens;
+  const cacheCreationInputTokens = result.diagnostics.usage.cacheCreationInputTokens;
   const lastSubturnUsage = result.diagnostics.lastSubturnUsage ?? null;
   const lastSubturnContextTokens = result.diagnostics.lastSubturnContextTokens ??
     (lastSubturnUsage
-      ? addNullable(lastSubturnUsage.inputTokens, lastSubturnUsage.cacheReadInputTokens)
+      ? contextTokensFromUsage(lastSubturnUsage)
       : null);
   const sessionId = result.sessionId ?? fallbackSessionId;
   return {
@@ -37,6 +38,7 @@ export function toWorkerTurnResult(
       inputTokens,
       outputTokens: result.diagnostics.usage.outputTokens,
       cacheReadInputTokens,
+      ...(cacheCreationInputTokens !== undefined ? { cacheCreationInputTokens } : {}),
       ...(result.diagnostics.rawUsage ? { rawUsage: result.diagnostics.rawUsage } : {}),
       ...(result.diagnostics.model ? { model: result.diagnostics.model } : {}),
       contextWindow: result.diagnostics.contextWindow ?? options.contextWindow ?? null,
@@ -52,9 +54,16 @@ export function toWorkerTurnResult(
   };
 }
 
-function addNullable(left: number | null, right: number | null): number | null {
-  if (left === null || right === null) {
+function contextTokensFromUsage(usage: {
+  readonly inputTokens: number | null;
+  readonly cacheReadInputTokens: number | null;
+  readonly cacheCreationInputTokens?: number | null;
+}): number | null {
+  if (usage.inputTokens === null || usage.cacheReadInputTokens === null) {
     return null;
   }
-  return left + right;
+  // Only Claude reports cache creation tokens; other backends omit/null this field and contribute 0.
+  const cacheCreationInputTokens =
+    typeof usage.cacheCreationInputTokens === 'number' ? usage.cacheCreationInputTokens : 0;
+  return usage.inputTokens + usage.cacheReadInputTokens + cacheCreationInputTokens;
 }

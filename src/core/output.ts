@@ -36,6 +36,13 @@ export interface StreamingMessageState {
   previousReasoningText: string;
 }
 
+interface OutputUsage {
+  readonly inputTokens: number | null;
+  readonly outputTokens: number | null;
+  readonly cacheReadInputTokens: number | null;
+  readonly cacheCreationInputTokens?: number | null;
+}
+
 const OPENP_NATIVE_VERSION = 1;
 
 export function formatTurnResult(result: TurnResult, options: OutputOptions): string {
@@ -153,6 +160,7 @@ export function formatTurnResult(result: TurnResult, options: OutputOptions): st
       inputTokens: assistantEventUsage.inputTokens,
       outputTokens: assistantEventUsage.outputTokens,
       cacheReadInputTokens: assistantEventUsage.cacheReadInputTokens,
+      cacheCreationInputTokens: assistantEventUsage.cacheCreationInputTokens,
     },
   });
   const nestedAssistantOpenPEvents = buildNestedAssistantOpenPEvents({
@@ -193,6 +201,7 @@ export function formatTurnResult(result: TurnResult, options: OutputOptions): st
         inputTokens: resultUsage.inputTokens,
         outputTokens: resultUsage.outputTokens,
         cacheReadInputTokens: resultUsage.cacheReadInputTokens,
+        cacheCreationInputTokens: resultUsage.cacheCreationInputTokens,
       },
       rawUsage: result.diagnostics.rawUsage ?? null,
       contextWindow: effectiveContextWindow,
@@ -225,6 +234,7 @@ export function formatTurnResult(result: TurnResult, options: OutputOptions): st
         inputTokens: resultUsage.inputTokens,
         outputTokens: resultUsage.outputTokens,
         cacheReadInputTokens: resultUsage.cacheReadInputTokens,
+        cacheCreationInputTokens: resultUsage.cacheCreationInputTokens,
       },
       rawUsage: result.diagnostics.rawUsage ?? null,
       contextWindow: effectiveContextWindow,
@@ -370,6 +380,7 @@ export function formatWorkerTurnResult(result: WorkerTurnResult, event: {
     inputTokens: result.diagnostics.inputTokens,
     outputTokens: result.diagnostics.outputTokens,
     cacheReadInputTokens: result.diagnostics.cacheReadInputTokens,
+    cacheCreationInputTokens: result.diagnostics.cacheCreationInputTokens,
   };
   const warnings = mergeWarnings(result.warnings, event.warnings);
   const effectiveModel = result.diagnostics.model ?? event.model ?? null;
@@ -1470,11 +1481,7 @@ function addOpenPMetadata(
     readonly messageId?: string | null;
     readonly model?: string | null;
     readonly stopReason?: string | null;
-    readonly usage?: {
-      readonly inputTokens: number | null;
-      readonly outputTokens: number | null;
-      readonly cacheReadInputTokens: number | null;
-    };
+    readonly usage?: OutputUsage;
   },
 ): Record<string, unknown> {
   const existing = openp.metadata && typeof openp.metadata === 'object' && !Array.isArray(openp.metadata)
@@ -1502,6 +1509,7 @@ function normalizeOpenPUsage(value: unknown): Record<string, unknown> | undefine
     inputTokens: numberOrNull(usage.input_tokens),
     outputTokens: numberOrNull(usage.output_tokens),
     cacheReadInputTokens: numberOrNull(usage.cache_read_input_tokens),
+    cacheCreationInputTokens: numberOrNull(usage.cache_creation_input_tokens),
   });
   return Object.keys(normalized).length > 0 ? normalized : undefined;
 }
@@ -1593,11 +1601,7 @@ function buildOpenPTurnResult(event: {
   readonly warnings?: readonly OutputWarning[];
   readonly assistantEventUsage?: BackendUsage | null;
   readonly lastSubturnUsage?: BackendUsage | null;
-  readonly usage: {
-    readonly inputTokens: number | null;
-    readonly outputTokens: number | null;
-    readonly cacheReadInputTokens: number | null;
-  };
+  readonly usage: OutputUsage;
   readonly status: 'success';
 }): Record<string, unknown> {
   const assistantEvents = event.assistantOpenPEvents ?? buildOpenPAssistantEventsFromSnapshots(
@@ -1715,23 +1719,23 @@ function reasoningDuplicateKey(text: string): string {
   return text.replace(/\s+/g, ' ').trim();
 }
 
-function buildOpenPUsage(usage: {
-  readonly inputTokens: number | null;
-  readonly outputTokens: number | null;
-  readonly cacheReadInputTokens: number | null;
-}): Record<string, number | null> {
-  return {
+function buildOpenPUsage(usage: OutputUsage): Record<string, number | null> {
+  return compactRecord({
     inputTokens: usage.inputTokens,
     outputTokens: usage.outputTokens,
     cacheReadInputTokens: usage.cacheReadInputTokens,
-  };
+    cacheCreationInputTokens: usage.cacheCreationInputTokens,
+  }) as Record<string, number | null>;
 }
 
 function contextTokensFromUsage(usage: BackendUsage): number | null {
   if (usage.inputTokens === null || usage.cacheReadInputTokens === null) {
     return null;
   }
-  return usage.inputTokens + usage.cacheReadInputTokens;
+  // Only Claude reports cache creation tokens; other backends omit/null this field and contribute 0.
+  const cacheCreationInputTokens =
+    typeof usage.cacheCreationInputTokens === 'number' ? usage.cacheCreationInputTokens : 0;
+  return usage.inputTokens + usage.cacheReadInputTokens + cacheCreationInputTokens;
 }
 
 function compactRecord(record: Record<string, unknown>): Record<string, unknown> {
@@ -2040,11 +2044,7 @@ function buildResultTextAssistantEventRecords(event: {
   readonly requestId?: string | null;
   readonly model?: string | null;
   readonly stopReason?: string | null;
-  readonly usage: {
-    readonly inputTokens: number | null;
-    readonly outputTokens: number | null;
-    readonly cacheReadInputTokens: number | null;
-  };
+  readonly usage: OutputUsage;
 }): Record<string, unknown>[] {
   const output: Record<string, unknown>[] = [];
   if (event.reasoningText && event.reasoningText.length > 0) {
@@ -2096,11 +2096,7 @@ function buildStructuredOutputAssistantEventRecord(event: {
   readonly requestId?: string | null;
   readonly model?: string | null;
   readonly stopReason?: string | null;
-  readonly usage: {
-    readonly inputTokens: number | null;
-    readonly outputTokens: number | null;
-    readonly cacheReadInputTokens: number | null;
-  };
+  readonly usage: OutputUsage;
 }): Record<string, unknown> {
   return buildAssistantTextEvent({
     turnId: event.turnId,
@@ -2158,11 +2154,7 @@ function buildTerminalAssistantEventRecords(event: {
   readonly requestId?: string | null;
   readonly model?: string | null;
   readonly stopReason?: string | null;
-  readonly usage: {
-    readonly inputTokens: number | null;
-    readonly outputTokens: number | null;
-    readonly cacheReadInputTokens: number | null;
-  };
+  readonly usage: OutputUsage;
 }): Record<string, unknown>[] {
   if (event.existingAssistantEvents.length > 0) {
     const output = [...event.existingAssistantEvents];
@@ -2273,11 +2265,12 @@ function hasUsage(message: Record<string, unknown>): boolean {
 }
 
 function buildSnakeUsage(usage: BackendUsage): Record<string, unknown> {
-  return {
+  return compactRecord({
     input_tokens: usage.inputTokens,
     cache_read_input_tokens: usage.cacheReadInputTokens,
+    cache_creation_input_tokens: usage.cacheCreationInputTokens,
     output_tokens: usage.outputTokens,
-  };
+  });
 }
 
 function normalizePublicAssistantMessage(message: Record<string, unknown>): Record<string, unknown> {
@@ -2800,11 +2793,7 @@ function buildAssistantTextEvent(event: {
   readonly stopReason: string | null;
   readonly metadataStopReason?: string | null;
   readonly model?: string | null;
-  readonly usage?: {
-    readonly inputTokens: number | null;
-    readonly outputTokens: number | null;
-    readonly cacheReadInputTokens: number | null;
-  };
+  readonly usage?: OutputUsage;
   readonly openp?: Record<string, unknown> | null;
 }): Record<string, unknown> {
   const content: Record<string, unknown>[] = [];
@@ -2902,11 +2891,7 @@ function buildResultEvent(event: {
   readonly numTurns: number | null;
   readonly totalCostUsd: number | null;
   readonly stopReason: string | null;
-  readonly usage: {
-    readonly inputTokens: number | null;
-    readonly outputTokens: number | null;
-    readonly cacheReadInputTokens: number | null;
-  };
+  readonly usage: OutputUsage;
   readonly rawUsage?: Record<string, unknown> | null;
   readonly contextWindow: number | null;
   readonly lastSubturnContextTokens: number | null;
@@ -2947,11 +2932,7 @@ function buildResultEvent(event: {
 }
 
 function buildPublicUsage(
-  usage: {
-    readonly inputTokens: number | null;
-    readonly outputTokens: number | null;
-    readonly cacheReadInputTokens: number | null;
-  },
+  usage: OutputUsage,
   rawUsage: Record<string, unknown> | null | undefined,
 ): Record<string, unknown> {
   const publicUsage = rawUsage ? { ...rawUsage } : {};
@@ -2964,17 +2945,19 @@ function buildPublicUsage(
   if (!Object.prototype.hasOwnProperty.call(publicUsage, 'cache_read_input_tokens')) {
     publicUsage.cache_read_input_tokens = usage.cacheReadInputTokens;
   }
+  if (
+    usage.cacheCreationInputTokens !== undefined &&
+    !Object.prototype.hasOwnProperty.call(publicUsage, 'cache_creation_input_tokens')
+  ) {
+    publicUsage.cache_creation_input_tokens = usage.cacheCreationInputTokens;
+  }
   return publicUsage;
 }
 
 function buildModelUsage(
   model: string | null,
   contextWindow: number | null,
-  usage: {
-    readonly inputTokens: number | null;
-    readonly outputTokens: number | null;
-    readonly cacheReadInputTokens: number | null;
-  },
+  usage: OutputUsage,
   totalCostUsd: number | null,
 ): Record<string, Record<string, number>> | undefined {
   if (!model || contextWindow === null) {
@@ -2991,6 +2974,9 @@ function buildModelUsage(
   }
   if (usage.cacheReadInputTokens !== null) {
     modelUsage.cacheReadInputTokens = usage.cacheReadInputTokens;
+  }
+  if (usage.cacheCreationInputTokens !== undefined && usage.cacheCreationInputTokens !== null) {
+    modelUsage.cacheCreationInputTokens = usage.cacheCreationInputTokens;
   }
   if (totalCostUsd !== null) {
     modelUsage.costUSD = totalCostUsd;

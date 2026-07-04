@@ -79,6 +79,41 @@ test('maps last subturn context usage from explicit last subturn usage', () => {
   assert.equal(workerResult.diagnostics.lastSubturnContextTokens, 15);
 });
 
+test('maps cache creation tokens through worker diagnostics and context usage', () => {
+  const result: TurnResult = {
+    turnId: 'turn-1',
+    text: 'hello',
+    diagnostics: {
+      durationMs: 123,
+      toolsUsed: [],
+      usage: {
+        inputTokens: 2,
+        cacheReadInputTokens: 559_407,
+        cacheCreationInputTokens: 6_407,
+        outputTokens: 1,
+      },
+      lastSubturnUsage: {
+        inputTokens: 2,
+        cacheReadInputTokens: 559_407,
+        cacheCreationInputTokens: 6_407,
+        outputTokens: 1,
+      },
+      rawEventCount: 4,
+    },
+  };
+
+  const workerResult = toWorkerTurnResult(result, 'session-1');
+
+  assert.equal(workerResult.diagnostics.cacheCreationInputTokens, 6_407);
+  assert.deepEqual(workerResult.diagnostics.lastSubturnUsage, {
+    inputTokens: 2,
+    cacheReadInputTokens: 559_407,
+    cacheCreationInputTokens: 6_407,
+    outputTokens: 1,
+  });
+  assert.equal(workerResult.diagnostics.lastSubturnContextTokens, 565_816);
+});
+
 test('does not fabricate context usage when token fields are missing', () => {
   const result: TurnResult = {
     turnId: 'turn-1',

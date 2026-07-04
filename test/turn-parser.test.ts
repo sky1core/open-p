@@ -9,6 +9,7 @@ import {
   rememberLocalCommandTranscriptPromptId,
 } from '../src/backends/claude/turn-boundary-predicates.js';
 import { EXIT_CODES, OpenPError } from '../src/core/errors.js';
+import { formatTurnResult } from '../src/core/output.js';
 
 const TURN_ID = 'turn-1';
 
@@ -77,6 +78,7 @@ test('parses a raw Claude Code turn from appended JSONL events', () => {
       usage: {
         inputTokens: 11,
         cacheReadInputTokens: 21,
+        cacheCreationInputTokens: null,
         outputTokens: 6,
       },
       rawUsage: {
@@ -111,11 +113,13 @@ test('uses final Claude usage iteration for last subturn usage', () => {
   assert.deepEqual(result?.diagnostics.usage, {
     inputTokens: 1,
     cacheReadInputTokens: 10,
+    cacheCreationInputTokens: null,
     outputTokens: 1,
   });
   assert.deepEqual(result?.diagnostics.lastSubturnUsage, {
     inputTokens: 1,
     cacheReadInputTokens: 10,
+    cacheCreationInputTokens: null,
     outputTokens: 125,
   });
   assert.deepEqual(result?.diagnostics.rawUsage, {
@@ -130,6 +134,60 @@ test('uses final Claude usage iteration for last subturn usage', () => {
         output_tokens: 125,
       },
     ],
+  });
+});
+
+test('includes Claude cache creation tokens in derived last subturn context usage', () => {
+  const result = parseClaudeCodeJsonlTurn([
+    userLine('hello'),
+    assistantLine([{ type: 'text', text: 'ok' }], {
+      input_tokens: 2,
+      cache_read_input_tokens: 559_407,
+      cache_creation_input_tokens: 6_407,
+      output_tokens: 1,
+      iterations: [
+        {
+          type: 'message',
+          input_tokens: 2,
+          cache_read_input_tokens: 559_407,
+          cache_creation_input_tokens: 6_407,
+          output_tokens: 1,
+        },
+      ],
+    }, 'end_turn'),
+    durationLine(10),
+  ], TURN_ID);
+
+  assert.deepEqual(result?.diagnostics.usage, {
+    inputTokens: 2,
+    cacheReadInputTokens: 559_407,
+    cacheCreationInputTokens: 6_407,
+    outputTokens: 1,
+  });
+  assert.deepEqual(result?.diagnostics.lastSubturnUsage, {
+    inputTokens: 2,
+    cacheReadInputTokens: 559_407,
+    cacheCreationInputTokens: 6_407,
+    outputTokens: 1,
+  });
+
+  const openp = parseOpenP(formatTurnResult(result!, {
+    outputFormat: 'json',
+    backendSessionId: '11111111-1111-4111-8111-111111111111',
+    backend: 'claude',
+  }));
+  assert.equal(openp.metadata.lastSubturnContextTokens, 565_816);
+  assert.deepEqual(openp.metadata.lastSubturnUsage, {
+    inputTokens: 2,
+    outputTokens: 1,
+    cacheReadInputTokens: 559_407,
+    cacheCreationInputTokens: 6_407,
+  });
+  assert.deepEqual(openp.metadata.usage, {
+    inputTokens: 2,
+    outputTokens: 1,
+    cacheReadInputTokens: 559_407,
+    cacheCreationInputTokens: 6_407,
   });
 });
 
@@ -159,6 +217,7 @@ test('does not reuse an earlier Claude usage iteration when final iteration has 
   assert.deepEqual(result?.diagnostics.usage, {
     inputTokens: 3,
     cacheReadInputTokens: 4,
+    cacheCreationInputTokens: null,
     outputTokens: 5,
   });
   assert.equal(Object.prototype.hasOwnProperty.call(result?.diagnostics ?? {}, 'lastSubturnUsage'), false);
@@ -1003,6 +1062,7 @@ test('parses a redacted live Claude Code JSONL fixture', async () => {
   assert.deepEqual(result?.diagnostics.usage, {
     inputTokens: 6,
     cacheReadInputTokens: 0,
+    cacheCreationInputTokens: 36512,
     outputTokens: 139,
   });
   assert.equal(result?.diagnostics.durationMs, 3107);
@@ -1021,11 +1081,13 @@ test('parses last subturn usage from a redacted Claude Code usage-iterations fix
   assert.deepEqual(result?.diagnostics.usage, {
     inputTokens: 5,
     cacheReadInputTokens: 3000,
+    cacheCreationInputTokens: 1000,
     outputTokens: 500,
   });
   assert.deepEqual(result?.diagnostics.lastSubturnUsage, {
     inputTokens: 1,
     cacheReadInputTokens: 2800,
+    cacheCreationInputTokens: 200,
     outputTokens: 125,
   });
   assert.equal(result?.diagnostics.durationMs, 3000);
@@ -1042,6 +1104,7 @@ test('parses a redacted Claude Code reasoning fixture variant', async () => {
   assert.deepEqual(result?.diagnostics.usage, {
     inputTokens: 8,
     cacheReadInputTokens: 4,
+    cacheCreationInputTokens: null,
     outputTokens: 120,
   });
   assert.equal(result?.diagnostics.durationMs, 2222);
@@ -1405,6 +1468,13 @@ function durationLine(durationMs: number): string {
     subtype: 'turn_duration',
     durationMs,
   });
+}
+
+function parseOpenP(output: string): Record<string, any> {
+  assert.match(output, /\n$/);
+  const event = JSON.parse(output) as Record<string, any>;
+  assert.deepEqual(Object.keys(event), ['openp']);
+  return event.openp;
 }
 
 // Line builders below follow the live Claude Code session-log event shape.

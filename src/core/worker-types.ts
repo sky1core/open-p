@@ -48,6 +48,7 @@ export interface WorkerTurnDiagnostics {
   readonly inputTokens: number | null;
   readonly outputTokens: number | null;
   readonly cacheReadInputTokens: number | null;
+  readonly cacheCreationInputTokens?: number | null;
   readonly rawUsage?: Record<string, unknown> | null;
   readonly model?: string | null;
   readonly contextWindow: number | null;
