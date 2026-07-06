@@ -91,6 +91,107 @@ test('parses a raw Claude Code turn from appended JSONL events', () => {
   });
 });
 
+test('surfaces Claude assistant fallback block as a result warning and actual model', () => {
+  const result = parseClaudeCodeJsonlTurn([
+    userLine('hello'),
+    JSON.stringify({
+      type: 'assistant',
+      requestId: 'req_fallback_start',
+      message: {
+        model: 'claude-opus-4-8',
+        content: [{
+          type: 'fallback',
+          from: { model: 'claude-fable-5' },
+          to: { model: 'claude-opus-4-8' },
+        }],
+        stop_reason: 'tool_use',
+      },
+    }),
+    JSON.stringify({
+      type: 'assistant',
+      requestId: 'req_fallback_done',
+      message: {
+        model: 'claude-opus-4-8',
+        content: [{ type: 'text', text: 'ok' }],
+        stop_reason: 'end_turn',
+        usage: {
+          input_tokens: 1,
+          cache_read_input_tokens: 2,
+          output_tokens: 3,
+        },
+      },
+    }),
+    durationLine(10),
+  ], TURN_ID);
+
+  assert.equal(result?.diagnostics.model, 'claude-opus-4-8');
+  assert.equal(result?.warnings?.length, 1);
+  assert.equal(result?.warnings?.[0]?.code, 'model_refusal_fallback');
+  assert.equal(result?.warnings?.[0]?.severity, 'warning');
+  assert.match(result?.warnings?.[0]?.message ?? '', /claude-fable-5/);
+  assert.match(result?.warnings?.[0]?.message ?? '', /claude-opus-4-8/);
+
+  const openp = parseOpenP(formatTurnResult(result!, {
+    outputFormat: 'json',
+    backendSessionId: '11111111-1111-4111-8111-111111111111',
+    backend: 'claude',
+    model: 'claude-fable-5',
+  }));
+  assert.equal(openp.metadata.model, 'claude-opus-4-8');
+  assert.equal(openp.metadata.warnings[0].code, 'model_refusal_fallback');
+  assert.deepEqual(openp.metadata.messageBlocks[0], {
+    type: 'fallback',
+    from: { model: 'claude-fable-5' },
+    to: { model: 'claude-opus-4-8' },
+  });
+});
+
+test('surfaces Claude system model fallback event as a result warning and actual model', () => {
+  const result = parseClaudeCodeJsonlTurn([
+    userLine('hello'),
+    JSON.stringify({
+      type: 'system',
+      subtype: 'model_refusal_fallback',
+      originalModel: 'claude-fable-5',
+      fallbackModel: 'claude-opus-4-8',
+      apiRefusalCategory: 'safety',
+      trigger: 'model_safety',
+      content: 'fallback notice',
+    }),
+    JSON.stringify({
+      type: 'assistant',
+      requestId: 'req_fallback_done',
+      message: {
+        content: [{ type: 'text', text: 'ok' }],
+        stop_reason: 'end_turn',
+        usage: {
+          input_tokens: 1,
+          cache_read_input_tokens: 2,
+          output_tokens: 3,
+        },
+      },
+    }),
+    durationLine(10),
+  ], TURN_ID);
+
+  assert.equal(result?.diagnostics.model, 'claude-opus-4-8');
+  assert.equal(result?.warnings?.length, 1);
+  assert.equal(result?.warnings?.[0]?.code, 'model_refusal_fallback');
+  assert.equal(result?.warnings?.[0]?.severity, 'warning');
+  assert.match(result?.warnings?.[0]?.message ?? '', /claude-fable-5/);
+  assert.match(result?.warnings?.[0]?.message ?? '', /claude-opus-4-8/);
+
+  const openp = parseOpenP(formatTurnResult(result!, {
+    outputFormat: 'json',
+    backendSessionId: '11111111-1111-4111-8111-111111111111',
+    backend: 'claude',
+    model: 'claude-fable-5',
+  }));
+  assert.equal(openp.metadata.model, 'claude-opus-4-8');
+  assert.equal(openp.metadata.warnings[0].code, 'model_refusal_fallback');
+  assert.equal(Object.prototype.hasOwnProperty.call(openp.metadata, 'messageBlocks'), false);
+});
+
 test('uses final Claude usage iteration for last subturn usage', () => {
   const result = parseClaudeCodeJsonlTurn([
     userLine('hello'),

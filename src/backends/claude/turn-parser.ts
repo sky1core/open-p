@@ -41,6 +41,13 @@ interface ProviderErrorInterruption {
   readonly summary: string;
 }
 
+interface ModelFallbackSignal {
+  readonly fromModel: string | null;
+  readonly toModel: string | null;
+  readonly apiRefusalCategory: string | null;
+  readonly trigger: string | null;
+}
+
 interface ParserState {
   inScope: boolean;
   resultText: string | null;
@@ -69,6 +76,8 @@ interface ParserState {
   activeTextSinceBackgroundStart: boolean;
   requestId: string | null;
   sessionId: string | null;
+  model: string | null;
+  modelFallback: ModelFallbackSignal | null;
   assistantEvents: AssistantEventSnapshot[];
   callerUserTurnCount: number;
   localCommandTranscriptPromptIds: Set<string>;
@@ -149,6 +158,8 @@ export function parseClaudeCodeJsonlTurn(
     activeTextSinceBackgroundStart: false,
     requestId: null,
     sessionId: null,
+    model: null,
+    modelFallback: null,
     assistantEvents: [],
     callerUserTurnCount: 0,
     localCommandTranscriptPromptIds: new Set(options.initialLocalCommandTranscriptPromptIds ?? []),
@@ -236,10 +247,14 @@ export function parseClaudeCodeJsonlTurn(
     usage: state.usage,
     ...(state.lastSubturnUsage && hasUsageSnapshot(state.lastSubturnUsage) ? { lastSubturnUsage: state.lastSubturnUsage } : {}),
     rawUsage: state.rawUsage,
+    ...(state.model ? { model: state.model } : {}),
     rawEventCount: state.rawEventCount,
   };
 
-  const warnings = providerError ? [buildProviderErrorInterruptedWarning(providerError)] : null;
+  const warnings = [
+    ...(providerError ? [buildProviderErrorInterruptedWarning(providerError)] : []),
+    ...(state.modelFallback ? [buildModelFallbackWarning(state.modelFallback)] : []),
+  ];
 
   return {
     turnId,
@@ -249,7 +264,7 @@ export function parseClaudeCodeJsonlTurn(
     ...(state.requestId ? { requestId: state.requestId } : {}),
     ...(state.sessionId ? { sessionId: state.sessionId } : {}),
     ...(state.assistantEvents.length > 0 ? { assistantEvents: state.assistantEvents } : {}),
-    ...(warnings ? { warnings } : {}),
+    ...(warnings.length > 0 ? { warnings } : {}),
     ...(providerError ? { interruptedExitCode: EXIT_CODES.backendExited } : {}),
     diagnostics,
   };
@@ -279,6 +294,23 @@ function buildProviderErrorInterruptedWarning(interruption: ProviderErrorInterru
       'The turn did not complete; only the already-completed answer and tool activity were preserved. ' +
       'Continuing means resuming the existing backend session, not resubmitting the same prompt — ' +
       're-sending the same prompt risks duplicating side effects that already ran.',
+  };
+}
+
+function buildModelFallbackWarning(fallback: ModelFallbackSignal): TurnResultWarning {
+  const fromModel = fallback.fromModel ?? 'the requested model';
+  const toModel = fallback.toModel ?? 'a fallback model';
+  const details = [
+    fallback.apiRefusalCategory ? `category ${fallback.apiRefusalCategory}` : null,
+    fallback.trigger ? `trigger ${fallback.trigger}` : null,
+  ].filter((part): part is string => part !== null).join(', ');
+  return {
+    severity: 'warning',
+    code: 'model_refusal_fallback',
+    message:
+      `Claude Code switched models from ${fromModel} to ${toModel} after the requested model triggered a fallback` +
+      `${details ? ` (${details})` : ''}. ` +
+      'The turn continued on the fallback model; cost and behavior may differ from the requested model.',
   };
 }
 
@@ -491,6 +523,8 @@ function consumeEvent(state: ParserState, event: JsonObject, turnId: string): vo
     state.ambiguousTaskNotificationText = false;
     state.activeTextSinceBackgroundStart = false;
     state.requestId = null;
+    state.model = null;
+    state.modelFallback = null;
     state.assistantEvents = [];
     return;
   }
@@ -553,6 +587,11 @@ function consumeEvent(state: ParserState, event: JsonObject, turnId: string): vo
     return;
   }
 
+  if (event.type === 'system' && event.subtype === 'model_refusal_fallback') {
+    rememberModelFallback(state, modelFallbackFromSystemEvent(event));
+    return;
+  }
+
   if (event.type === 'user' && userEventHasToolResult(event)) {
     consumeUserToolResultEvent(state, event);
     return;
@@ -594,6 +633,52 @@ function consumeUserToolResultEvent(state: ParserState, event: JsonObject): void
   }
 }
 
+function modelFallbackFromSystemEvent(event: JsonObject): ModelFallbackSignal {
+  return {
+    fromModel: stringOrNull(event.originalModel),
+    toModel: stringOrNull(event.fallbackModel),
+    apiRefusalCategory: stringOrNull(event.apiRefusalCategory),
+    trigger: stringOrNull(event.trigger),
+  };
+}
+
+function modelFallbackFromAssistantContent(
+  content: readonly unknown[],
+  observedModel: string | null,
+): ModelFallbackSignal | null {
+  for (const block of content) {
+    const item = asObject(block);
+    if (item?.type !== 'fallback') {
+      continue;
+    }
+    const from = asObject(item.from);
+    const to = asObject(item.to);
+    return {
+      fromModel: stringOrNull(from?.model) ?? stringOrNull(item.originalModel),
+      toModel: stringOrNull(to?.model) ?? stringOrNull(item.fallbackModel) ?? observedModel,
+      apiRefusalCategory: stringOrNull(item.apiRefusalCategory),
+      trigger: stringOrNull(item.trigger),
+    };
+  }
+  return null;
+}
+
+function rememberModelFallback(state: ParserState, fallback: ModelFallbackSignal | null): void {
+  if (!fallback) {
+    return;
+  }
+  const existing = state.modelFallback;
+  state.modelFallback = {
+    fromModel: existing?.fromModel ?? fallback.fromModel,
+    toModel: fallback.toModel ?? existing?.toModel ?? null,
+    apiRefusalCategory: existing?.apiRefusalCategory ?? fallback.apiRefusalCategory,
+    trigger: existing?.trigger ?? fallback.trigger,
+  };
+  if (state.modelFallback.toModel) {
+    state.model = state.modelFallback.toModel;
+  }
+}
+
 function rememberSessionId(state: ParserState, event: JsonObject, turnId: string): void {
   const sessionId = stringOrNull(event.sessionId) ?? stringOrNull(event.session_id);
   if (!sessionId) {
@@ -616,6 +701,10 @@ function consumeAssistantEvent(state: ParserState, event: JsonObject): void {
 
   const message = asObject(event.message);
   const messageId = typeof message?.id === 'string' ? message.id : null;
+  const model = stringOrNull(message?.model);
+  if (model && model !== '<synthetic>') {
+    state.model = model;
+  }
   const stopReason = typeof message?.stop_reason === 'string' ? message.stop_reason : null;
   state.stopReason = stopReason;
   const snapshot = buildAssistantSnapshot(event);
@@ -630,6 +719,7 @@ function consumeAssistantEvent(state: ParserState, event: JsonObject): void {
   }
 
   const content = Array.isArray(message?.content) ? message.content : [];
+  rememberModelFallback(state, modelFallbackFromAssistantContent(content, model));
   const eventTextBlocks: string[] = [];
   const eventReasoningBlocks: string[] = [];
   const eventReasoningContentBlocks: AssistantContentBlock[] = [];
