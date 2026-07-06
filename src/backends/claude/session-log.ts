@@ -8,6 +8,7 @@ import { isSafeSessionId } from '../../core/session-id.js';
 import { extractClaudeCodeIntermediateContent, parseClaudeCodeJsonlTurn } from './turn-parser.js';
 import { isClaudeCodeTaskNotificationLine } from './background-parser.js';
 import {
+  collectUserText,
   collectLocalCommandTranscriptText,
   extractLocalCommandName,
   isCallerUserTurn,
@@ -16,6 +17,7 @@ import {
   isTerminalLocalCommandTranscriptText,
   rememberLocalCommandTranscriptPromptId,
 } from './turn-boundary-predicates.js';
+import { extractPromptLocalCommandName } from './prompt-command.js';
 import type {
   AssistantContentBlock,
   AssistantEventSnapshot,
@@ -124,6 +126,7 @@ export async function findRecentClaudeCodeSessionLog(
   changedAfterMs: number,
   excludedLogPaths: ReadonlySet<string> = new Set(),
   configDir: string | null = null,
+  promptLocalCommandName: string | null = null,
 ): Promise<string | null> {
   const validCwds = await cwdCandidates(cwd);
   const candidates: LogCandidate[] = [];
@@ -133,6 +136,8 @@ export async function findRecentClaudeCodeSessionLog(
       changedAfterMs,
       validCwds,
       excludedLogPaths,
+      'completed-caller-turn',
+      promptLocalCommandName,
     ));
   }
   if (candidates.length === 0) {
@@ -153,6 +158,7 @@ async function findRecentClaudeCodePreCallerIdleLog(
   changedAfterMs: number,
   excludedLogPaths: ReadonlySet<string> = new Set(),
   configDir: string | null = null,
+  promptLocalCommandName: string | null = null,
 ): Promise<string | null> {
   const validCwds = await cwdCandidates(cwd);
   const candidates: LogCandidate[] = [];
@@ -163,6 +169,7 @@ async function findRecentClaudeCodePreCallerIdleLog(
       validCwds,
       excludedLogPaths,
       'pre-caller-terminal-local-command',
+      promptLocalCommandName,
     ));
   }
   if (candidates.length === 0) {
@@ -421,8 +428,20 @@ export async function waitForClaudeCodeTurnResult(options: {
             turnCompletionObserved = true;
           }
           if (!isPostCompletionLine) {
+            const submittedLocalCommandPromptEcho = rememberSubmittedLocalCommandPromptEcho(
+              activeTurnLocalCommandPromptIds,
+              event,
+              options.promptLocalCommandName ?? null,
+            );
+            const submittedLocalCommandCaveat = rememberSubmittedLocalCommandCaveat(
+              activeTurnLocalCommandPromptIds,
+              event,
+              options.promptLocalCommandName ?? null,
+            );
             rememberLocalCommandTranscriptPromptId(activeTurnLocalCommandPromptIds, event);
-            if (isCallerUserTurn(event, activeTurnLocalCommandPromptIds, {
+            if (submittedLocalCommandPromptEcho || submittedLocalCommandCaveat) {
+              preCallerTerminalLocalCommandObservedAtMs = null;
+            } else if (isCallerUserTurn(event, activeTurnLocalCommandPromptIds, {
               // Guarded so non-user lines skip the raw-line reparse inside the notification check.
               isTaskNotification: event.type === 'user' && isClaudeCodeTaskNotificationLine(line),
             })) {
@@ -493,7 +512,7 @@ export async function waitForClaudeCodeTurnResult(options: {
       const result = parseClaudeCodeJsonlTurn(lines, options.turnId, {
         structuredOutputRequested: options.structuredOutputRequested ?? false,
         jsonSchema: options.structuredOutputJsonSchema,
-        initialLocalCommandTranscriptPromptIds: options.initialLocalCommandTranscriptPromptIds,
+        initialLocalCommandTranscriptPromptIds: activeTurnLocalCommandPromptIds,
       });
       if (result) {
         await assertDiscoveredLogStillUnambiguous(options, logPath);
@@ -561,6 +580,7 @@ async function discoverClaudeCodeSessionLog(options: {
   readonly configDir?: string | null;
   readonly discoveryStartedAtMs?: number | null;
   readonly excludedLogPaths?: ReadonlySet<string>;
+  readonly promptLocalCommandName?: string | null;
 }): Promise<string | null> {
   if (options.sessionId) {
     return findClaudeCodeSessionLog(options.sessionId, options.cwd, options.configDir ?? null);
@@ -573,6 +593,7 @@ async function discoverClaudeCodeSessionLog(options: {
     options.discoveryStartedAtMs,
     options.excludedLogPaths,
     options.configDir ?? null,
+    options.promptLocalCommandName ?? null,
   );
 }
 
@@ -582,6 +603,7 @@ async function discoverClaudeCodePreCallerIdleLog(options: {
   readonly configDir?: string | null;
   readonly discoveryStartedAtMs?: number | null;
   readonly excludedLogPaths?: ReadonlySet<string>;
+  readonly promptLocalCommandName?: string | null;
 }): Promise<string | null> {
   if (options.sessionId || !options.cwd || options.discoveryStartedAtMs === null || options.discoveryStartedAtMs === undefined) {
     return null;
@@ -591,6 +613,7 @@ async function discoverClaudeCodePreCallerIdleLog(options: {
     options.discoveryStartedAtMs,
     options.excludedLogPaths,
     options.configDir ?? null,
+    options.promptLocalCommandName ?? null,
   );
 }
 
@@ -680,6 +703,7 @@ async function findRecentJsonlLogs(
   validCwds: ReadonlySet<string>,
   excludedLogPaths: ReadonlySet<string>,
   mode: 'completed-caller-turn' | 'pre-caller-terminal-local-command' = 'completed-caller-turn',
+  promptLocalCommandName: string | null = null,
 ): Promise<LogCandidate[]> {
   let entries;
   try {
@@ -704,7 +728,7 @@ async function findRecentJsonlLogs(
       if (pathStat.mtimeMs < changedAfterMs) {
         continue;
       }
-      const candidate = await analyzeLogDiscoveryCandidate(path, validCwds);
+      const candidate = await analyzeLogDiscoveryCandidate(path, validCwds, promptLocalCommandName);
       if (!candidate.hasWorkspaceCwd) {
         continue;
       }
@@ -782,6 +806,7 @@ async function projectLogDirsForCwd(cwd: string, configDir: string | null = null
 async function analyzeLogDiscoveryCandidate(
   path: string,
   validCwds: ReadonlySet<string>,
+  promptLocalCommandName: string | null = null,
 ): Promise<{
   hasWorkspaceCwd: boolean;
   callerUserTurnCount: number;
@@ -800,9 +825,22 @@ async function analyzeLogDiscoveryCandidate(
   });
   for await (const line of lines) {
     const event = parseLineObject(line);
+    const submittedLocalCommandPromptEcho = rememberSubmittedLocalCommandPromptEcho(
+      localCommandTranscriptPromptIds,
+      event,
+      promptLocalCommandName,
+    );
+    const submittedLocalCommandCaveat = rememberSubmittedLocalCommandCaveat(
+      localCommandTranscriptPromptIds,
+      event,
+      promptLocalCommandName,
+    );
     rememberLocalCommandTranscriptPromptId(localCommandTranscriptPromptIds, event);
     if (typeof event.cwd === 'string' && validCwds.has(event.cwd)) {
       hasWorkspaceCwd = true;
+    }
+    if (submittedLocalCommandPromptEcho || submittedLocalCommandCaveat) {
+      continue;
     }
     if (turnCompletionObserved) {
       continue;
@@ -844,6 +882,7 @@ async function assertDiscoveredLogStillUnambiguous(
     readonly configDir?: string | null;
     readonly discoveryStartedAtMs?: number | null;
     readonly excludedLogPaths?: ReadonlySet<string>;
+    readonly promptLocalCommandName?: string | null;
   },
   selectedLogPath: string,
 ): Promise<void> {
@@ -860,6 +899,7 @@ async function assertDiscoveredLogStillUnambiguous(
     options.discoveryStartedAtMs,
     options.excludedLogPaths,
     options.configDir ?? null,
+    options.promptLocalCommandName ?? null,
   );
   if (discoveredLogPath && discoveredLogPath !== selectedLogPath) {
     throw new OpenPError(
@@ -883,6 +923,49 @@ async function logFileHasCwd(path: string, validCwds: ReadonlySet<string>): Prom
     }
   }
   return false;
+}
+
+function rememberSubmittedLocalCommandPromptEcho(
+  promptIds: Set<string>,
+  event: Record<string, unknown>,
+  promptLocalCommandName: string | null,
+): boolean {
+  if (promptLocalCommandName === null || event.type !== 'user') {
+    return false;
+  }
+  const promptId = stringOrNull(event.promptId);
+  if (promptId === null) {
+    return false;
+  }
+  const texts = collectUserText(event).map((text) => text.trim()).filter(Boolean);
+  if (texts.length !== 1) {
+    return false;
+  }
+  if (extractPromptLocalCommandName(texts[0]!) !== promptLocalCommandName) {
+    return false;
+  }
+  promptIds.add(promptId);
+  return true;
+}
+
+function rememberSubmittedLocalCommandCaveat(
+  promptIds: Set<string>,
+  event: Record<string, unknown>,
+  promptLocalCommandName: string | null,
+): boolean {
+  if (promptLocalCommandName === null || event.type !== 'user') {
+    return false;
+  }
+  const promptId = stringOrNull(event.promptId);
+  if (promptId === null) {
+    return false;
+  }
+  const texts = collectUserText(event).map((text) => text.trim()).filter(Boolean);
+  if (texts.length !== 1 || !texts[0]!.startsWith('<local-command-caveat>')) {
+    return false;
+  }
+  promptIds.add(promptId);
+  return true;
 }
 
 function isPreCallerTerminalLocalCommandEvent(

@@ -781,6 +781,188 @@ test('local command prompt returns stdout as a successful Claude turn result', a
   assert.deepEqual(intermediate, []);
 });
 
+test('local command prompt returns stdout when Claude omits isMeta on the caveat event', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-session-log-local-command-'));
+  const logPath = join(dir, 'session.jsonl');
+  const sessionId = randomUUID();
+  await writeFile(logPath, [
+    line({
+      type: 'system',
+      subtype: 'compact_boundary',
+      sessionId,
+      content: 'Conversation compacted',
+    }),
+    line({
+      type: 'user',
+      sessionId,
+      promptId: 'compact-command',
+      isCompactSummary: true,
+      message: {
+        content: 'This session is being continued from a previous conversation that ran out of context.',
+      },
+    }),
+    line({
+      type: 'user',
+      sessionId,
+      promptId: 'compact-command',
+      message: {
+        content: '<local-command-caveat>Caveat: generated while running local commands.</local-command-caveat>',
+      },
+    }),
+    line({
+      type: 'user',
+      sessionId,
+      promptId: 'compact-command',
+      message: {
+        content: '<command-name>/compact</command-name>\n            <command-message>compact</command-message>',
+      },
+    }),
+    line({
+      type: 'user',
+      sessionId,
+      promptId: 'compact-command',
+      message: {
+        content: '<local-command-stdout>\u001b[2mCompacted (ctrl+o to see full summary)\u001b[22m</local-command-stdout>',
+      },
+    }),
+  ].join(''));
+
+  const result = await waitForClaudeCodeTurnResult({
+    sessionId,
+    turnId: 'turn-1',
+    timeoutMs: 10_000,
+    initialOffset: 0,
+    knownLogPath: logPath,
+    promptLocalCommandName: '/compact',
+    isBackendAlive: async () => true,
+  });
+
+  assert.equal(result.text, 'Compacted (ctrl+o to see full summary)');
+  assert.equal(result.sessionId, sessionId);
+  assert.equal(result.diagnostics.durationMs, null);
+  assert.equal(result.diagnostics.stopReason, null);
+  assert.deepEqual(result.diagnostics.toolsUsed, []);
+  assert.equal(result.diagnostics.rawEventCount, 5);
+});
+
+test('local command prompt keeps no-meta caveat prompt id across split log chunks', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-session-log-local-command-'));
+  const logPath = join(dir, 'session.jsonl');
+  const sessionId = randomUUID();
+  await writeFile(logPath, [
+    line({
+      type: 'system',
+      subtype: 'compact_boundary',
+      sessionId,
+      content: 'Conversation compacted',
+    }),
+    line({
+      type: 'user',
+      sessionId,
+      promptId: 'compact-command',
+      isCompactSummary: true,
+      message: {
+        content: 'This session is being continued from a previous conversation that ran out of context.',
+      },
+    }),
+    line({
+      type: 'user',
+      sessionId,
+      promptId: 'compact-command',
+      message: {
+        content: '<local-command-caveat>Caveat: generated while running local commands.</local-command-caveat>',
+      },
+    }),
+    line({
+      type: 'user',
+      sessionId,
+      promptId: 'compact-command',
+      message: {
+        content: '<command-name>/compact</command-name>\n            <command-message>compact</command-message>',
+      },
+    }),
+  ].join(''));
+
+  const resultPromise = waitForClaudeCodeTurnResult({
+    sessionId,
+    turnId: 'turn-1',
+    timeoutMs: 10_000,
+    initialOffset: 0,
+    knownLogPath: logPath,
+    promptLocalCommandName: '/compact',
+    isBackendAlive: async () => true,
+  });
+  const appendPromise = (async () => {
+    await sleep(50);
+    await appendFile(logPath, line({
+      type: 'user',
+      sessionId,
+      promptId: 'compact-command',
+      message: {
+        content: '<local-command-stdout>Compacted (ctrl+o to see full summary)</local-command-stdout>',
+      },
+    }));
+  })();
+
+  const [result] = await Promise.all([resultPromise, appendPromise]);
+  assert.equal(result.text, 'Compacted (ctrl+o to see full summary)');
+  assert.equal(result.sessionId, sessionId);
+  assert.equal(result.diagnostics.rawEventCount, 5);
+});
+
+test('local command prompt returns stdout when Claude logs the slash prompt before the transcript', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-session-log-local-command-'));
+  const logPath = join(dir, 'session.jsonl');
+  const sessionId = randomUUID();
+  await writeFile(logPath, [
+    line({
+      type: 'user',
+      sessionId,
+      promptId: 'compact-command',
+      message: { content: '/compact' },
+    }),
+    line({
+      type: 'user',
+      sessionId,
+      promptId: 'compact-command',
+      isMeta: true,
+      message: {
+        content: '<local-command-caveat>Caveat: generated while running local commands.</local-command-caveat>',
+      },
+    }),
+    line({
+      type: 'user',
+      sessionId,
+      promptId: 'compact-command',
+      message: {
+        content: '<command-name>/compact</command-name>\n            <command-message>compact</command-message>',
+      },
+    }),
+    line({
+      type: 'system',
+      subtype: 'local_command',
+      sessionId,
+      content: '<local-command-stdout>Not enough messages to compact.</local-command-stdout>',
+    }),
+  ].join(''));
+
+  const result = await waitForClaudeCodeTurnResult({
+    sessionId,
+    turnId: 'turn-1',
+    timeoutMs: 10_000,
+    initialOffset: 0,
+    knownLogPath: logPath,
+    promptLocalCommandName: '/compact',
+    isBackendAlive: async () => true,
+  });
+
+  assert.equal(result.text, 'Not enough messages to compact.');
+  assert.equal(result.sessionId, sessionId);
+  assert.equal(result.diagnostics.durationMs, null);
+  assert.equal(result.diagnostics.stopReason, null);
+  assert.equal(result.diagnostics.rawEventCount, 4);
+});
+
 test('local command prompt attributes system local_command output to the previous command group', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'openp-session-log-local-command-'));
   const logPath = join(dir, 'session.jsonl');

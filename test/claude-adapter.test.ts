@@ -483,6 +483,68 @@ test('single-turn backend returns local command output without retrying submissi
   }
 });
 
+test('single-turn backend returns local command output when compact caveat omits isMeta', async () => {
+  await withSingleTurnBackend(
+    'openp-claude-adapter-local-command-no-meta-caveat-',
+    (logPath, cwd, sessionId) => new PreCallerLocalCommandThenTurnSession(
+      logPath,
+      cwd,
+      sessionId,
+      0,
+      null,
+      false,
+      true,
+    ),
+    async ({ backend, cwd, session, sessionId }) => {
+      const result = await backend.runTurn(
+        {
+          turnId: '22222222-2222-4222-8222-222222222231',
+          prompt: '/compact',
+          jsonSchema: null,
+        },
+        adapterRunOptions(cwd, sessionId, 5_000),
+      );
+
+      assert.equal(result.text, 'Compacted (ctrl+o to see full summary)');
+      assert.equal(result.sessionId, sessionId);
+      assert.equal(session.submitCount, 1);
+      assert.deepEqual(session.writes, ['/compact']);
+    },
+  );
+});
+
+test('single-turn backend returns local command output when slash prompt echo precedes transcript', async () => {
+  await withSingleTurnBackend(
+    'openp-claude-adapter-local-command-prompt-echo-',
+    (logPath, cwd, sessionId) => new PreCallerLocalCommandThenTurnSession(
+      logPath,
+      cwd,
+      sessionId,
+      0,
+      null,
+      true,
+      false,
+      true,
+      'system',
+    ),
+    async ({ backend, cwd, session, sessionId }) => {
+      const result = await backend.runTurn(
+        {
+          turnId: '22222222-2222-4222-8222-222222222232',
+          prompt: '/compact',
+          jsonSchema: null,
+        },
+        adapterRunOptions(cwd, sessionId, 5_000),
+      );
+
+      assert.equal(result.text, 'Compacted (ctrl+o to see full summary)');
+      assert.equal(result.sessionId, sessionId);
+      assert.equal(session.submitCount, 1);
+      assert.deepEqual(session.writes, ['/compact']);
+    },
+  );
+});
+
 test('single-turn recovery fails closed instead of retyping when no input draft is visible', async () => {
   await withSingleTurnBackend(
     'openp-claude-adapter-retry-no-draft-',
@@ -563,7 +625,7 @@ test('single-turn retry keeps the original turn timeout budget', async () => {
       logPath,
       cwd,
       sessionId,
-      2_000,
+      4_500,
       '❯ hello after compact',
     ),
     async ({ backend, cwd, session, sessionId }) => {
@@ -574,7 +636,7 @@ test('single-turn retry keeps the original turn timeout budget', async () => {
             prompt: 'hello after compact',
             jsonSchema: null,
           },
-          adapterRunOptions(cwd, sessionId, 1_500),
+          adapterRunOptions(cwd, sessionId, 5_000),
         ),
         (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.timeout,
       );
@@ -734,6 +796,10 @@ class PreCallerLocalCommandThenTurnSession implements PtySession {
     private readonly sessionId: string,
     private readonly secondSubmitDelayMs = 0,
     private readonly draftLineAfterFirstSubmit: string | null = null,
+    private readonly caveatIsMeta = true,
+    private readonly includeCompactSummary = false,
+    private readonly includePromptEcho = false,
+    private readonly terminalOutputSource: 'user' | 'system' = 'user',
   ) {}
 
   async write(input: string): Promise<void> {
@@ -752,12 +818,33 @@ class PreCallerLocalCommandThenTurnSession implements PtySession {
           sessionId: this.sessionId,
           content: 'Conversation compacted',
         }),
+        ...(this.includePromptEcho ? [
+          eventLine({
+            type: 'user',
+            cwd: this.cwd,
+            sessionId: this.sessionId,
+            promptId: 'compact-command',
+            message: { content: this.lastWrite },
+          }),
+        ] : []),
+        ...(this.includeCompactSummary ? [
+          eventLine({
+            type: 'user',
+            cwd: this.cwd,
+            sessionId: this.sessionId,
+            promptId: 'compact-command',
+            isCompactSummary: true,
+            message: {
+              content: 'This session is being continued from a previous conversation that ran out of context.',
+            },
+          }),
+        ] : []),
         eventLine({
           type: 'user',
           cwd: this.cwd,
           sessionId: this.sessionId,
           promptId: 'compact-command',
-          isMeta: true,
+          ...(this.caveatIsMeta ? { isMeta: true } : {}),
           message: { content: '<local-command-caveat>generated while running local commands</local-command-caveat>' },
         }),
         eventLine({
@@ -767,13 +854,21 @@ class PreCallerLocalCommandThenTurnSession implements PtySession {
           promptId: 'compact-command',
           message: { content: '<command-name>/compact</command-name>\n<command-message>compact</command-message>' },
         }),
-        eventLine({
-          type: 'user',
-          cwd: this.cwd,
-          sessionId: this.sessionId,
-          promptId: 'compact-command',
-          message: { content: '<local-command-stdout>Compacted (ctrl+o to see full summary)</local-command-stdout>' },
-        }),
+        eventLine(this.terminalOutputSource === 'system'
+          ? {
+              type: 'system',
+              subtype: 'local_command',
+              cwd: this.cwd,
+              sessionId: this.sessionId,
+              content: '<local-command-stdout>Compacted (ctrl+o to see full summary)</local-command-stdout>',
+            }
+          : {
+              type: 'user',
+              cwd: this.cwd,
+              sessionId: this.sessionId,
+              promptId: 'compact-command',
+              message: { content: '<local-command-stdout>Compacted (ctrl+o to see full summary)</local-command-stdout>' },
+            }),
       ].join('\n') + '\n');
       return;
     }

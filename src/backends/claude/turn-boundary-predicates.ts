@@ -116,8 +116,14 @@ export function isStablePrefixOfLongerText(candidate: string, previous: string):
 
 // A Claude Code local-command transcript (e.g. `/exit`, `/compact`) is a `type:user` event written when a
 // local slash command runs; it is not a caller prompt. Bare `/exit` plus the tagged transcript forms
-// (`<command-name>...`, `<local-command-stdout>...`, `<local-command-stderr>...`) all count.
-const LOCAL_COMMAND_TRANSCRIPT_PREFIXES = ['<command-name>', '<local-command-stdout>', '<local-command-stderr>'];
+// (`<local-command-caveat>...`, `<command-name>...`, `<local-command-stdout>...`,
+// `<local-command-stderr>...`) all count after the promptId has been linked to the active command group.
+const LOCAL_COMMAND_TRANSCRIPT_PREFIXES = [
+  '<local-command-caveat>',
+  '<command-name>',
+  '<local-command-stdout>',
+  '<local-command-stderr>',
+];
 
 export function isLocalCommandTranscriptText(text: string): boolean {
   return text === '/exit' || LOCAL_COMMAND_TRANSCRIPT_PREFIXES.some((prefix) => text.startsWith(prefix));

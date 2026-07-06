@@ -1511,13 +1511,13 @@ test('persistent retry keeps the original turn timeout budget', async () => {
   const logPath = join(dir, 'session.jsonl');
   await writeFile(logPath, '');
   const sessionId = randomUUID();
-  const session = new PreCallerLocalCommandThenTurnSession(logPath, '❯ hello after compact', 3_000);
+  const session = new PreCallerLocalCommandThenTurnSession(logPath, '❯ hello after compact', 4_500);
   const process = new PersistentClaudeCodeProcess(sessionId, signature(), dir, session, logPath, logPath, 0);
 
   try {
     await assert.rejects(
       () => process.sendTurn('hello after compact', {
-        timeoutMs: 2_000,
+        timeoutMs: 5_000,
       }),
       (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.timeout,
     );
