@@ -368,6 +368,19 @@ test('returns null until completion metadata is present', () => {
   ], TURN_ID), null);
 });
 
+test('resets stale pre-caller completion with assistant evidence when the caller turn appears', () => {
+  const result = parseClaudeCodeJsonlTurn([
+    assistantLine([{ type: 'text', text: 'stale answer' }], undefined, 'end_turn'),
+    durationLine(1),
+    userLine('real prompt'),
+    assistantLine([{ type: 'text', text: 'fresh answer' }], undefined, 'end_turn'),
+    durationLine(12),
+  ], TURN_ID);
+
+  assert.equal(result?.text, 'fresh answer');
+  assert.equal(result?.diagnostics.durationMs, 12);
+});
+
 test('exposes stable rejection reason code for missing Claude caller turn boundary', () => {
   assert.throws(
     () => parseClaudeCodeJsonlTurn([
@@ -1133,6 +1146,44 @@ test('fails when one scoped Claude segment contains multiple caller user turns',
       error.exitCode === EXIT_CODES.protocolViolation &&
       error.reasonCode === 'multiple_turn_boundaries',
   );
+});
+
+test('ignores post-completion scheduled local command user transcripts as active caller boundaries', () => {
+  const result = parseClaudeCodeJsonlTurn([
+    userLine('real prompt'),
+    assistantLine([{ type: 'text', text: 'result answer' }], undefined, 'end_turn'),
+    durationLine(10),
+    JSON.stringify({
+      type: 'system',
+      subtype: 'local_command',
+      content: '<command-name>/loop</command-name>',
+    }),
+    JSON.stringify({
+      type: 'system',
+      subtype: 'local_command',
+      content: '<local-command-stdout>system scheduled output</local-command-stdout>',
+    }),
+    assistantLine([{ type: 'text', text: 'system scheduled task answer' }], undefined, 'end_turn'),
+    JSON.stringify({
+      type: 'user',
+      promptId: 'scheduled-loop-command',
+      message: {
+        role: 'user',
+        content: '<command-name>/loop</command-name>\n<command-message>/loop</command-message>',
+      },
+    }),
+    JSON.stringify({
+      type: 'user',
+      promptId: 'scheduled-loop-command',
+      message: {
+        role: 'user',
+        content: '<local-command-stdout>scheduled loop output</local-command-stdout>',
+      },
+    }),
+    assistantLine([{ type: 'text', text: 'scheduled task answer' }], undefined, 'end_turn'),
+  ], TURN_ID);
+
+  assert.equal(result?.text, 'result answer');
 });
 
 test('does not treat tool_result, meta, or local command user events as caller turns', () => {

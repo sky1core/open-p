@@ -12,6 +12,7 @@ import { isSafeSessionId } from '../../core/session-id.js';
 import {
   isCallerUserTurn,
   isStablePrefixOfLongerText,
+  isSystemLocalCommandEvent,
   rememberLocalCommandTranscriptPromptId,
   userEventHasToolResult,
 } from './turn-boundary-predicates.js';
@@ -447,6 +448,12 @@ export function extractClaudeCodeIntermediateContent(
 
 function consumeEvent(state: ParserState, event: JsonObject, turnId: string): void {
   rememberSessionId(state, event, turnId);
+
+  if (state.completed && state.callerUserTurnCount > 0 && (event.type === 'user' || isSystemLocalCommandEvent(event))) {
+    state.inScope = false;
+    return;
+  }
+
   rememberLocalCommandTranscriptPromptId(state.localCommandTranscriptPromptIds, event);
 
   if (isCallerUserTurn(event, state.localCommandTranscriptPromptIds, {
@@ -561,8 +568,22 @@ function consumeEvent(state: ParserState, event: JsonObject, turnId: string): vo
   }
 
   if (event.type === 'system' && event.subtype === 'turn_duration') {
+    if (state.callerUserTurnCount === 0 && !hasPreCallerCompletionEvidence(state)) {
+      return;
+    }
     consumeTurnDuration(state, event, turnId);
   }
+}
+
+function hasPreCallerCompletionEvidence(state: ParserState): boolean {
+  return state.resultText !== null ||
+    state.interruption !== null ||
+    state.sawToolResult ||
+    state.toolsUsed.length > 0 ||
+    state.structuredOutput !== undefined ||
+    state.reasoningTexts.length > 0 ||
+    state.activeAssistantTexts.length > 0 ||
+    state.assistantEvents.length > 0;
 }
 
 function consumeUserToolResultEvent(state: ParserState, event: JsonObject): void {

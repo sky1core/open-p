@@ -2346,6 +2346,14 @@ test('resets post-completion grace when a stale completion precedes the caller t
   const logPath = join(dir, 'session.jsonl');
   const sessionId = randomUUID();
   await writeFile(logPath, [
+    line({
+      type: 'assistant',
+      sessionId,
+      message: {
+        content: [{ type: 'text', text: 'stale answer' }],
+        stop_reason: 'end_turn',
+      },
+    }),
     line({ type: 'system', subtype: 'turn_duration', sessionId, durationMs: 1 }),
     line({
       type: 'user',

@@ -607,6 +607,26 @@ test('single-turn retry does not retry unrelated protocol violations', async () 
   );
 });
 
+test('single-turn backend returns result when scheduled local command transcript follows completion', async () => {
+  await withSingleTurnBackend(
+    'openp-claude-adapter-post-completion-command-',
+    (logPath, cwd, sessionId) => new PostCompletionLocalCommandSession(logPath, cwd, sessionId),
+    async ({ backend, cwd, session, sessionId }) => {
+      const result = await backend.runTurn(
+        {
+          turnId: '22222222-2222-4222-8222-222222222230',
+          prompt: 'hello',
+          jsonSchema: null,
+        },
+        adapterRunOptions(cwd, sessionId, 5_000),
+      );
+
+      assert.equal(result.text, 'post-completion safe result');
+      assert.equal(session.submitCount, 1);
+    },
+  );
+});
+
 class SingleSessionProvider implements PtyProvider {
   constructor(private readonly session: PtySession) {}
 
@@ -1023,6 +1043,128 @@ class DuplicateCallerTurnSession implements PtySession {
         cwd: this.cwd,
         sessionId: this.sessionId,
         durationMs: 10,
+      }),
+    ].join('\n') + '\n');
+  }
+
+  async interrupt(): Promise<void> {}
+
+  async terminate(signal: NodeJS.Signals = 'SIGTERM'): Promise<void> {
+    void signal;
+    this.alive = false;
+  }
+
+  async exit(): Promise<void> {
+    this.alive = false;
+  }
+
+  async isAlive(): Promise<boolean> {
+    return this.alive;
+  }
+
+  async captureText(): Promise<string> {
+    return '❯';
+  }
+
+  async captureCursorLine(): Promise<string> {
+    return '❯';
+  }
+}
+
+class PostCompletionLocalCommandSession implements PtySession {
+  readonly id = 'fake-pty';
+  submitCount = 0;
+  private alive = true;
+  private lastWrite = '';
+
+  constructor(
+    private readonly logPath: string,
+    private readonly cwd: string,
+    private readonly sessionId: string,
+  ) {}
+
+  async write(input: string): Promise<void> {
+    this.lastWrite = input;
+  }
+
+  async submit(): Promise<void> {
+    this.submitCount += 1;
+    await appendFile(this.logPath, [
+      eventLine({
+        type: 'user',
+        cwd: this.cwd,
+        sessionId: this.sessionId,
+        uuid: 'active-user',
+        message: { content: this.lastWrite },
+      }),
+      eventLine({
+        type: 'assistant',
+        cwd: this.cwd,
+        sessionId: this.sessionId,
+        parentUuid: 'active-user',
+        message: {
+          content: [{ type: 'text', text: 'post-completion safe result' }],
+          stop_reason: 'end_turn',
+        },
+      }),
+      eventLine({
+        type: 'system',
+        subtype: 'turn_duration',
+        cwd: this.cwd,
+        sessionId: this.sessionId,
+        durationMs: 10,
+      }),
+      eventLine({
+        type: 'system',
+        subtype: 'local_command',
+        cwd: this.cwd,
+        sessionId: this.sessionId,
+        content: '<command-name>/loop</command-name>',
+      }),
+      eventLine({
+        type: 'system',
+        subtype: 'local_command',
+        cwd: this.cwd,
+        sessionId: this.sessionId,
+        content: '<local-command-stdout>system scheduled output</local-command-stdout>',
+      }),
+      eventLine({
+        type: 'assistant',
+        cwd: this.cwd,
+        sessionId: this.sessionId,
+        parentUuid: 'system-scheduled-loop-command',
+        message: {
+          content: [{ type: 'text', text: 'system scheduled task answer' }],
+          stop_reason: 'end_turn',
+        },
+      }),
+      eventLine({
+        type: 'user',
+        cwd: this.cwd,
+        sessionId: this.sessionId,
+        promptId: 'scheduled-loop-command',
+        message: {
+          content: '<command-name>/loop</command-name>\n<command-message>/loop</command-message>',
+        },
+      }),
+      eventLine({
+        type: 'user',
+        cwd: this.cwd,
+        sessionId: this.sessionId,
+        promptId: 'scheduled-loop-command',
+        message: {
+          content: '<local-command-stdout>loop scheduled</local-command-stdout>',
+        },
+      }),
+      eventLine({
+        type: 'assistant',
+        cwd: this.cwd,
+        sessionId: this.sessionId,
+        parentUuid: 'scheduled-loop-command',
+        message: {
+          content: [{ type: 'text', text: 'scheduled task answer' }],
+          stop_reason: 'end_turn',
+        },
       }),
     ].join('\n') + '\n');
   }

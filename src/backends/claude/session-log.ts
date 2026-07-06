@@ -248,6 +248,7 @@ export async function waitForClaudeCodeTurnResult(options: {
   let lastSessionLogProgressAtMs = Date.now();
   let lastSessionLogIdleDiagnosticAtMs = Date.now();
   let completionWithoutResultObserved = false;
+  let turnCompletionObserved = false;
   const sessionLogIdleDiagnosticIntervalMs =
     options.sessionLogIdleDiagnosticIntervalMs ?? SESSION_LOG_IDLE_DIAGNOSTIC_INTERVAL_MS;
   const notifyTimeout = async (): Promise<void> => {
@@ -409,47 +410,54 @@ export async function waitForClaudeCodeTurnResult(options: {
       remainder = parts.pop() ?? '';
       for (const line of parts) {
         const event = parseLineObject(line);
+        let isPostCompletionLine = false;
         if (event) {
+          const eventIsTurnCompletion = isTurnCompletionMetadata(event);
+          const eventCompletesObservedCallerTurn = eventIsTurnCompletion && sawCallerUserTurn;
+          isPostCompletionLine = turnCompletionObserved && !eventIsTurnCompletion;
           processedRawEventCount += 1;
-          if (isTurnCompletionMetadata(event)) {
+          if (eventCompletesObservedCallerTurn) {
             completionWithoutResultObserved = true;
+            turnCompletionObserved = true;
           }
-          rememberLocalCommandTranscriptPromptId(activeTurnLocalCommandPromptIds, event);
-          if (isCallerUserTurn(event, activeTurnLocalCommandPromptIds, {
-            // Guarded so non-user lines skip the raw-line reparse inside the notification check.
-            isTaskNotification: event.type === 'user' && isClaudeCodeTaskNotificationLine(line),
-          })) {
-            sawCallerUserTurn = true;
-            callerUserTurnLineIndex = lines.length;
-            completionWithoutResultObserved = false;
-            preCallerTerminalLocalCommandObservedAtMs = null;
-          } else if (!sawCallerUserTurn) {
-            const preCallerLocalCommandObservation = observePreCallerLocalCommandEvent({
-              event,
-              promptIds: activeTurnLocalCommandPromptIds,
-              groups: preCallerLocalCommandGroups,
-              mostRecentCommandGroup: mostRecentPreCallerCommandGroup,
-              promptLocalCommandName: options.promptLocalCommandName ?? null,
-              turnId: options.turnId,
-              rawEventCount: processedRawEventCount,
-            });
-            mostRecentPreCallerCommandGroup = preCallerLocalCommandObservation.mostRecentCommandGroup;
-            if (preCallerLocalCommandObservation.result) {
-              if (preCallerLocalCommandObservation.nameMismatch) {
-                await options.onLocalCommandNameMismatch?.({
-                  turnId: options.turnId,
-                  promptLocalCommandName: preCallerLocalCommandObservation.nameMismatch.promptLocalCommandName,
-                  loggedCommandName: preCallerLocalCommandObservation.nameMismatch.loggedCommandName,
-                  logPath,
-                });
+          if (!isPostCompletionLine) {
+            rememberLocalCommandTranscriptPromptId(activeTurnLocalCommandPromptIds, event);
+            if (isCallerUserTurn(event, activeTurnLocalCommandPromptIds, {
+              // Guarded so non-user lines skip the raw-line reparse inside the notification check.
+              isTaskNotification: event.type === 'user' && isClaudeCodeTaskNotificationLine(line),
+            })) {
+              sawCallerUserTurn = true;
+              callerUserTurnLineIndex = lines.length;
+              completionWithoutResultObserved = false;
+              preCallerTerminalLocalCommandObservedAtMs = null;
+            } else if (!sawCallerUserTurn) {
+              const preCallerLocalCommandObservation = observePreCallerLocalCommandEvent({
+                event,
+                promptIds: activeTurnLocalCommandPromptIds,
+                groups: preCallerLocalCommandGroups,
+                mostRecentCommandGroup: mostRecentPreCallerCommandGroup,
+                promptLocalCommandName: options.promptLocalCommandName ?? null,
+                turnId: options.turnId,
+                rawEventCount: processedRawEventCount,
+              });
+              mostRecentPreCallerCommandGroup = preCallerLocalCommandObservation.mostRecentCommandGroup;
+              if (preCallerLocalCommandObservation.result) {
+                if (preCallerLocalCommandObservation.nameMismatch) {
+                  await options.onLocalCommandNameMismatch?.({
+                    turnId: options.turnId,
+                    promptLocalCommandName: preCallerLocalCommandObservation.nameMismatch.promptLocalCommandName,
+                    loggedCommandName: preCallerLocalCommandObservation.nameMismatch.loggedCommandName,
+                    logPath,
+                  });
+                }
+                await assertDiscoveredLogStillUnambiguous(options, logPath);
+                return preCallerLocalCommandObservation.result;
               }
-              await assertDiscoveredLogStillUnambiguous(options, logPath);
-              return preCallerLocalCommandObservation.result;
-            }
-            if (preCallerLocalCommandObservation.terminalOutputObserved) {
-              preCallerTerminalLocalCommandObservedAtMs = Date.now();
-            } else if (preCallerTerminalLocalCommandObservedAtMs !== null) {
-              preCallerTerminalLocalCommandObservedAtMs = Date.now();
+              if (preCallerLocalCommandObservation.terminalOutputObserved) {
+                preCallerTerminalLocalCommandObservedAtMs = Date.now();
+              } else if (preCallerTerminalLocalCommandObservedAtMs !== null) {
+                preCallerTerminalLocalCommandObservedAtMs = Date.now();
+              }
             }
           }
         }
@@ -470,6 +478,9 @@ export async function waitForClaudeCodeTurnResult(options: {
           }
         }
         lines.push(line);
+        if (isPostCompletionLine) {
+          continue;
+        }
         if (isClaudeCodeTaskNotificationLine(line)) {
           continue;
         }
@@ -781,6 +792,7 @@ async function analyzeLogDiscoveryCandidate(
   let callerUserTurnCount = 0;
   let otherWorkspaceCallerUserTurnCount = 0;
   let hasPreCallerTerminalLocalCommand = false;
+  let turnCompletionObserved = false;
   const localCommandTranscriptPromptIds = new Set<string>();
   const lines = createInterface({
     input: createReadStream(path, { encoding: 'utf8' }),
@@ -791,6 +803,13 @@ async function analyzeLogDiscoveryCandidate(
     rememberLocalCommandTranscriptPromptId(localCommandTranscriptPromptIds, event);
     if (typeof event.cwd === 'string' && validCwds.has(event.cwd)) {
       hasWorkspaceCwd = true;
+    }
+    if (turnCompletionObserved) {
+      continue;
+    }
+    if (isTurnCompletionMetadata(event) && (callerUserTurnCount > 0 || otherWorkspaceCallerUserTurnCount > 0)) {
+      turnCompletionObserved = true;
+      continue;
     }
     if (isCallerUserTurn(event, localCommandTranscriptPromptIds, {
       isTaskNotification: event.type === 'user' && isClaudeCodeTaskNotificationLine(line),
