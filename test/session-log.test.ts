@@ -2731,14 +2731,18 @@ test('reports session log idle as a diagnostic without failing a later result', 
   assert.equal((firstDiagnostic.idleMs as number) >= 50, true);
 });
 
-test('writes Claude session log idle diagnostics to debug log', async () => {
+test('writes Claude session log idle diagnostics to debug log and run activity callback', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'openp-session-log-debug-'));
   const debugLogPath = join(dir, 'debug.jsonl');
+  const activities: unknown[] = [];
   const logger = createClaudeSessionLogIdleDebugLogger({
     debugLog: debugLogPath,
     backendSessionId: 'backend-session',
     nativeSessionId: 'native-session',
     ptySessionId: 'openp-backend-session-pty',
+    onRunActivity: (activity) => {
+      activities.push(activity);
+    },
   });
 
   await logger({
@@ -2769,6 +2773,20 @@ test('writes Claude session log idle diagnostics to debug log', async () => {
   assert.equal(entry.idleMs, 30_000);
   assert.equal(entry.observedLogFile, true);
   assert.equal(entry.sawCallerUserTurn, true);
+
+  assert.equal(activities.length, 1);
+  const activity = activities[0] as Record<string, unknown>;
+  assert.equal(activity.kind, 'backend_wait');
+  assert.equal(activity.backend, 'claude');
+  assert.equal(activity.backendSessionId, 'backend-session');
+  assert.equal(activity.nativeSessionId, 'native-session');
+  assert.equal(activity.ptySessionId, 'openp-backend-session-pty');
+  assert.equal(activity.turnId, 'turn-1');
+  assert.equal(activity.stage, 'waiting_for_completion');
+  assert.equal(activity.idleMs, 30_000);
+  assert.equal(activity.observedLogFile, true);
+  assert.equal(activity.sawCallerUserTurn, true);
+  assert.match(activity.observedAt as string, /^\d{4}-\d{2}-\d{2}T/);
 });
 
 test('writes Claude session log idle diagnostics with configured backend instance id', async () => {

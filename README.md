@@ -185,7 +185,7 @@ openp claude --timeout 60 "prompt"
 | `--streaming` | Active-turn streaming opt-in |
 | `--dangerously-skip-permissions` | Trust backend tool execution |
 | `--run-id <id>` | Caller-supplied invocation identifier for external process discovery |
-| `--event-log <path>` | Mirror stream-json records plus run lifecycle records to a caller-owned file |
+| `--event-log <path>` | Mirror stream-json records plus run lifecycle/activity records to a caller-owned file |
 | `--debug-log` | Write diagnostics to the open-p state log |
 | `--verbose` | Include diagnostic markers in output |
 
@@ -213,6 +213,10 @@ ${XDG_STATE_HOME:-~/.local/state}/open-p/workspaces/<workspace-hash>/logs/debug.
 ```
 
 Debug logs may contain session ids, prompts, response previews, and error context.
+
+`--event-log` writes caller-owned lifecycle records under `openpRun`. The first record contains
+`openpRun.header`, the final record contains `openpRun.terminal`, and long-running backend waits
+may emit `openpRun.activity` records such as Claude session-log wait stage and idle duration.
 
 `--verbose` adds diagnostic markers to output. In text mode, a marker line is appended after the answer. In JSON modes, warnings appear under `openp.metadata.warnings`.
 

@@ -1,5 +1,6 @@
 import { closeSync, constants, fsyncSync, openSync, writeSync } from 'node:fs';
 import { EXIT_CODES, OpenPError } from './errors.js';
+import type { BackendRunActivity } from './types.js';
 
 export interface RunEventLogHeader {
   readonly runId: string | null;
@@ -18,6 +19,8 @@ export interface RunEventLogTerminal {
   readonly endedAt: string;
 }
 
+export type RunEventLogActivity = BackendRunActivity;
+
 export class RunEventLog {
   private terminalWritten = false;
   private writeWarningEmitted = false;
@@ -33,6 +36,10 @@ export class RunEventLog {
 
   appendMirroredStdout(chunk: string): void {
     this.writeRaw(chunk);
+  }
+
+  writeActivity(activity: RunEventLogActivity): void {
+    this.writeLine(JSON.stringify({ openpRun: { schemaVersion: 1, activity } }));
   }
 
   writeTerminal(terminal: RunEventLogTerminal): void {

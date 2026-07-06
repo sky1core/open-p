@@ -34,6 +34,20 @@ export interface AssistantEventSnapshot {
 
 export type AssistantContentBlock = Record<string, unknown>;
 
+export interface BackendRunActivity {
+  readonly kind: 'backend_wait';
+  readonly backend: string;
+  readonly backendSessionId: string;
+  readonly nativeSessionId?: string | null;
+  readonly ptySessionId?: string;
+  readonly turnId: string;
+  readonly stage: string;
+  readonly idleMs: number;
+  readonly observedAt: string;
+  readonly observedLogFile?: boolean;
+  readonly sawCallerUserTurn?: boolean;
+}
+
 export interface TurnResultWarning {
   readonly severity: 'warning' | 'error';
   readonly code: string;
@@ -84,4 +98,5 @@ export interface BackendRunOptions {
     snapshot: AssistantEventSnapshot,
     source?: IntermediateTextSource,
   ) => void;
+  readonly onRunActivity?: (activity: BackendRunActivity) => void;
 }

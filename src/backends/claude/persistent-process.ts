@@ -7,6 +7,7 @@ import type { ManagedBackendProcess, ProcessStartRequest } from '../../core/pers
 import type {
   AssistantContentBlock,
   AssistantEventSnapshot,
+  BackendRunActivity,
   IntermediateTextSource,
   TurnRequest,
   TurnResult,
@@ -77,6 +78,7 @@ export interface PersistentClaudeCodeTurnOptions {
     snapshot: AssistantEventSnapshot,
     source?: IntermediateTextSource,
   ) => void;
+  readonly onRunActivity?: (activity: BackendRunActivity) => void;
   readonly onBackgroundAssistantText?: (text: string) => void;
 }
 
@@ -249,6 +251,7 @@ export class PersistentClaudeCodeProcess implements ManagedBackendProcess {
                   backendSessionId: this.sessionId,
                   nativeSessionId: this.nativeSessionId,
                   ptySessionId: this.pty.id,
+                  onRunActivity: options.onRunActivity,
                 }),
                 onLocalCommandNameMismatch: createClaudeLocalCommandNameMismatchDebugLogger({
                   debugLog: options.debugLog ?? null,

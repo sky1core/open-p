@@ -82,7 +82,7 @@ Core options:
   --tools <tools>             Tool allowlist where supported
   --json-schema <json>        Validate and return structured output
   --run-id <id>               Caller-supplied invocation identifier for process discovery
-  --event-log <path>          Append stream-json records and lifecycle records to a file
+  --event-log <path>          Append stream-json records and lifecycle/activity records to a file
   --dangerously-skip-permissions
                               Trust backend tool execution where supported
 
@@ -258,6 +258,11 @@ async function main(argv: readonly string[]): Promise<number> {
                 for (const assistantEvent of assistantEvents) {
                   writeStdout(`${JSON.stringify(assistantEvent)}\n`, eventLog, safeStdio);
                 }
+              }
+            : undefined,
+          onRunActivity: eventLog
+            ? (activity) => {
+                eventLog?.writeActivity(activity);
               }
             : undefined,
         },

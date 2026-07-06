@@ -108,6 +108,7 @@ export class ClaudeCodeWorkerBridge implements BackendWorkerBridge {
               }
             : undefined,
           onIntermediateAssistantSnapshot: request.onIntermediateAssistantSnapshot,
+          onRunActivity: request.onRunActivity,
           onBackgroundAssistantText: undefined,
         });
         const resultSessionId = result.sessionId ?? (preparedInput.isFirstTurn ? null : backendSessionId);

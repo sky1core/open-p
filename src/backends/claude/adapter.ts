@@ -257,6 +257,7 @@ export class ClaudeCodeBackend implements Backend {
                   backendSessionId: options.backendSessionId,
                   nativeSessionId,
                   ptySessionId: pty.id,
+                  onRunActivity: options.onRunActivity,
                 }),
                 onLocalCommandNameMismatch: createClaudeLocalCommandNameMismatchDebugLogger({
                   debugLog: options.debugLog,

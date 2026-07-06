@@ -2,6 +2,7 @@ import type {
   AssistantContentBlock,
   AssistantEventSnapshot,
   BackendUsage,
+  BackendRunActivity,
   IntermediateTextSource,
   TurnResultWarning,
 } from './types.js';
@@ -40,6 +41,7 @@ export interface WorkerTurnRequest {
     snapshot: AssistantEventSnapshot,
     source?: IntermediateTextSource,
   ) => void;
+  readonly onRunActivity?: (activity: BackendRunActivity) => void;
   readonly onBackgroundAssistantText?: (text: string) => void;
 }
 
