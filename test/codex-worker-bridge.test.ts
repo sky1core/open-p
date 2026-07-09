@@ -179,6 +179,51 @@ test('CodexWorkerBridge.runTurn succeeds with fake codex', withFakeBin('fake-cod
   assert.equal(result.diagnostics.stopReason, null);
 }));
 
+test('CodexWorkerBridge.runTurn reports actual Codex-selected model over requested model alias', withFakeBin('fake-codex-success.sh', async () => {
+  const bridge = new CodexWorkerBridge();
+  const result = await bridge.runTurn({
+    sessionId: null,
+    isFirstTurn: true,
+    projectRoot: process.cwd(),
+    message: 'hello',
+    model: 'gpt-5.6',
+    timeoutMs: 10000,
+  });
+
+  assert.equal(result.diagnostics.model, 'codex-test-model');
+}));
+
+test('CodexWorkerBridge.runTurn passes model and reasoning effort on resume and reports actual Codex-selected model', withFakeBin('fake-codex-success.sh', async () => {
+  await writeCodexPreviousTurnLog();
+  const prevArgsLog = process.env.OPENP_FAKE_CODEX_ARGS_LOG;
+  const argsLog = join(await mkdtemp(join(tmpdir(), 'openp-codex-worker-resume-args-')), 'args.log');
+  process.env.OPENP_FAKE_CODEX_ARGS_LOG = argsLog;
+  try {
+    const bridge = new CodexWorkerBridge();
+    const result = await bridge.runTurn({
+      sessionId: FAKE_CODEX_SESSION_ID,
+      isFirstTurn: false,
+      projectRoot: process.cwd(),
+      message: 'follow up',
+      model: 'gpt-5.6',
+      reasoningEffort: 'max',
+      timeoutMs: 10000,
+    });
+
+    const args = await readFile(argsLog, 'utf8');
+    assert.match(args, /\texec\tresume\t/);
+    assert.match(args, /\t--model\tgpt-5\.6/);
+    assert.match(args, /\t-c\tmodel_reasoning_effort="max"/);
+    assert.equal(result.diagnostics.model, 'codex-test-model');
+  } finally {
+    if (prevArgsLog === undefined) {
+      delete process.env.OPENP_FAKE_CODEX_ARGS_LOG;
+    } else {
+      process.env.OPENP_FAKE_CODEX_ARGS_LOG = prevArgsLog;
+    }
+  }
+}));
+
 test('CodexWorkerBridge.runTurn rejects unsafe resume session ids before launching codex', async () => {
   const binDir = await mkdtemp(join(tmpdir(), 'openp-codex-injection-bin-'));
   const markerPath = join(binDir, 'spawned');
@@ -452,6 +497,26 @@ test('CodexWorkerBridge.runTurn throws on non-zero exit', withFakeBin('fake-code
       timeoutMs: 10000,
     }),
     (err: Error) => err.message.includes('exited with code 1'),
+  );
+}));
+
+test('CodexWorkerBridge.runTurn preserves Codex stdout JSON error diagnostics on non-zero exit', withFakeBin('fake-codex-model-unsupported.mjs', async () => {
+  const bridge = new CodexWorkerBridge();
+
+  await assert.rejects(
+    bridge.runTurn({
+      sessionId: null,
+      isFirstTurn: true,
+      projectRoot: process.cwd(),
+      message: 'hello',
+      model: 'gpt-5.6',
+      reasoningEffort: 'low',
+      timeoutMs: 10000,
+    }),
+    (error) => error instanceof OpenPError &&
+      error.exitCode === EXIT_CODES.backendExited &&
+      error.message.includes('Codex CLI exited with code 1') &&
+      error.message.includes("The 'gpt-5.6' model is not supported when using Codex with a ChatGPT account"),
   );
 }));
 

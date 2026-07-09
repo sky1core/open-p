@@ -176,6 +176,48 @@ test('CodexBackend.runTurn succeeds on first turn', withFakeBin('fake-codex-succ
   assert.ok(result.diagnostics.durationMs! >= 0);
 }));
 
+test('CodexBackend.runTurn reports actual Codex-selected model over requested model alias', withFakeBin('fake-codex-success.sh', async () => {
+  const backend = new CodexBackend();
+  const result = await backend.runTurn(
+    { turnId: 'turn-1', prompt: 'hello' },
+    { ...BASE_OPTIONS, model: 'gpt-5.6' },
+  );
+
+  assert.equal(result.diagnostics.model, 'codex-test-model');
+}));
+
+test('CodexBackend.runTurn passes model and reasoning effort on resume and reports actual Codex-selected model', withFakeBin('fake-codex-success.sh', async () => {
+  await writeCodexPreviousTurnLog();
+  const prevArgsLog = process.env.OPENP_FAKE_CODEX_ARGS_LOG;
+  const argsLog = join(await mkdtemp(join(tmpdir(), 'openp-codex-resume-args-')), 'args.log');
+  process.env.OPENP_FAKE_CODEX_ARGS_LOG = argsLog;
+  const backend = new CodexBackend();
+  try {
+    const result = await backend.runTurn(
+      { turnId: 'turn-resume', prompt: 'follow up' },
+      {
+        ...BASE_OPTIONS,
+        resume: true,
+        backendSessionId: FAKE_CODEX_SESSION_ID,
+        model: 'gpt-5.6',
+        reasoningEffort: 'max',
+      },
+    );
+
+    const args = await readFile(argsLog, 'utf8');
+    assert.match(args, /\texec\tresume\t/);
+    assert.match(args, /\t--model\tgpt-5\.6/);
+    assert.match(args, /\t-c\tmodel_reasoning_effort="max"/);
+    assert.equal(result.diagnostics.model, 'codex-test-model');
+  } finally {
+    if (prevArgsLog === undefined) {
+      delete process.env.OPENP_FAKE_CODEX_ARGS_LOG;
+    } else {
+      process.env.OPENP_FAKE_CODEX_ARGS_LOG = prevArgsLog;
+    }
+  }
+}));
+
 test('CodexBackend.runTurn throws on non-zero exit', withFakeBin('fake-codex-error.sh', async () => {
   const backend = new CodexBackend();
 
@@ -185,6 +227,21 @@ test('CodexBackend.runTurn throws on non-zero exit', withFakeBin('fake-codex-err
       BASE_OPTIONS,
     ),
     (err: Error) => err.message.includes('exited with code 1'),
+  );
+}));
+
+test('CodexBackend.runTurn preserves Codex stdout JSON error diagnostics on non-zero exit', withFakeBin('fake-codex-model-unsupported.mjs', async () => {
+  const backend = new CodexBackend();
+
+  await assert.rejects(
+    backend.runTurn(
+      { turnId: 'turn-1', prompt: 'hello' },
+      { ...BASE_OPTIONS, model: 'gpt-5.6', reasoningEffort: 'low' },
+    ),
+    (error) => error instanceof OpenPError &&
+      error.exitCode === EXIT_CODES.backendExited &&
+      error.message.includes('Codex CLI exited with code 1') &&
+      error.message.includes("The 'gpt-5.6' model is not supported when using Codex with a ChatGPT account"),
   );
 }));
 

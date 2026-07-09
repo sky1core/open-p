@@ -206,7 +206,7 @@ export class CodexBackend implements Backend {
           toolsUsed: [],
           usage,
           rawUsage: null,
-          model: options.model ?? resultSource.model ?? null,
+          model: resultSource.model ?? options.model ?? null,
           contextWindow: resultSource.contextWindow,
           lastSubturnUsage,
           lastSubturnContextTokens: addNullable(

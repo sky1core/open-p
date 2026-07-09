@@ -194,7 +194,7 @@ export class CodexWorkerBridge implements BackendWorkerBridge {
         outputTokens: usage.outputTokens,
         cacheReadInputTokens: usage.cacheReadInputTokens,
         rawUsage: null,
-        model: request.model ?? resultSource.model ?? null,
+        model: resultSource.model ?? request.model ?? null,
         contextWindow: resultSource.contextWindow,
         lastSubturnUsage,
         lastSubturnContextTokens: addNullable(

@@ -26,9 +26,6 @@ test('Codex descriptor declares execution modes', () => {
   assert.deepEqual(CODEX_DESCRIPTOR.executionModes, ['default', 'danger-full-access']);
 });
 
-test('Codex descriptor declares reasoning efforts', () => {
-  assert.ok(CODEX_DESCRIPTOR.reasoningEfforts.includes('low'));
-  assert.ok(CODEX_DESCRIPTOR.reasoningEfforts.includes('medium'));
-  assert.ok(CODEX_DESCRIPTOR.reasoningEfforts.includes('high'));
-  assert.ok(CODEX_DESCRIPTOR.reasoningEfforts.includes('xhigh'));
+test('Codex descriptor does not advertise a hardcoded reasoning effort catalog', () => {
+  assert.deepEqual(CODEX_DESCRIPTOR.reasoningEfforts, []);
 });

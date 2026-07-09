@@ -25,17 +25,17 @@ test('buildFirstTurnArgs maps danger-full-access to bypass sandbox args', () => 
 });
 
 test('buildFirstTurnArgs includes model when specified', () => {
-  const args = buildFirstTurnArgs('hello', { ...BASE_OPTIONS, model: 'gpt-5.5' });
+  const args = buildFirstTurnArgs('hello', { ...BASE_OPTIONS, model: 'gpt-5.6' });
   const modelIdx = args.indexOf('--model');
   assert.ok(modelIdx >= 0);
-  assert.equal(args[modelIdx + 1], 'gpt-5.5');
+  assert.equal(args[modelIdx + 1], 'gpt-5.6');
 });
 
 test('buildFirstTurnArgs includes reasoning effort as config override', () => {
-  const args = buildFirstTurnArgs('hello', { ...BASE_OPTIONS, reasoningEffort: 'high' });
+  const args = buildFirstTurnArgs('hello', { ...BASE_OPTIONS, reasoningEffort: 'max' });
   const cIdx = args.indexOf('-c');
   assert.ok(cIdx >= 0);
-  assert.equal(args[cIdx + 1], 'model_reasoning_effort="high"');
+  assert.equal(args[cIdx + 1], 'model_reasoning_effort="max"');
 });
 
 test('buildFirstTurnArgs uses sandbox mode for read-only', () => {
@@ -95,6 +95,20 @@ test('buildResumeTurnArgs does not add bypass sandbox args by default', () => {
 test('buildResumeTurnArgs maps danger-full-access to bypass sandbox args', () => {
   const args = buildResumeTurnArgs('session-uuid', 'hello', { ...BASE_OPTIONS, executionMode: 'danger-full-access' });
   assert.ok(args.includes('--dangerously-bypass-approvals-and-sandbox'));
+});
+
+test('buildResumeTurnArgs includes model when specified', () => {
+  const args = buildResumeTurnArgs('session-uuid', 'hello', { ...BASE_OPTIONS, model: 'gpt-5.6' });
+  const modelIdx = args.indexOf('--model');
+  assert.ok(modelIdx >= 0);
+  assert.equal(args[modelIdx + 1], 'gpt-5.6');
+});
+
+test('buildResumeTurnArgs includes reasoning effort as config override', () => {
+  const args = buildResumeTurnArgs('session-uuid', 'hello', { ...BASE_OPTIONS, reasoningEffort: 'max' });
+  const cIdx = args.indexOf('-c');
+  assert.ok(cIdx >= 0);
+  assert.equal(args[cIdx + 1], 'model_reasoning_effort="max"');
 });
 
 test('buildResumeTurnArgs rejects unsupported execution modes instead of falling back to trusted tools', () => {

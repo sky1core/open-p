@@ -14,7 +14,7 @@ export const CODEX_DESCRIPTOR: BackendDescriptor = {
   executionModes: ['default', 'danger-full-access'],
   defaultReasoningEffort: null,
   defaultReasoningEffortsByModel: {},
-  reasoningEfforts: ['low', 'medium', 'high', 'xhigh'],
+  reasoningEfforts: [],
   reasoningEffortsByModel: {},
   contextWindowsByModel: {},
   contextWindow: null,
