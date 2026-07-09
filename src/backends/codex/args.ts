@@ -111,9 +111,8 @@ function appendResumeSandboxArgs(args: string[], executionMode: string | null | 
 }
 
 function appendReasoningEffortArgs(args: string[], reasoningEffort: string | null | undefined): void {
-  const effort = reasoningEffort?.trim() || null;
-  if (effort) {
-    appendConfigOverride(args, 'model_reasoning_effort', effort);
+  if (reasoningEffort !== null && reasoningEffort !== undefined && reasoningEffort.length > 0) {
+    appendConfigOverride(args, 'model_reasoning_effort', reasoningEffort);
   }
 }
 

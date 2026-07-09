@@ -38,6 +38,13 @@ test('buildFirstTurnArgs includes reasoning effort as config override', () => {
   assert.equal(args[cIdx + 1], 'model_reasoning_effort="max"');
 });
 
+test('buildFirstTurnArgs preserves non-empty reasoning effort values for Codex validation', () => {
+  const args = buildFirstTurnArgs('hello', { ...BASE_OPTIONS, reasoningEffort: ' bogus ' });
+  const cIdx = args.indexOf('-c');
+  assert.ok(cIdx >= 0);
+  assert.equal(args[cIdx + 1], 'model_reasoning_effort=" bogus "');
+});
+
 test('buildFirstTurnArgs uses sandbox mode for read-only', () => {
   const args = buildFirstTurnArgs('hello', { ...BASE_OPTIONS, executionMode: 'read-only' });
   assert.ok(args.includes('--sandbox'));
@@ -109,6 +116,13 @@ test('buildResumeTurnArgs includes reasoning effort as config override', () => {
   const cIdx = args.indexOf('-c');
   assert.ok(cIdx >= 0);
   assert.equal(args[cIdx + 1], 'model_reasoning_effort="max"');
+});
+
+test('buildResumeTurnArgs preserves non-empty reasoning effort values for Codex validation', () => {
+  const args = buildResumeTurnArgs('session-uuid', 'hello', { ...BASE_OPTIONS, reasoningEffort: ' bogus ' });
+  const cIdx = args.indexOf('-c');
+  assert.ok(cIdx >= 0);
+  assert.equal(args[cIdx + 1], 'model_reasoning_effort=" bogus "');
 });
 
 test('buildResumeTurnArgs rejects unsupported execution modes instead of falling back to trusted tools', () => {

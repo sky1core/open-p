@@ -230,19 +230,63 @@ test('CodexBackend.runTurn throws on non-zero exit', withFakeBin('fake-codex-err
   );
 }));
 
-test('CodexBackend.runTurn preserves Codex stdout JSON error diagnostics on non-zero exit', withFakeBin('fake-codex-model-unsupported.mjs', async () => {
+test('CodexBackend.runTurn preserves Codex unsupported model diagnostics from stdout JSON on non-zero exit', withFakeBin('fake-codex-model-unsupported.mjs', async () => {
+  const prevArgsLog = process.env.OPENP_FAKE_CODEX_ARGS_LOG;
+  const argsLog = join(await mkdtemp(join(tmpdir(), 'openp-codex-bad-model-args-')), 'args.log');
+  process.env.OPENP_FAKE_CODEX_ARGS_LOG = argsLog;
   const backend = new CodexBackend();
+  try {
+    await assert.rejects(
+      backend.runTurn(
+        { turnId: 'turn-1', prompt: 'hello' },
+        { ...BASE_OPTIONS, model: 'definitely-not-a-real-codex-model', reasoningEffort: 'low' },
+      ),
+      (error) => error instanceof OpenPError &&
+        error.exitCode === EXIT_CODES.backendExited &&
+        error.message.includes('Codex CLI exited with code 1') &&
+        error.message.includes("The 'definitely-not-a-real-codex-model' model is not supported when using Codex with a ChatGPT account"),
+    );
 
-  await assert.rejects(
-    backend.runTurn(
-      { turnId: 'turn-1', prompt: 'hello' },
-      { ...BASE_OPTIONS, model: 'gpt-5.6', reasoningEffort: 'low' },
-    ),
-    (error) => error instanceof OpenPError &&
-      error.exitCode === EXIT_CODES.backendExited &&
-      error.message.includes('Codex CLI exited with code 1') &&
-      error.message.includes("The 'gpt-5.6' model is not supported when using Codex with a ChatGPT account"),
-  );
+    const args = await readFile(argsLog, 'utf8');
+    assert.match(args, /\t--model\tdefinitely-not-a-real-codex-model/);
+    assert.match(args, /\t-c\tmodel_reasoning_effort="low"/);
+  } finally {
+    if (prevArgsLog === undefined) {
+      delete process.env.OPENP_FAKE_CODEX_ARGS_LOG;
+    } else {
+      process.env.OPENP_FAKE_CODEX_ARGS_LOG = prevArgsLog;
+    }
+  }
+}));
+
+test('CodexBackend.runTurn preserves Codex unsupported reasoning effort diagnostics from stdout JSON on non-zero exit', withFakeBin('fake-codex-effort-unsupported.mjs', async () => {
+  const prevArgsLog = process.env.OPENP_FAKE_CODEX_ARGS_LOG;
+  const argsLog = join(await mkdtemp(join(tmpdir(), 'openp-codex-bad-effort-args-')), 'args.log');
+  process.env.OPENP_FAKE_CODEX_ARGS_LOG = argsLog;
+  const backend = new CodexBackend();
+  try {
+    await assert.rejects(
+      backend.runTurn(
+        { turnId: 'turn-1', prompt: 'hello' },
+        { ...BASE_OPTIONS, model: 'gpt-5.5', reasoningEffort: 'bogus' },
+      ),
+      (error) => error instanceof OpenPError &&
+        error.exitCode === EXIT_CODES.backendExited &&
+        error.message.includes('Codex CLI exited with code 1') &&
+        error.message.includes('[ReasoningEffortParam] [reasoning.effort] [invalid_enum_value]') &&
+        error.message.includes("Invalid value: 'bogus'"),
+    );
+
+    const args = await readFile(argsLog, 'utf8');
+    assert.match(args, /\t--model\tgpt-5\.5/);
+    assert.match(args, /\t-c\tmodel_reasoning_effort="bogus"/);
+  } finally {
+    if (prevArgsLog === undefined) {
+      delete process.env.OPENP_FAKE_CODEX_ARGS_LOG;
+    } else {
+      process.env.OPENP_FAKE_CODEX_ARGS_LOG = prevArgsLog;
+    }
+  }
 }));
 
 test('CodexBackend.runTurn reports a completed Codex turn with no final answer', withFakeBin('fake-codex-exit-no-final-session-log.mjs', async () => {

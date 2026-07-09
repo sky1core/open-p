@@ -99,6 +99,14 @@ Streaming records use `openp.form: "streaming"` with a strict oneOf `openp.outpu
 
 Streaming `answer` and `reasoning` values are cumulative snapshots, not deltas. Tool streaming records contain complete objects.
 
+## Codex Backend Notes
+
+The Codex backend does not publish a hardcoded model or reasoning-effort catalog. `--model <model>` is passed through to Codex CLI as `--model <model>`, and `--effort <level>` is passed through as `-c model_reasoning_effort="<level>"`.
+
+If Codex rejects the requested model or effort, `openp` preserves the Codex diagnostic in the non-zero exit error instead of replacing it with a generic failure. For example, unsupported models and invalid reasoning-effort enum values are reported from Codex's own JSON output when available.
+
+When a Codex session log exposes the actual selected model, result metadata reports that model before falling back to the requested model string.
+
 ## Claude Backend Notes
 
 The Claude backend runs through a PTY-backed interactive Claude Code session and reads Claude's local session log for structured turn data. It does not use Claude print mode.
