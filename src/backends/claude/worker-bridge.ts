@@ -119,10 +119,7 @@ export class ClaudeCodeWorkerBridge implements BackendWorkerBridge {
           throw new OpenPError('Claude Code returned a different session id for resume turn', EXIT_CODES.protocolViolation);
         }
         this.manager.rekey(backendSessionId, resultSessionId, process);
-        return toWorkerTurnResult(result, resultSessionId, {
-          contextWindow: resolveRequestContextWindow(request),
-          intermediateTextCount,
-        });
+        return toWorkerTurnResult(result, resultSessionId, { intermediateTextCount });
       } catch (error) {
         await this.manager.discard(backendSessionId, process).catch(() => undefined);
         throw error;
@@ -137,11 +134,4 @@ export class ClaudeCodeWorkerBridge implements BackendWorkerBridge {
   async shutdown(): Promise<void> {
     await this.manager.shutdownAll();
   }
-}
-
-function resolveRequestContextWindow(request: WorkerTurnRequest): number | null {
-  if (request.model && request.contextWindowsByModel && Number.isFinite(request.contextWindowsByModel[request.model])) {
-    return request.contextWindowsByModel[request.model]!;
-  }
-  return typeof request.contextWindow === 'number' && Number.isFinite(request.contextWindow) ? request.contextWindow : null;
 }

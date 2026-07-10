@@ -112,6 +112,9 @@ function extractFromEvents(
 
   for (const event of events) {
     const type = event.type as string | undefined;
+    const precedingAgentMessageMirrorCandidate = lastAgentMessageMirrorCandidate;
+    // A mirror candidate is valid for exactly the next parsed native record.
+    lastAgentMessageMirrorCandidate = null;
 
     if (type === 'thread.started') {
       if (!sessionId && typeof event.thread_id === 'string') {
@@ -150,8 +153,13 @@ function extractFromEvents(
 
       if (payload.type === 'message' && payload.role === 'assistant') {
         const text = extractMessageOutputText(payload);
+        const mirrorText = extractRawMessageOutputText(payload);
         if (text) {
-          if (isCodexAgentMessageMirror(lastAgentMessageMirrorCandidate, payload.phase, text)) {
+          if (mirrorText !== null && isCodexAgentMessageMirror(
+            precedingAgentMessageMirrorCandidate,
+            payload.phase,
+            mirrorText,
+          )) {
             lastAgentMessageMirrorCandidate = null;
             continue;
           }
@@ -182,7 +190,8 @@ function extractFromEvents(
       if (!payload) continue;
       if (payload.type === 'agent_message') {
         if (typeof payload.message === 'string' && payload.message.trim()) {
-          const text = payload.message.trim();
+          const mirrorText = payload.message;
+          const text = mirrorText.trim();
           if (isFinalResponsePhase(payload.phase)) {
             lastResponseItemText = text;
             pushAnswerSnapshot(text, payload.phase, payload.id);
@@ -192,7 +201,7 @@ function extractFromEvents(
             lastResponseItemText ??= text;
             pushAnswerSnapshot(text, payload.phase, payload.id);
           }
-          lastAgentMessageMirrorCandidate = buildCodexAgentMessageMirrorCandidate(payload.phase, text);
+          lastAgentMessageMirrorCandidate = buildCodexAgentMessageMirrorCandidate(payload.phase, mirrorText);
         }
         continue;
       }
@@ -302,6 +311,22 @@ function extractMessageOutputText(payload: Record<string, unknown>): string | nu
   return parts.length > 0 ? parts.join('\n') : null;
 }
 
+function extractRawMessageOutputText(payload: Record<string, unknown>): string | null {
+  const contentArr = payload.content;
+  if (!Array.isArray(contentArr)) return null;
+
+  const parts: string[] = [];
+  for (const block of contentArr) {
+    if (block && typeof block === 'object' && !Array.isArray(block)) {
+      const record = block as Record<string, unknown>;
+      if (record.type === 'output_text' && typeof record.text === 'string' && record.text.trim()) {
+        parts.push(record.text);
+      }
+    }
+  }
+  return parts.length > 0 ? parts.join('\n') : null;
+}
+
 function extractAgentMessageText(item: Record<string, unknown>): string | null {
   return item.type === 'agent_message' && typeof item.text === 'string' && item.text.trim()
     ? item.text.trim()
@@ -326,9 +351,15 @@ export function processCodexStdoutLine(
   callbacks: CodexStreamCallbacks,
 ): void {
   const event = parseCodexJsonlLine(line);
-  if (!event) return;
+  if (!event) {
+    state.lastAgentMessageMirrorCandidate = null;
+    return;
+  }
 
   const type = event.type as string | undefined;
+  const precedingAgentMessageMirrorCandidate = state.lastAgentMessageMirrorCandidate;
+  // A mirror candidate is valid for exactly the next stdout record.
+  state.lastAgentMessageMirrorCandidate = null;
 
   if (type === 'response_item') {
     const payload = asObject(event.payload);
@@ -346,8 +377,13 @@ export function processCodexStdoutLine(
 
     if (payload.type === 'message' && payload.role === 'assistant') {
       const text = extractMessageOutputText(payload);
+      const mirrorText = extractRawMessageOutputText(payload);
       if (text) {
-        if (isCodexAgentMessageMirror(state.lastAgentMessageMirrorCandidate, payload.phase, text)) {
+        if (mirrorText !== null && isCodexAgentMessageMirror(
+          precedingAgentMessageMirrorCandidate,
+          payload.phase,
+          mirrorText,
+        )) {
           state.lastAgentMessageMirrorCandidate = null;
           return;
         }
@@ -380,7 +416,8 @@ export function processCodexStdoutLine(
     if (!payload) return;
     if (payload.type === 'agent_message') {
       if (typeof payload.message === 'string' && payload.message.trim()) {
-        const text = payload.message.trim();
+        const mirrorText = payload.message;
+        const text = mirrorText.trim();
         if (isFinalResponsePhase(payload.phase)) {
           appendAssistantText(state, callbacks, text, {
             publish: state.streamFinalAssistantText,
@@ -391,7 +428,7 @@ export function processCodexStdoutLine(
         } else {
           appendAssistantText(state, callbacks, text);
         }
-        state.lastAgentMessageMirrorCandidate = buildCodexAgentMessageMirrorCandidate(payload.phase, text);
+        state.lastAgentMessageMirrorCandidate = buildCodexAgentMessageMirrorCandidate(payload.phase, mirrorText);
       }
       return;
     }
@@ -645,6 +682,9 @@ function nextCodexAssistantEventId(state: CodexStreamState, nativeId: unknown): 
   return `seq_${state.assistantEventSequence}`;
 }
 
+// Codex session-style JSONL writes one logical assistant message first as
+// event_msg.agent_message and then as an adjacent response_item.message. The event record has no
+// native id, so adjacency plus exact native phase/text is the complete structural mirror key.
 function buildCodexAgentMessageMirrorCandidate(phase: unknown, text: string): CodexAgentMessageMirrorCandidate {
   return {
     phase: codexPhaseKey(phase),

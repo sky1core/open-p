@@ -3,7 +3,7 @@ import test from 'node:test';
 import { toWorkerTurnResult } from '../src/core/worker-result.js';
 import type { TurnResult } from '../src/core/types.js';
 
-test('maps current turn result to null-safe worker result diagnostics', () => {
+test('maps current turn result without synthesizing backend context capacity', () => {
   const result: TurnResult = {
     turnId: 'turn-1',
     text: 'hello',
@@ -22,10 +22,11 @@ test('maps current turn result to null-safe worker result diagnostics', () => {
     },
   };
 
-  assert.deepEqual(toWorkerTurnResult(result, 'session-1', {
+  const legacyMappingOptions = {
     contextWindow: 200_000,
     intermediateTextCount: 2,
-  }), {
+  };
+  assert.deepEqual(toWorkerTurnResult(result, 'session-1', legacyMappingOptions), {
     content: 'hello',
     reasoningContent: 'reasoning',
     structuredOutput: { ok: true },
@@ -36,7 +37,7 @@ test('maps current turn result to null-safe worker result diagnostics', () => {
       inputTokens: 10,
       outputTokens: 3,
       cacheReadInputTokens: 5,
-      contextWindow: 200_000,
+      contextWindow: null,
       lastSubturnContextTokens: null,
       durationMs: 123,
       totalCostUsd: null,

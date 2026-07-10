@@ -94,12 +94,15 @@ test('formats json output as one top-level openp result record', () => {
     ...RESULT,
     structuredOutput: undefined,
     reasoningContent: 'visible reasoning',
+    diagnostics: {
+      ...RESULT.diagnostics,
+      contextWindow: 258400,
+    },
   }, {
     outputFormat: 'json',
     backendSessionId: '11111111-1111-4111-8111-111111111111',
     backend: 'codex',
     model: 'codex-test',
-    contextWindow: 258400,
   }));
 
   assert.equal(openp.version, 1);
@@ -128,6 +131,25 @@ test('formats json output as one top-level openp result record', () => {
   assert.equal(metadata(openp).numTurns, null);
 });
 
+test('does not synthesize context window from output metadata', () => {
+  const result: TurnResult = {
+    ...RESULT,
+    diagnostics: {
+      ...RESULT.diagnostics,
+      contextWindow: null,
+    },
+  };
+  const legacyOutputOptions = {
+    outputFormat: 'json',
+    backendSessionId: '11111111-1111-4111-8111-111111111111',
+    contextWindow: 258400,
+  } as const;
+  const openp = parseJsonOpenP(formatTurnResult(result, legacyOutputOptions));
+
+  assert.equal(metadata(openp).contextWindow, null);
+  assert.equal(metadata(openp).modelUsage, undefined);
+});
+
 test('formats result metadata with derived last subturn context token usage', () => {
   const openp = parseJsonOpenP(formatTurnResult({
     ...RESULT,
@@ -144,13 +166,13 @@ test('formats result metadata with derived last subturn context token usage', ()
         cacheReadInputTokens: 3,
         outputTokens: 2,
       },
+      contextWindow: 258400,
     },
   }, {
     outputFormat: 'json',
     backendSessionId: '11111111-1111-4111-8111-111111111111',
     backend: 'codex',
     model: 'codex-test',
-    contextWindow: 258400,
   }));
 
   assert.deepEqual(metadata(openp).usage, {
@@ -252,7 +274,6 @@ test('does not derive last subturn context token usage from aggregate-only usage
     backendSessionId: '11111111-1111-4111-8111-111111111111',
     backend: 'codex',
     model: 'codex-test',
-    contextWindow: 258400,
   }));
 
   assert.deepEqual(metadata(openp).usage, {

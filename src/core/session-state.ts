@@ -1,4 +1,5 @@
-import { mkdir, readFile, stat, writeFile, chmod } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { chmod, mkdir, open, readFile, rename, stat, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { EXIT_CODES, OpenPError } from './errors.js';
 import { isSafeSessionId } from './session-id.js';
@@ -98,8 +99,22 @@ export class SessionStateStore {
 
     await mkdir(join(this.stateRoot, 'sessions'), { recursive: true, mode: 0o700 });
     const path = this.pathForSession(input.backendSessionId);
-    await writeFile(path, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
-    await chmod(path, 0o600).catch(() => undefined);
+    const tempPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
+    try {
+      const file = await open(tempPath, 'wx', 0o600);
+      try {
+        await file.writeFile(`${JSON.stringify(state, null, 2)}\n`, 'utf8');
+        await file.sync();
+      } finally {
+        await file.close();
+      }
+      await rename(tempPath, path);
+      await chmod(path, 0o600).catch(() => undefined);
+    } catch (error) {
+      await unlink(tempPath).catch(() => undefined);
+      if (error instanceof OpenPError) throw error;
+      throw new OpenPError(`failed to write session state: ${path}`, EXIT_CODES.sessionState);
+    }
     return state;
   }
 }

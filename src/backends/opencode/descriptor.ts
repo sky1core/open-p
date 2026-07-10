@@ -14,7 +14,7 @@ export const OPENCODE_DESCRIPTOR: BackendDescriptor = {
   executionModes: ['default', 'danger-full-access'],
   defaultReasoningEffort: null,
   defaultReasoningEffortsByModel: {},
-  reasoningEfforts: ['minimal', 'low', 'medium', 'high', 'max'],
+  reasoningEfforts: [],
   reasoningEffortsByModel: {},
   contextWindowsByModel: {},
   contextWindow: null,

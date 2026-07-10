@@ -685,7 +685,7 @@ test('processCodexStdoutLine accumulates reasoning text', () => {
   assert.deepEqual(texts, ['thinking...']);
 });
 
-test('processCodexStdoutLine emits only one snapshot for Codex event_msg/response_item assistant mirrors', () => {
+test('processCodexStdoutLine emits one snapshot for a Codex event_msg/response_item mirror pair', () => {
   const state = createStreamState();
   const texts: string[] = [];
   const snapshots: string[] = [];
@@ -708,6 +708,128 @@ test('processCodexStdoutLine emits only one snapshot for Codex event_msg/respons
   assert.equal(state.lastAssistantText, 'checking files...');
   assert.deepEqual(texts, ['checking files...']);
   assert.deepEqual(snapshots, ['checking files...']);
+});
+
+test('parseCodexOutput preserves equal messages separated by another native record', () => {
+  const stdout = [
+    JSON.stringify({
+      type: 'event_msg',
+      payload: { type: 'agent_message', message: 'checking files...', phase: 'commentary' },
+    }),
+    JSON.stringify({ type: 'turn.started' }),
+    JSON.stringify({
+      type: 'response_item',
+      payload: {
+        id: 'response_after_boundary',
+        type: 'message',
+        role: 'assistant',
+        phase: 'commentary',
+        content: [{ type: 'output_text', text: 'checking files...' }],
+      },
+    }),
+  ].join('\n');
+
+  const parsed = parseCodexOutput(stdout, null);
+
+  assert.equal(parsed.assistantEvents.length, 2);
+  assert.deepEqual(firstBlocks(parsed.assistantEvents), [
+    { type: 'text', text: 'checking files...' },
+    { type: 'text', text: 'checking files...' },
+  ]);
+});
+
+test('processCodexStdoutLine preserves an equal response_item after an intervening record', () => {
+  const state = createStreamState();
+  const texts: string[] = [];
+  const snapshots: string[] = [];
+  const callbacks = {
+    onAssistantText: (text: string) => texts.push(text),
+    onAssistantSnapshot: (snapshot: any) => snapshots.push(snapshot.message.content[0]?.text),
+  };
+  processCodexStdoutLine(
+    JSON.stringify({ type: 'event_msg', payload: { type: 'agent_message', message: 'checking files...', phase: 'commentary' } }),
+    state,
+    callbacks,
+  );
+  processCodexStdoutLine(JSON.stringify({ type: 'turn.started' }), state, callbacks);
+  processCodexStdoutLine(
+    JSON.stringify({
+      type: 'response_item',
+      payload: {
+        id: 'response_after_boundary',
+        type: 'message',
+        role: 'assistant',
+        phase: 'commentary',
+        content: [{ type: 'output_text', text: 'checking files...' }],
+      },
+    }),
+    state,
+    callbacks,
+  );
+
+  assert.equal(state.assistantText, 'checking files...\n\nchecking files...');
+  assert.deepEqual(texts, ['checking files...', 'checking files...\n\nchecking files...']);
+  assert.deepEqual(snapshots, ['checking files...', 'checking files...']);
+});
+
+test('parseCodexOutput preserves adjacent messages whose native text differs', () => {
+  const stdout = [
+    JSON.stringify({
+      type: 'event_msg',
+      payload: { type: 'agent_message', message: 'checking files...', phase: 'commentary' },
+    }),
+    JSON.stringify({
+      type: 'response_item',
+      payload: {
+        id: 'response_with_trailing_newline',
+        type: 'message',
+        role: 'assistant',
+        phase: 'commentary',
+        content: [{ type: 'output_text', text: 'checking files...\n' }],
+      },
+    }),
+  ].join('\n');
+
+  const parsed = parseCodexOutput(stdout, null);
+
+  assert.equal(parsed.assistantEvents.length, 2);
+  assert.deepEqual(firstBlocks(parsed.assistantEvents), [
+    { type: 'text', text: 'checking files...' },
+    { type: 'text', text: 'checking files...' },
+  ]);
+});
+
+test('processCodexStdoutLine preserves adjacent messages whose native text differs', () => {
+  const state = createStreamState();
+  const texts: string[] = [];
+  const snapshots: string[] = [];
+  const callbacks = {
+    onAssistantText: (text: string) => texts.push(text),
+    onAssistantSnapshot: (snapshot: any) => snapshots.push(snapshot.message.content[0]?.text),
+  };
+  processCodexStdoutLine(
+    JSON.stringify({ type: 'event_msg', payload: { type: 'agent_message', message: 'checking files...', phase: 'commentary' } }),
+    state,
+    callbacks,
+  );
+  processCodexStdoutLine(
+    JSON.stringify({
+      type: 'response_item',
+      payload: {
+        id: 'response_with_trailing_newline',
+        type: 'message',
+        role: 'assistant',
+        phase: 'commentary',
+        content: [{ type: 'output_text', text: 'checking files...\n' }],
+      },
+    }),
+    state,
+    callbacks,
+  );
+
+  assert.equal(state.assistantText, 'checking files...\n\nchecking files...');
+  assert.deepEqual(texts, ['checking files...', 'checking files...\n\nchecking files...']);
+  assert.deepEqual(snapshots, ['checking files...', 'checking files...']);
 });
 
 test('processCodexStdoutLine preserves repeated commentary event_msg snapshots and answer streaming', () => {

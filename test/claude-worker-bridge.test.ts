@@ -140,7 +140,7 @@ test('worker bridge creates a backend session and sends first turn as raw messag
   assert.equal(result.sessionId, starts[0]?.sessionId);
   assert.equal(result.content, 'final');
   assert.equal(result.diagnostics.stopReason, 'end_turn');
-  assert.equal(result.diagnostics.contextWindow, 200_000);
+  assert.equal(result.diagnostics.contextWindow, null);
   assert.equal(result.diagnostics.intermediateTextCount, 1);
   assert.deepEqual(streamed, ['final']);
   assert.deepEqual(background, []);

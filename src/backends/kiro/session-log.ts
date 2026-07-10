@@ -86,7 +86,16 @@ export async function waitForKiroTurnResult(options: {
 
   for (;;) {
     options.throwIfStopped?.();
-    const snapshot = await readKiroTurnResultText(options.sessionId, options.fromOffset, options.env);
+    const allowIncompleteTrailingLine = Date.now() < options.deadlineMs;
+    let snapshot = await readKiroTurnResultText(
+      options.sessionId,
+      options.fromOffset,
+      options.env,
+      allowIncompleteTrailingLine,
+    );
+    if (allowIncompleteTrailingLine && Date.now() >= options.deadlineMs) {
+      snapshot = await readKiroTurnResultText(options.sessionId, options.fromOffset, options.env, false);
+    }
     sawLog ||= snapshot.logFound;
     sawScopedRecords ||= snapshot.sawScopedRecords;
     if (snapshot.text !== null || snapshot.assistantEvents.length > 0) {
@@ -123,6 +132,7 @@ async function readKiroTurnResultText(
   sessionId: string,
   fromOffset: number,
   env: NodeJS.ProcessEnv = process.env,
+  allowIncompleteTrailingLine = false,
 ): Promise<KiroTurnResultRead> {
   const logPath = resolveKiroSessionLogPath(sessionId, env);
   if (!logPath) {
@@ -160,10 +170,10 @@ async function readKiroTurnResultText(
     };
   }
   const rawLogSegment = await readTextFromOffset(logPath, fromOffset, size);
-  const result = extractKiroTurnResult(rawLogSegment);
+  const result = extractKiroTurnResultFromSegment(rawLogSegment, allowIncompleteTrailingLine);
   return {
     logFound: true,
-    sawScopedRecords: containsParsedKiroRecord(rawLogSegment),
+    sawScopedRecords: containsParsedKiroRecord(rawLogSegment, allowIncompleteTrailingLine),
     text: result.text,
     assistantEvents: result.assistantEvents,
     toolsUsed: result.toolsUsed,
@@ -180,28 +190,23 @@ export function extractKiroTurnResult(rawLogSegment: string): {
   readonly assistantEvents: readonly AssistantEventSnapshot[];
   readonly toolsUsed: readonly string[];
 } {
+  return extractKiroTurnResultFromSegment(rawLogSegment, false);
+}
+
+function extractKiroTurnResultFromSegment(
+  rawLogSegment: string,
+  allowIncompleteTrailingLine: boolean,
+): {
+  readonly text: string | null;
+  readonly assistantEvents: readonly AssistantEventSnapshot[];
+  readonly toolsUsed: readonly string[];
+} {
   const assistantMessages: string[] = [];
   const assistantEvents: AssistantEventSnapshot[] = [];
   const toolsUsed = new Set<string>();
   let sawCallerPrompt = false;
 
-  for (const rawLine of rawLogSegment.split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (!line) {
-      continue;
-    }
-
-    let event: JsonObject;
-    try {
-      const parsed: unknown = JSON.parse(line);
-      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-        continue;
-      }
-      event = parsed as JsonObject;
-    } catch {
-      continue;
-    }
-
+  for (const event of parseKiroJsonlRecords(rawLogSegment, allowIncompleteTrailingLine)) {
     const promptClassification = classifyKiroPromptEvent(event);
     if (promptClassification === 'unsupported') {
       throwUnsupportedKiroPromptShape();
@@ -252,22 +257,44 @@ export function extractKiroTurnResult(rawLogSegment: string): {
   };
 }
 
-function containsParsedKiroRecord(rawLogSegment: string): boolean {
-  for (const rawLine of rawLogSegment.split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (!line) {
-      continue;
-    }
+function containsParsedKiroRecord(rawLogSegment: string, allowIncompleteTrailingLine: boolean): boolean {
+  return parseKiroJsonlRecords(rawLogSegment, allowIncompleteTrailingLine).length > 0;
+}
+
+function parseKiroJsonlRecords(
+  rawLogSegment: string,
+  allowIncompleteTrailingLine: boolean,
+): readonly JsonObject[] {
+  const rawLines = rawLogSegment.split(/\r?\n/);
+  const records: JsonObject[] = [];
+  const hasTerminatingLineBreak = /(?:\r?\n)$/.test(rawLogSegment);
+  for (let index = 0; index < rawLines.length; index += 1) {
+    const line = rawLines[index]!.trim();
+    if (!line) continue;
+    let parsed: unknown;
     try {
-      const parsed: unknown = JSON.parse(line);
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        return true;
-      }
+      parsed = JSON.parse(line);
     } catch {
-      continue;
+      const isIncompleteTrailingLine = index === rawLines.length - 1 && !hasTerminatingLineBreak;
+      if (allowIncompleteTrailingLine && isIncompleteTrailingLine) {
+        continue;
+      }
+      throw new OpenPError(
+        'Kiro session log contains malformed JSONL',
+        EXIT_CODES.protocolViolation,
+        ARTIFACT_REJECTION_REASONS.unsupportedArtifactShape,
+      );
     }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new OpenPError(
+        'Kiro session log contains non-object JSONL record',
+        EXIT_CODES.protocolViolation,
+        ARTIFACT_REJECTION_REASONS.unsupportedArtifactShape,
+      );
+    }
+    records.push(parsed as JsonObject);
   }
-  return false;
+  return records;
 }
 
 function classifyKiroPromptEvent(event: JsonObject): KiroPromptEventClassification {

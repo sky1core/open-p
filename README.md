@@ -99,6 +99,12 @@ Streaming records use `openp.form: "streaming"` with a strict oneOf `openp.outpu
 
 Streaming `answer` and `reasoning` values are cumulative snapshots, not deltas. Tool streaming records contain complete objects.
 
+## Model And Effort Selection
+
+`openp` does not maintain model or reasoning-effort availability catalogs. For a backend that exposes native selectors, caller-provided non-empty `--model` and `--effort` values are passed unchanged through the backend-specific native option mapping. The backend CLI remains the authority on whether a value is accepted; a rejection is returned as a backend-exit error with available native diagnostics instead of an open-p enum-validation error.
+
+OpenCode is the bounded exception for provider selection: its local-private backend still requires one of its configured localhost provider prefixes. This is a network/privacy boundary, not validation that a particular model id exists. The model id after the prefix and the effort value are passed unchanged.
+
 ## Codex Backend Notes
 
 The Codex backend does not publish a hardcoded model or reasoning-effort catalog. `--model <model>` is passed through to Codex CLI as `--model <model>`, and `--effort <level>` is passed through as `-c model_reasoning_effort="<level>"`.
@@ -155,6 +161,8 @@ The OpenCode backend is intended for local-provider use. On Apple Silicon, prefe
 - `lmstudio/<model-id>` -> `http://localhost:1234/v1`
 - `ollama/<model-id>` -> `http://localhost:11434/v1`
 - `llama.cpp/<model-id>` -> `http://localhost:8080/v1`
+
+The backend does not publish a hardcoded model or reasoning-effort catalog. Within its required local-provider boundary, `--model <provider>/<model-id>` is passed as OpenCode `--model` and `--effort <level>` is passed unchanged as `--variant <level>`. Non-zero exits preserve bounded OpenCode stdout and stderr diagnostics, including non-JSON output.
 
 OpenCode provider ids are config keys, so the provider id alone is not a privacy boundary. `openp` injects a private OpenCode config for the selected local provider and does not load ambient OpenCode provider credentials.
 

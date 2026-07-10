@@ -194,7 +194,7 @@ test('stream-json worker uses open-p WorkerBridge instead of forwarding backend 
   assert.equal(bridge.requests[0]?.debugLog, debugLogPath);
   assert.equal(bridge.requests[1]?.debugLog, debugLogPath);
   assert.equal(bridge.requests[0]?.projectRoot, '/work/open-p');
-  assert.equal(bridge.requests[0]?.contextWindow, 200000);
+  assert.equal(bridge.requests[0]?.contextWindow, undefined);
   assert.equal(bridge.requests[0]?.reasoningEffort, null);
   assert.deepEqual(bridge.requests[0]?.binArgs, []);
   const binArgs = [...(bridge.requests[0]?.binArgs ?? [])] as string[];

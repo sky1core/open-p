@@ -50,6 +50,24 @@ test('buildOpenCodeArgs resumes with a safe session id', () => {
   ]);
 });
 
+test('buildOpenCodeArgs passes arbitrary non-empty effort values to OpenCode without normalization', () => {
+  const args = buildOpenCodeArgs({
+    message: 'hello',
+    sessionId: null,
+    isFirstTurn: true,
+    options: {
+      model: 'ollama/qwen-coder',
+      reasoningEffort: ' future-effort ',
+      executionMode: null,
+      tools: null,
+      jsonSchema: null,
+      backendArgs: [],
+    },
+  });
+
+  assert.deepEqual(args.slice(-3), ['--variant', ' future-effort ', 'hello']);
+});
+
 test('requireLocalModel rejects non-local provider prefixes', () => {
   assert.throws(
     () => requireLocalModel('openai/gpt-5'),

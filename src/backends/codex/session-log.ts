@@ -231,6 +231,9 @@ export function extractSessionLogResult(rawLog: string): CodexSessionLogResult {
 
     const type = event.type as string | undefined;
     const payload = asObject(event.payload);
+    const precedingAgentMessageMirrorCandidate = lastAgentMessageMirrorCandidate;
+    // A mirror candidate is valid for exactly the next session-log record.
+    lastAgentMessageMirrorCandidate = null;
 
     if (type === 'turn_context') {
       currentTurnModel = payload && typeof payload.model === 'string' && payload.model.trim()
@@ -278,8 +281,13 @@ export function extractSessionLogResult(rawLog: string): CodexSessionLogResult {
 
       if (payload.type === 'message' && payload.role === 'assistant') {
         const text = extractOutputText(payload);
+        const mirrorText = extractRawOutputText(payload);
         if (text) {
-          if (isCodexSessionLogAgentMessageMirror(lastAgentMessageMirrorCandidate, payload.phase, text)) {
+          if (mirrorText !== null && isCodexSessionLogAgentMessageMirror(
+            precedingAgentMessageMirrorCandidate,
+            payload.phase,
+            mirrorText,
+          )) {
             lastAgentMessageMirrorCandidate = null;
             continue;
           }
@@ -313,7 +321,8 @@ export function extractSessionLogResult(rawLog: string): CodexSessionLogResult {
       }
       if (payload.type === 'agent_message') {
         if (typeof payload.message === 'string' && payload.message.trim()) {
-          const text = payload.message.trim();
+          const mirrorText = payload.message;
+          const text = mirrorText.trim();
           if (isFinalPhase(payload.phase)) {
             lastFinalResponseItemText = text;
             pushAnswerSnapshot(text, payload.phase, payload.id);
@@ -323,7 +332,7 @@ export function extractSessionLogResult(rawLog: string): CodexSessionLogResult {
             lastFinalResponseItemText ??= text;
             pushAnswerSnapshot(text, payload.phase, payload.id);
           }
-          lastAgentMessageMirrorCandidate = buildCodexSessionLogAgentMessageMirrorCandidate(payload.phase, text);
+          lastAgentMessageMirrorCandidate = buildCodexSessionLogAgentMessageMirrorCandidate(payload.phase, mirrorText);
         } else {
           lastAgentMessageMirrorCandidate = null;
         }
@@ -448,6 +457,21 @@ function extractOutputText(payload: Record<string, unknown>): string | null {
   return parts.length > 0 ? parts.join('\n') : null;
 }
 
+function extractRawOutputText(payload: Record<string, unknown>): string | null {
+  const contentArr = payload.content;
+  if (!Array.isArray(contentArr)) return null;
+  const parts: string[] = [];
+  for (const block of contentArr) {
+    if (block && typeof block === 'object' && !Array.isArray(block)) {
+      const record = block as Record<string, unknown>;
+      if (record.type === 'output_text' && typeof record.text === 'string' && record.text.trim()) {
+        parts.push(record.text);
+      }
+    }
+  }
+  return parts.length > 0 ? parts.join('\n') : null;
+}
+
 function extractTokenCountFromPayload(
   payload: Record<string, unknown>,
   model: string | null,
@@ -500,6 +524,8 @@ function isCommentaryPhase(phase: unknown): phase is string {
   return phase === 'commentary' || phase === 'progress';
 }
 
+// Codex writes event_msg.agent_message and an immediately following response_item.message for
+// one logical assistant message. Separate equal response items remain independent artifacts.
 function buildCodexSessionLogAgentMessageMirrorCandidate(
   phase: unknown,
   text: string,

@@ -2,7 +2,6 @@ import type { TurnResult } from './types.js';
 import type { WorkerTurnResult } from './worker-types.js';
 
 export interface WorkerResultMappingOptions {
-  readonly contextWindow?: number | null;
   readonly numTurns?: number | null;
   readonly stopReason?: string | null;
   readonly totalCostUsd?: number | null;
@@ -41,7 +40,7 @@ export function toWorkerTurnResult(
       ...(cacheCreationInputTokens !== undefined ? { cacheCreationInputTokens } : {}),
       ...(result.diagnostics.rawUsage ? { rawUsage: result.diagnostics.rawUsage } : {}),
       ...(result.diagnostics.model ? { model: result.diagnostics.model } : {}),
-      contextWindow: result.diagnostics.contextWindow ?? options.contextWindow ?? null,
+      contextWindow: result.diagnostics.contextWindow ?? null,
       ...(lastSubturnUsage ? { lastSubturnUsage } : {}),
       lastSubturnContextTokens,
       durationMs: result.diagnostics.durationMs,

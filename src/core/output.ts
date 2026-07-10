@@ -12,7 +12,6 @@ export interface OutputOptions {
   readonly cwd?: string | null;
   readonly permissionMode?: string | null;
   readonly mcpServers?: readonly unknown[];
-  readonly contextWindow?: number | null;
   readonly structuredOutputToolUseId?: string | null;
   readonly suppressAssistantSnapshots?: readonly AssistantEventSnapshot[];
   readonly previouslyEmittedAssistantEvents?: readonly Record<string, unknown>[];
@@ -60,8 +59,7 @@ export function formatTurnResult(result: TurnResult, options: OutputOptions): st
   const lastSubturnContextTokens =
     result.diagnostics.lastSubturnContextTokens ??
     (lastSubturnUsage ? contextTokensFromUsage(lastSubturnUsage) : null);
-  const effectiveContextWindow =
-    result.diagnostics.contextWindow ?? options.contextWindow ?? null;
+  const effectiveContextWindow = result.diagnostics.contextWindow ?? null;
   const structuredOutputToolUseId = resolveStructuredOutputToolUseId({
     structuredOutput: result.structuredOutput,
     assistantEvents: result.assistantEvents,

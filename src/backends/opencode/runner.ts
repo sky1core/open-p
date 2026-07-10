@@ -72,11 +72,10 @@ export async function runOpenCodeTurn(input: OpenCodeTurnInput): Promise<OpenCod
     throw new OpenPError(`OpenCode did not respond within ${timeoutSec}s`, EXIT_CODES.timeout);
   }
 
-  const parsed = parseOpenCodeJsonOutput(result.stdout);
   if (result.exitCode !== 0) {
-    const message = parsed.errorMessage ?? (result.stderr.trim() || `OpenCode exited with status ${result.exitCode}`);
-    throw new OpenPError(message, EXIT_CODES.backendExited);
+    throw createOpenCodeNonZeroExitError(result.exitCode, result.stdout, result.stderr);
   }
+  const parsed = parseOpenCodeJsonOutput(result.stdout);
   if (parsed.errorMessage) {
     throw new OpenPError(parsed.errorMessage, EXIT_CODES.backendExited);
   }
@@ -116,4 +115,14 @@ export async function runOpenCodeTurn(input: OpenCodeTurnInput): Promise<OpenCod
     rawEventCount: parsed.rawEventCount,
     diagnostics,
   };
+}
+
+function createOpenCodeNonZeroExitError(exitCode: number | null, stdout: string, stderr: string): OpenPError {
+  const stdoutDiagnostic = stdout.trim().slice(0, 500);
+  const stderrDiagnostic = stderr.trim().slice(0, 500);
+  const diagnostics = [stdoutDiagnostic, stderrDiagnostic].filter((value, index, values) => (
+    value.length > 0 && values.indexOf(value) === index
+  ));
+  const details = diagnostics.length > 0 ? `: ${diagnostics.join(' | ').slice(0, 700)}` : '';
+  return new OpenPError(`OpenCode CLI exited with code ${exitCode ?? 'unknown'}${details}`, EXIT_CODES.backendExited);
 }

@@ -623,6 +623,87 @@ test('extractSessionLogResult preserves repeated equal final answers from differ
   assert.deepEqual(publicOutput.answer, ['repeat answer', 'repeat answer']);
 });
 
+test('extractSessionLogResult emits one answer for a Codex event_msg/response_item mirror pair', () => {
+  const log = [
+    codexUserTurn(),
+    JSON.stringify({
+      type: 'event_msg',
+      payload: { type: 'agent_message', phase: 'commentary', message: 'checking files...' },
+    }),
+    JSON.stringify({
+      type: 'response_item',
+      payload: {
+        type: 'message',
+        role: 'assistant',
+        phase: 'commentary',
+        content: [{ type: 'output_text', text: 'checking files...' }],
+      },
+    }),
+    JSON.stringify({ type: 'turn.completed', session_id: 'ses-equal-artifacts', result: 'done' }),
+  ].join('\n');
+
+  const result = extractSessionLogResult(log);
+  const publicOutput = openPOutputForCodexSessionResult(result);
+
+  assert.equal(result.commentaryEvents.length, 1);
+  assert.deepEqual(publicOutput.answer, ['checking files...', 'done']);
+});
+
+test('extractSessionLogResult preserves an equal response_item after an intervening record', () => {
+  const log = [
+    codexUserTurn(),
+    JSON.stringify({
+      type: 'event_msg',
+      payload: { type: 'agent_message', phase: 'commentary', message: 'checking files...' },
+    }),
+    JSON.stringify({ type: 'turn_context', payload: { model: 'gpt-test' } }),
+    JSON.stringify({
+      type: 'response_item',
+      payload: {
+        id: 'response_after_boundary',
+        type: 'message',
+        role: 'assistant',
+        phase: 'commentary',
+        content: [{ type: 'output_text', text: 'checking files...' }],
+      },
+    }),
+    JSON.stringify({ type: 'turn.completed', session_id: 'ses-separated-artifacts', result: 'done' }),
+  ].join('\n');
+
+  const result = extractSessionLogResult(log);
+  const publicOutput = openPOutputForCodexSessionResult(result);
+
+  assert.equal(result.commentaryEvents.length, 2);
+  assert.deepEqual(publicOutput.answer, ['checking files...', 'checking files...', 'done']);
+});
+
+test('extractSessionLogResult preserves adjacent messages whose native text differs', () => {
+  const log = [
+    codexUserTurn(),
+    JSON.stringify({
+      type: 'event_msg',
+      payload: { type: 'agent_message', phase: 'commentary', message: 'checking files...' },
+    }),
+    JSON.stringify({
+      type: 'response_item',
+      payload: {
+        id: 'response_with_trailing_newline',
+        type: 'message',
+        role: 'assistant',
+        phase: 'commentary',
+        content: [{ type: 'output_text', text: 'checking files...\n' }],
+      },
+    }),
+    JSON.stringify({ type: 'turn.completed', session_id: 'ses-distinct-native-text', result: 'done' }),
+  ].join('\n');
+
+  const result = extractSessionLogResult(log);
+  const publicOutput = openPOutputForCodexSessionResult(result);
+
+  assert.equal(result.commentaryEvents.length, 2);
+  assert.deepEqual(publicOutput.answer, ['checking files...', 'checking files...', 'done']);
+});
+
 test('extractSessionLogResult preserves item.started stdout tool artifacts', () => {
   const log = [
     codexUserTurn(),

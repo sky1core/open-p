@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { appendFile, mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { formatWorkerTurnResult } from '../src/core/output.js';
 import {
@@ -11,6 +13,7 @@ import {
   extractKiroTurnResult,
   extractKiroTurnResultText,
   resolveKiroSessionLogPath,
+  waitForKiroTurnResult,
 } from '../src/backends/kiro/session-log.js';
 
 function readKiroFixture(name: string): string {
@@ -351,6 +354,104 @@ test('extractKiroTurnResult fails closed on multiple caller prompt boundaries', 
   );
 });
 
+test('extractKiroTurnResult fails closed on malformed JSONL inside the active segment', () => {
+  const log = [
+    JSON.stringify({
+      version: 'v1',
+      kind: 'Prompt',
+      data: { content: [{ kind: 'text', data: 'caller prompt' }], meta: { timestamp: 1 } },
+    }),
+    '{"version":"v1","kind":',
+    JSON.stringify({
+      version: 'v1',
+      kind: 'AssistantMessage',
+      data: { content: [{ kind: 'text', data: 'answer after malformed record' }] },
+    }),
+  ].join('\n');
+
+  assert.throws(
+    () => extractKiroTurnResult(log),
+    (error) => error instanceof OpenPError &&
+      error.exitCode === EXIT_CODES.protocolViolation &&
+      error.reasonCode === 'unsupported_artifact_shape' &&
+      /malformed JSONL/.test(error.message),
+  );
+});
+
+test('extractKiroTurnResult fails closed on non-object JSONL records', () => {
+  assert.throws(
+    () => extractKiroTurnResult('[]'),
+    (error) => error instanceof OpenPError &&
+      error.exitCode === EXIT_CODES.protocolViolation &&
+      error.reasonCode === 'unsupported_artifact_shape' &&
+      /non-object JSONL/.test(error.message),
+  );
+});
+
+test('waitForKiroTurnResult defers an incomplete trailing JSONL record during flush', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'openp-kiro-partial-'));
+  const sessionId = '33333333-3333-4333-8333-333333333333';
+  const logPath = resolveKiroSessionLogPath(sessionId, { HOME: home })!;
+  await mkdir(join(home, '.kiro', 'sessions', 'cli'), { recursive: true });
+  await writeFile(logPath, [
+    JSON.stringify({
+      version: 'v1',
+      kind: 'Prompt',
+      data: { content: [{ kind: 'text', data: 'caller prompt' }], meta: { timestamp: 1 } },
+    }),
+    '{"version":"v1","kind":"AssistantMessage","data":{"content":[{"kind":"text","data":"done"}]',
+  ].join('\n'));
+  const completion = setTimeout(() => {
+    void appendFile(logPath, '}}\n');
+  }, 10);
+
+  try {
+    const result = await waitForKiroTurnResult({
+      sessionId,
+      fromOffset: 0,
+      env: { HOME: home },
+      deadlineMs: Date.now() + 40,
+      intervalMs: 5,
+    });
+    assert.equal(result.text, 'done');
+  } finally {
+    clearTimeout(completion);
+  }
+});
+
+test('waitForKiroTurnResult rejects an incomplete trailing JSONL record after flush deadline', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'openp-kiro-partial-'));
+  const sessionId = '44444444-4444-4444-8444-444444444444';
+  const logPath = resolveKiroSessionLogPath(sessionId, { HOME: home })!;
+  await mkdir(join(home, '.kiro', 'sessions', 'cli'), { recursive: true });
+  await writeFile(logPath, [
+    JSON.stringify({
+      version: 'v1',
+      kind: 'Prompt',
+      data: { content: [{ kind: 'text', data: 'caller prompt' }], meta: { timestamp: 1 } },
+    }),
+    JSON.stringify({
+      version: 'v1',
+      kind: 'AssistantMessage',
+      data: { content: [{ kind: 'text', data: 'valid answer before damaged record' }] },
+    }),
+    '{"version":"v1","kind":',
+  ].join('\n'));
+
+  await assert.rejects(
+    waitForKiroTurnResult({
+      sessionId,
+      fromOffset: 0,
+      env: { HOME: home },
+      deadlineMs: Date.now() + 20,
+      intervalMs: 5,
+    }),
+    (error) => error instanceof OpenPError &&
+      error.exitCode === EXIT_CODES.protocolViolation &&
+      /malformed JSONL/.test(error.message),
+  );
+});
+
 test('Kiro prompt parsers fail closed on mixed prompt content blocks', () => {
   assertUnsupportedPromptShapeThrows(JSON.stringify({
     version: 'v1',
@@ -445,4 +546,3 @@ function assertUnsupportedPromptShapeThrows(log: string): void {
 
   assert.throws(() => extractKiroTurnResult(log), isUnsupportedPromptShape);
 }
-
