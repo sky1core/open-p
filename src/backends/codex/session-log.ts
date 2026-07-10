@@ -6,6 +6,7 @@ import { ARTIFACT_REJECTION_REASONS, EXIT_CODES, OpenPError } from '../../core/e
 import { isSafeSessionId } from '../../core/session-id.js';
 import type { AssistantEventSnapshot } from '../../core/types.js';
 import { buildAssistantAnswerSnapshot, buildAssistantSnapshot, buildCodexToolSnapshot } from './jsonl-parser.js';
+import { CodexNativeAssistantClassifier } from './native-assistant.js';
 
 export interface CodexSessionDiagnostics {
   readonly model: string | null;
@@ -39,11 +40,6 @@ export interface CodexSessionLogBaseline {
   readonly offsetBytes: number;
   readonly preexisting: boolean;
   readonly logPath: string | null;
-}
-
-interface CodexSessionLogAgentMessageMirrorCandidate {
-  readonly phase: string;
-  readonly text: string;
 }
 
 function getCodexHome(): string {
@@ -198,7 +194,7 @@ export function extractSessionLogResult(rawLog: string): CodexSessionLogResult {
   let latestTokenCount: CodexSessionDiagnostics | null = null;
   let hasCompletionEvidence = false;
   let callerUserTurnCount = 0;
-  let lastAgentMessageMirrorCandidate: CodexSessionLogAgentMessageMirrorCandidate | null = null;
+  const assistantClassifier = new CodexNativeAssistantClassifier();
   let assistantEventSequence = 0;
   const nextAssistantEventId = (nativeId: unknown): string => {
     if (typeof nativeId === 'string' && nativeId.trim()) {
@@ -231,9 +227,7 @@ export function extractSessionLogResult(rawLog: string): CodexSessionLogResult {
 
     const type = event.type as string | undefined;
     const payload = asObject(event.payload);
-    const precedingAgentMessageMirrorCandidate = lastAgentMessageMirrorCandidate;
-    // A mirror candidate is valid for exactly the next session-log record.
-    lastAgentMessageMirrorCandidate = null;
+    const assistantClassification = assistantClassifier.classify(event);
 
     if (type === 'turn_context') {
       currentTurnModel = payload && typeof payload.model === 'string' && payload.model.trim()
@@ -273,39 +267,29 @@ export function extractSessionLogResult(rawLog: string): CodexSessionLogResult {
       if (!payload) continue;
 
       if (payload.type === 'reasoning') {
-        lastAgentMessageMirrorCandidate = null;
         const text = extractSummaryText(payload);
         if (text) reasoningParts.push(text);
         continue;
       }
 
       if (payload.type === 'message' && payload.role === 'assistant') {
-        const text = extractOutputText(payload);
-        const mirrorText = extractRawOutputText(payload);
-        if (text) {
-          if (mirrorText !== null && isCodexSessionLogAgentMessageMirror(
-            precedingAgentMessageMirrorCandidate,
-            payload.phase,
-            mirrorText,
-          )) {
-            lastAgentMessageMirrorCandidate = null;
+        const assistant = assistantClassification.assistant;
+        if (assistant?.source === 'response_item') {
+          if (assistantClassification.mirrored) {
             continue;
           }
-          lastAgentMessageMirrorCandidate = null;
-          if (isFinalPhase(payload.phase)) {
-            lastFinalResponseItemText = text;
-            pushAnswerSnapshot(text, payload.phase, payload.id);
-          } else if (isCommentaryPhase(payload.phase)) {
-            pushCommentarySnapshot(text, payload.phase, payload.id);
+          if (isFinalPhase(assistant.phase)) {
+            lastFinalResponseItemText = assistant.text;
+            pushAnswerSnapshot(assistant.text, assistant.phase, assistant.nativeId);
+          } else if (isCommentaryPhase(assistant.phase)) {
+            pushCommentarySnapshot(assistant.text, assistant.phase, assistant.nativeId);
           } else {
-            lastFinalResponseItemText ??= text;
-            pushAnswerSnapshot(text, payload.phase, payload.id);
+            lastFinalResponseItemText ??= assistant.text;
+            pushAnswerSnapshot(assistant.text, assistant.phase, assistant.nativeId);
           }
         }
-        lastAgentMessageMirrorCandidate = null;
         continue;
       }
-      lastAgentMessageMirrorCandidate = null;
       const toolSnapshot = buildCodexToolSnapshot(payload);
       if (toolSnapshot) {
         commentaryEvents.push(toolSnapshot);
@@ -316,36 +300,27 @@ export function extractSessionLogResult(rawLog: string): CodexSessionLogResult {
     if (type === 'event_msg') {
       if (!payload) continue;
       if (payload.type === 'user_message') {
-        lastAgentMessageMirrorCandidate = null;
         callerUserTurnCount += 1;
       }
       if (payload.type === 'agent_message') {
-        if (typeof payload.message === 'string' && payload.message.trim()) {
-          const mirrorText = payload.message;
-          const text = mirrorText.trim();
-          if (isFinalPhase(payload.phase)) {
-            lastFinalResponseItemText = text;
-            pushAnswerSnapshot(text, payload.phase, payload.id);
-          } else if (isCommentaryPhase(payload.phase)) {
-            pushCommentarySnapshot(text, payload.phase, payload.id);
+        const assistant = assistantClassification.assistant;
+        if (assistant?.source === 'event_msg') {
+          if (isFinalPhase(assistant.phase)) {
+            lastFinalResponseItemText = assistant.text;
+            pushAnswerSnapshot(assistant.text, assistant.phase, assistant.nativeId);
+          } else if (isCommentaryPhase(assistant.phase)) {
+            pushCommentarySnapshot(assistant.text, assistant.phase, assistant.nativeId);
           } else {
-            lastFinalResponseItemText ??= text;
-            pushAnswerSnapshot(text, payload.phase, payload.id);
+            lastFinalResponseItemText ??= assistant.text;
+            pushAnswerSnapshot(assistant.text, assistant.phase, assistant.nativeId);
           }
-          lastAgentMessageMirrorCandidate = buildCodexSessionLogAgentMessageMirrorCandidate(payload.phase, mirrorText);
-        } else {
-          lastAgentMessageMirrorCandidate = null;
         }
-      } else if (payload.type !== 'user_message') {
-        lastAgentMessageMirrorCandidate = null;
       }
       const toolSnapshot = buildCodexToolSnapshot(payload, type);
       if (toolSnapshot) {
-        lastAgentMessageMirrorCandidate = null;
         commentaryEvents.push(toolSnapshot);
       }
       if (payload.type === 'token_count') {
-        lastAgentMessageMirrorCandidate = null;
         const tokenDiag = extractTokenCountFromPayload(payload, currentTurnModel);
         if (tokenDiag) {
           latestTokenCount = tokenDiag;
@@ -353,14 +328,12 @@ export function extractSessionLogResult(rawLog: string): CodexSessionLogResult {
         }
       }
       if (payload.type === 'task_complete') {
-        lastAgentMessageMirrorCandidate = null;
         hasCompletionEvidence = true;
       }
       continue;
     }
 
     if (type === 'item.started' || type === 'item.completed') {
-      lastAgentMessageMirrorCandidate = null;
       const item = asObject(event.item);
       if (!item) continue;
       if (item.type === 'agent_message' && typeof item.text === 'string' && item.text.trim()) {
@@ -442,36 +415,6 @@ function extractSummaryText(payload: Record<string, unknown>): string | null {
   return parts.length > 0 ? parts.join('\n\n') : null;
 }
 
-function extractOutputText(payload: Record<string, unknown>): string | null {
-  const contentArr = payload.content;
-  if (!Array.isArray(contentArr)) return null;
-  const parts: string[] = [];
-  for (const block of contentArr) {
-    if (block && typeof block === 'object' && !Array.isArray(block)) {
-      const record = block as Record<string, unknown>;
-      if (record.type === 'output_text' && typeof record.text === 'string' && record.text.trim()) {
-        parts.push(record.text.trim());
-      }
-    }
-  }
-  return parts.length > 0 ? parts.join('\n') : null;
-}
-
-function extractRawOutputText(payload: Record<string, unknown>): string | null {
-  const contentArr = payload.content;
-  if (!Array.isArray(contentArr)) return null;
-  const parts: string[] = [];
-  for (const block of contentArr) {
-    if (block && typeof block === 'object' && !Array.isArray(block)) {
-      const record = block as Record<string, unknown>;
-      if (record.type === 'output_text' && typeof record.text === 'string' && record.text.trim()) {
-        parts.push(record.text);
-      }
-    }
-  }
-  return parts.length > 0 ? parts.join('\n') : null;
-}
-
 function extractTokenCountFromPayload(
   payload: Record<string, unknown>,
   model: string | null,
@@ -522,32 +465,6 @@ function isFinalPhase(phase: unknown): boolean {
 
 function isCommentaryPhase(phase: unknown): phase is string {
   return phase === 'commentary' || phase === 'progress';
-}
-
-// Codex writes event_msg.agent_message and an immediately following response_item.message for
-// one logical assistant message. Separate equal response items remain independent artifacts.
-function buildCodexSessionLogAgentMessageMirrorCandidate(
-  phase: unknown,
-  text: string,
-): CodexSessionLogAgentMessageMirrorCandidate {
-  return {
-    phase: codexSessionLogPhaseKey(phase),
-    text,
-  };
-}
-
-function isCodexSessionLogAgentMessageMirror(
-  candidate: CodexSessionLogAgentMessageMirrorCandidate | null,
-  phase: unknown,
-  text: string,
-): boolean {
-  return candidate !== null &&
-    candidate.phase === codexSessionLogPhaseKey(phase) &&
-    candidate.text === text;
-}
-
-function codexSessionLogPhaseKey(phase: unknown): string {
-  return typeof phase === 'string' && phase.trim() ? phase.trim() : 'final_answer';
 }
 
 function asObject(value: unknown): Record<string, unknown> | null {

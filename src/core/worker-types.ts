@@ -8,6 +8,7 @@ import type {
 } from './types.js';
 
 export interface WorkerTurnRequest {
+  readonly turnId?: string | null;
   readonly sessionId: string | null;
   readonly isFirstTurn: boolean;
   readonly projectRoot: string;

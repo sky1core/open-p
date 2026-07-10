@@ -604,6 +604,7 @@ test('structured-output fallback snapshots do not expose raw JSON as answer pros
     structuredOutput: { ok: true },
     assistantEvents: [{
       message: {
+        id: 'msg_structured_fallback',
         type: 'message',
         role: 'assistant',
         content: [{ type: 'text', text: '{"ok":true}' }],
@@ -813,6 +814,7 @@ test('terminal reasoning fallback preserves whitespace-only reasoning when it wa
 test('suppressed tool snapshots preserve all tool calls in the result aggregate', () => {
   const streamedSnapshot: AssistantEventSnapshot = {
     message: {
+      id: 'msg_suppressed_tools',
       type: 'message',
       role: 'assistant',
       content: [
@@ -860,6 +862,7 @@ test('suppressed tool snapshots preserve all tool calls in the result aggregate'
 test('previously emitted streaming tool snapshots preserve all tool calls in the result aggregate', () => {
   const streamedSnapshot: AssistantEventSnapshot = {
     message: {
+      id: 'msg_emitted_tools',
       type: 'message',
       role: 'assistant',
       content: [
@@ -907,6 +910,7 @@ test('metadata-only assistant snapshots preserve neutral messageBlocks without s
     structuredOutput: undefined,
     assistantEvents: [{
       message: {
+        id: 'msg_metadata_only',
         type: 'message',
         role: 'assistant',
         content: [{ type: 'backend_status', state: 'running' }],
@@ -934,6 +938,7 @@ test('metadata messageBlocks reject public output aliases and backend content pa
     structuredOutput: undefined,
     assistantEvents: [{
       message: {
+        id: 'msg_metadata_rejected',
         type: 'message',
         role: 'assistant',
         content: [
@@ -965,6 +970,7 @@ test('metadata messageBlocks keep neutral blocks when forbidden alias blocks are
     structuredOutput: undefined,
     assistantEvents: [{
       message: {
+        id: 'msg_metadata_mixed',
         type: 'message',
         role: 'assistant',
         content: [
@@ -1230,7 +1236,7 @@ function hasOpenPMetadataForbiddenField(value: unknown): boolean {
 
 function answerSnapshot(id: string, text: string, semanticKind?: 'commentary'): AssistantEventSnapshot {
   return {
-    message: { id, role: 'assistant', content: [{ type: 'text', text }] },
+    message: { id, type: 'message', role: 'assistant', content: [{ type: 'text', text }] },
     requestId: null,
     ...(semanticKind ? { semanticKind } : {}),
   };

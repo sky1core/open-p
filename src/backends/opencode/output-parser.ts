@@ -1,5 +1,10 @@
 import { EXIT_CODES, OpenPError } from '../../core/errors.js';
-import type { AssistantEventSnapshot, BackendUsage } from '../../core/types.js';
+import type {
+  AssistantContentBlock,
+  AssistantEventSnapshot,
+  AssistantSnapshotMessage,
+  BackendUsage,
+} from '../../core/types.js';
 
 export interface OpenCodeParsedOutput {
   readonly content: string;
@@ -23,10 +28,12 @@ export function parseOpenCodeJsonOutput(stdout: string): OpenCodeParsedOutput {
   let errorMessage: string | null = null;
   let rawUsage: Record<string, unknown> | null = null;
   let model: string | null = null;
+  let eventSequence = 0;
 
   for (const event of events) {
     const object = asRecord(event);
     if (!object) continue;
+    eventSequence += 1;
     sessionId ??= readSessionId(object);
     model ??= readString(object.model);
     if (isExplicitErrorEvent(object)) {
@@ -41,10 +48,7 @@ export function parseOpenCodeJsonOutput(stdout: string): OpenCodeParsedOutput {
     if (textPart) {
       assistantTexts.push(textPart);
       assistantEvents.push({
-        message: {
-          role: 'assistant',
-          content: [{ type: 'text', text: textPart }],
-        },
+        message: buildAssistantMessage(object, eventSequence, 'text', [{ type: 'text', text: textPart }]),
       });
     }
     const assistantMessage = readAssistantMessage(object);
@@ -52,7 +56,7 @@ export function parseOpenCodeJsonOutput(stdout: string): OpenCodeParsedOutput {
     if (assistantMessage && assistantText) {
       assistantTexts.push(assistantText);
       assistantEvents.push({
-        message: assistantMessage,
+        message: normalizeAssistantMessage(assistantMessage, object, eventSequence),
       });
     }
     const usage = asRecord(object.usage) ?? asRecord(asRecord(object.part)?.tokens);
@@ -66,10 +70,7 @@ export function parseOpenCodeJsonOutput(stdout: string): OpenCodeParsedOutput {
     const toolBlock = buildToolContentBlock(object);
     if (toolBlock) {
       assistantEvents.push({
-        message: {
-          role: 'assistant',
-          content: [toolBlock],
-        },
+        message: buildAssistantMessage(object, eventSequence, 'tool', [toolBlock]),
       });
     }
   }
@@ -150,6 +151,54 @@ function readAssistantMessage(object: Record<string, unknown>): Record<string, u
   return null;
 }
 
+function normalizeAssistantMessage(
+  message: Record<string, unknown>,
+  event: Record<string, unknown>,
+  sequence: number,
+): AssistantSnapshotMessage {
+  const content = typeof message.content === 'string'
+    ? [{ type: 'text', text: message.content }]
+    : Array.isArray(message.content)
+      ? message.content
+          .map(asRecord)
+          .filter((block): block is Record<string, unknown> => typeof block?.type === 'string')
+          .map((block) => ({ ...block, type: block.type as string }))
+      : [];
+  return {
+    ...message,
+    id: assistantMessageId(message, event, sequence, 'assistant'),
+    type: 'message',
+    role: 'assistant',
+    content,
+  };
+}
+
+function buildAssistantMessage(
+  event: Record<string, unknown>,
+  sequence: number,
+  kind: string,
+  content: readonly AssistantContentBlock[],
+): AssistantSnapshotMessage {
+  return {
+    id: assistantMessageId(null, event, sequence, kind),
+    type: 'message',
+    role: 'assistant',
+    content,
+  };
+}
+
+function assistantMessageId(
+  message: Record<string, unknown> | null,
+  event: Record<string, unknown>,
+  sequence: number,
+  kind: string,
+): string {
+  return readString(message?.id)
+    ?? readString(event.id)
+    ?? readString(asRecord(event.part)?.id)
+    ?? `msg_opencode_${sequence}_${kind}`;
+}
+
 function readAssistantText(message: Record<string, unknown>): string | null {
   const content = message.content;
   if (typeof content === 'string') return content;
@@ -189,7 +238,7 @@ function isExplicitErrorEvent(object: Record<string, unknown>): boolean {
   return false;
 }
 
-function buildToolContentBlock(object: Record<string, unknown>): Record<string, unknown> | null {
+function buildToolContentBlock(object: Record<string, unknown>): AssistantContentBlock | null {
   const type = readString(object.type);
   if (isToolResultEvent(object)) {
     return {

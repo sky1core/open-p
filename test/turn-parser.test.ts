@@ -38,6 +38,7 @@ test('parses a raw Claude Code turn from appended JSONL events', () => {
     assistantEvents: [
       {
         message: {
+          id: 'claude_event_2',
           type: 'message',
           role: 'assistant',
           content: [{ type: 'tool_use', name: 'Bash', id: 'toolu_1' }],
@@ -55,6 +56,7 @@ test('parses a raw Claude Code turn from appended JSONL events', () => {
       },
       {
         message: {
+          id: 'claude_event_3',
           type: 'message',
           role: 'assistant',
           content: [{ type: 'text', text: 'ok' }],
@@ -362,7 +364,7 @@ test('preserves completed content when a provider error interrupts after the com
   // (b) toolCall + toolResult preserved.
   assert.deepEqual(result.diagnostics.toolsUsed, ['Write']);
   const hasToolResult = (result.assistantEvents ?? []).some((event) =>
-    (event.message.content as Array<Record<string, unknown>>).some((block) => block?.type === 'tool_result'));
+    event.message.content.some((block) => block.type === 'tool_result'));
   assert.equal(hasToolResult, true);
   // (d) single provider_error_interrupted warning carrying the status and the verbatim notice text.
   const warnings = result.warnings ?? [];
@@ -392,7 +394,7 @@ test('emits an interrupted result with empty answer when only tool activity comp
   assert.equal(result.text, '');
   assert.deepEqual(result.diagnostics.toolsUsed, ['Write']);
   const hasToolResult = (result.assistantEvents ?? []).some((event) =>
-    (event.message.content as Array<Record<string, unknown>>).some((block) => block?.type === 'tool_result'));
+    event.message.content.some((block) => block.type === 'tool_result'));
   assert.equal(hasToolResult, true);
   assert.equal((result.warnings ?? []).some((warning) => warning.code === 'provider_error_interrupted'), true);
   assert.equal(result.diagnostics.stopReason, 'provider_error');
@@ -704,6 +706,7 @@ test('accumulates intermediate reasoning across assistant subturns', () => {
     ],
     assistantSnapshot: {
       message: {
+        id: 'claude_event_3',
         type: 'message',
         role: 'assistant',
         content: [{ type: 'reasoning', summary: [{ text: 'think B' }] }],

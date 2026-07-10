@@ -142,6 +142,7 @@ async function runStreamJsonWorkerLinesWithLock(input: {
       } = snapshotWriter;
 
       const result = await input.bridge.runTurn({
+        turnId: publicTurnId,
         sessionId: resolvedBackendSessionId,
         isFirstTurn: turnIndex === 0 && !input.options.resume,
         projectRoot: input.projectRoot,

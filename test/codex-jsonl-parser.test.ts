@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
+  createCodexStreamState,
   parseCodexOutput,
   parseCodexJsonlLine,
   processCodexStdoutLine,
@@ -10,14 +11,7 @@ import {
 import { formatWorkerTurnResult } from '../src/core/output.js';
 
 function createStreamState(): CodexStreamState {
-  return {
-    assistantText: '',
-    reasoningText: '',
-    lastAssistantText: null,
-    lastAgentMessageMirrorCandidate: null,
-    assistantEventSequence: 0,
-    streamFinalAssistantText: true,
-  };
+  return createCodexStreamState(true);
 }
 
 function readCodexFixture(name: string): string {

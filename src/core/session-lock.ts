@@ -1,5 +1,6 @@
+import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, unlink, writeFile, chmod } from 'node:fs/promises';
+import { chmod, lstat, mkdir, readFile, readdir, rename, rmdir, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { EXIT_CODES, OpenPError } from './errors.js';
 import { isSafeSessionId } from './session-id.js';
@@ -7,6 +8,7 @@ import { resolveOpenPStateRoot } from './state-root.js';
 
 export interface SessionLock {
   readonly sessionId: string;
+  /** Path to this owner's token file inside the canonical lock directory. */
   readonly path: string;
   release(): Promise<void>;
 }
@@ -16,6 +18,7 @@ interface LockFile {
   readonly sessionId: string;
   readonly pid: number;
   readonly createdAt: string;
+  readonly processStartedAt?: string | null;
 }
 
 export class SessionLockStore {
@@ -25,13 +28,14 @@ export class SessionLockStore {
     this.stateRoot = stateRoot;
   }
 
+  /** Canonical lock directory. Older open-p versions may have left a file at this path. */
   pathForSession(sessionId: string): string {
     assertValidSessionId(sessionId);
     return join(this.stateRoot, 'locks', `${sessionId}.lock`);
   }
 
   async acquire(sessionId: string): Promise<SessionLock> {
-    const path = this.pathForSession(sessionId);
+    const lockDir = this.pathForSession(sessionId);
     await mkdir(join(this.stateRoot, 'locks'), { recursive: true, mode: 0o700 });
 
     const lockFile: LockFile = {
@@ -39,122 +43,233 @@ export class SessionLockStore {
       sessionId,
       pid: process.pid,
       createdAt: new Date().toISOString(),
+      processStartedAt: await readProcessStartIdentity(process.pid),
     };
 
-    const acquired = await tryWriteSessionLock(path, lockFile);
-    if (!acquired) {
-      const recovered = await recoverStaleSessionLock(path);
-      if (!recovered || !(await tryWriteSessionLock(path, lockFile))) {
+    let ownerPath = await tryCreateLockDirectory(lockDir, lockFile);
+    if (!ownerPath) {
+      const recovered = await recoverStaleSessionLock(lockDir);
+      if (!recovered) {
         throw new OpenPError(`session ${sessionId} is busy`, EXIT_CODES.sessionBusy);
       }
-      // A concurrent acquirer racing the same stale lock may have removed our
-      // fresh lock between recovery and write. This point-in-time ownership
-      // check narrows that window; plain fs primitives cannot close it fully.
-      if (!(await verifySessionLockOwnership(path, lockFile.token))) {
+      ownerPath = await tryCreateLockDirectory(lockDir, lockFile);
+      if (!ownerPath || !(await verifySessionLockOwnership(ownerPath, lockFile.token))) {
         throw new OpenPError(`session ${sessionId} is busy`, EXIT_CODES.sessionBusy);
       }
     }
 
     return {
       sessionId,
-      path,
+      path: ownerPath,
       release: async () => {
-        await releaseSessionLock(path, lockFile.token);
+        await releaseSessionLock(lockDir, ownerPath!, lockFile.token);
       },
     };
   }
 }
 
-async function tryWriteSessionLock(path: string, lockFile: LockFile): Promise<boolean> {
+async function tryCreateLockDirectory(lockDir: string, lockFile: LockFile): Promise<string | null> {
+  const parentDir = join(lockDir, '..');
+  const tempDir = join(parentDir, `.${lockFile.sessionId}.${lockFile.token}.lock.tmp`);
+  const ownerName = ownerFileName(lockFile.token);
+  const tempOwnerPath = join(tempDir, ownerName);
   try {
-    await writeFile(path, `${JSON.stringify(lockFile, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
-    await chmod(path, 0o600).catch(() => undefined);
+    await mkdir(tempDir, { mode: 0o700 });
+    await writeFile(tempOwnerPath, `${JSON.stringify(lockFile, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
+    await chmod(tempOwnerPath, 0o600).catch(() => undefined);
+    await rename(tempDir, lockDir);
+    return join(lockDir, ownerName);
+  } catch (error) {
+    await unlink(tempOwnerPath).catch(() => undefined);
+    await rmdir(tempDir).catch(() => undefined);
+    if (
+      isErrorCode(error, 'EEXIST') ||
+      isErrorCode(error, 'ENOTEMPTY') ||
+      isErrorCode(error, 'ENOTDIR') ||
+      isErrorCode(error, 'EISDIR')
+    ) {
+      return null;
+    }
+    throw new OpenPError(`failed to acquire session lock: ${lockDir}`, EXIT_CODES.sessionState);
+  }
+}
+
+async function recoverStaleSessionLock(lockPath: string): Promise<boolean> {
+  let stats;
+  try {
+    stats = await lstat(lockPath);
+  } catch (error) {
+    if (isErrorCode(error, 'ENOENT')) {
+      return true;
+    }
+    throw new OpenPError(`failed to read session lock: ${lockPath}`, EXIT_CODES.sessionState);
+  }
+
+  if (stats.isFile()) {
+    return recoverLegacyFileLock(lockPath);
+  }
+  if (!stats.isDirectory()) {
+    throw new OpenPError(`invalid session lock: ${lockPath}`, EXIT_CODES.sessionState);
+  }
+  return recoverDirectoryLock(lockPath);
+}
+
+async function recoverLegacyFileLock(lockPath: string): Promise<boolean> {
+  let existing: LockFile;
+  try {
+    existing = await readLockFile(lockPath);
+  } catch (error) {
+    if (isErrorCode(error, 'ENOENT')) {
+      return true;
+    }
+    throw error;
+  }
+  if (!(await isStaleLock(existing))) {
+    return false;
+  }
+  try {
+    // New lock owners use a directory. A delayed legacy recoverer therefore cannot unlink a
+    // replacement owner after another process has completed the file-to-directory transition.
+    await unlink(lockPath);
     return true;
   } catch (error) {
-    if (isErrorCode(error, 'EEXIST')) {
+    if (isErrorCode(error, 'ENOENT') || isErrorCode(error, 'EISDIR') || isErrorCode(error, 'EPERM')) {
       return false;
     }
-    throw new OpenPError(`failed to acquire session lock: ${path}`, EXIT_CODES.sessionState);
+    throw new OpenPError(`failed to recover stale session lock: ${lockPath}`, EXIT_CODES.sessionState);
   }
 }
 
-async function recoverStaleSessionLock(path: string): Promise<boolean> {
-  let existing: unknown;
+async function recoverDirectoryLock(lockDir: string): Promise<boolean> {
+  let ownerNames: string[];
   try {
-    existing = JSON.parse(await readFile(path, 'utf8'));
+    ownerNames = (await readdir(lockDir)).filter((name) => name.endsWith('.json'));
   } catch (error) {
     if (isErrorCode(error, 'ENOENT')) {
       return true;
     }
-    throw new OpenPError(`failed to read session lock: ${path}`, EXIT_CODES.sessionState);
+    throw new OpenPError(`failed to read session lock: ${lockDir}`, EXIT_CODES.sessionState);
   }
 
-  if (!isLockFile(existing)) {
-    throw new OpenPError(`invalid session lock: ${path}`, EXIT_CODES.sessionState);
+  if (ownerNames.length === 0) {
+    return removeEmptyLockDirectory(lockDir);
   }
-  if (isProcessAlive(existing.pid)) {
-    return false;
+  if (ownerNames.length !== 1) {
+    throw new OpenPError(`invalid session lock: ${lockDir}`, EXIT_CODES.sessionState);
   }
 
-  // Re-read just before unlink: a concurrent recoverer may have already
-  // replaced the stale lock with its own fresh lock, which we must not remove.
-  let current: unknown;
+  const ownerName = ownerNames[0]!;
+  const ownerPath = join(lockDir, ownerName);
+  let existing: LockFile;
   try {
-    current = JSON.parse(await readFile(path, 'utf8'));
+    existing = await readLockFile(ownerPath);
   } catch (error) {
     if (isErrorCode(error, 'ENOENT')) {
       return true;
     }
-    throw new OpenPError(`failed to read session lock: ${path}`, EXIT_CODES.sessionState);
+    throw error;
   }
-  if (!isLockFile(current) || current.token !== existing.token) {
+  if (ownerName !== ownerFileName(existing.token)) {
+    throw new OpenPError(`invalid session lock: ${lockDir}`, EXIT_CODES.sessionState);
+  }
+  if (!(await isStaleLock(existing))) {
     return false;
   }
 
   try {
-    await unlink(path);
+    // The token is part of the filename. If another recoverer has already replaced the lock
+    // directory, this unlink cannot remove the new owner's differently named token file.
+    await unlink(ownerPath);
+  } catch (error) {
+    if (isErrorCode(error, 'ENOENT')) {
+      return false;
+    }
+    throw new OpenPError(`failed to recover stale session lock: ${lockDir}`, EXIT_CODES.sessionState);
+  }
+  return removeEmptyLockDirectory(lockDir);
+}
+
+async function removeEmptyLockDirectory(lockDir: string): Promise<boolean> {
+  try {
+    await rmdir(lockDir);
     return true;
   } catch (error) {
-    if (isErrorCode(error, 'ENOENT')) {
-      return true;
+    if (isErrorCode(error, 'ENOENT') || isErrorCode(error, 'ENOTEMPTY') || isErrorCode(error, 'EEXIST')) {
+      return false;
     }
-    throw new OpenPError(`failed to recover stale session lock: ${path}`, EXIT_CODES.sessionState);
+    throw new OpenPError(`failed to recover stale session lock: ${lockDir}`, EXIT_CODES.sessionState);
   }
 }
 
-async function verifySessionLockOwnership(path: string, token: string): Promise<boolean> {
-  let current: unknown;
+async function verifySessionLockOwnership(ownerPath: string, token: string): Promise<boolean> {
   try {
-    current = JSON.parse(await readFile(path, 'utf8'));
+    const current = await readLockFile(ownerPath);
+    return current.token === token;
   } catch {
     return false;
   }
-  return isLockFile(current) && current.token === token;
 }
 
-async function releaseSessionLock(path: string, token: string): Promise<void> {
-  let existing: unknown;
+async function releaseSessionLock(lockDir: string, ownerPath: string, token: string): Promise<void> {
+  let existing: LockFile;
   try {
-    existing = JSON.parse(await readFile(path, 'utf8'));
+    existing = await readLockFile(ownerPath);
   } catch (error) {
     if (isErrorCode(error, 'ENOENT')) {
-      return;
+      try {
+        await lstat(lockDir);
+      } catch (statError) {
+        if (isErrorCode(statError, 'ENOENT')) {
+          return;
+        }
+      }
+      throw new OpenPError(`failed to read session lock: ${lockDir}`, EXIT_CODES.sessionState);
     }
-    throw new OpenPError(`failed to read session lock: ${path}`, EXIT_CODES.sessionState);
+    throw error;
   }
-
-  if (!isLockFile(existing) || existing.token !== token) {
+  if (existing.token !== token) {
     return;
   }
 
   try {
-    await unlink(path);
+    await unlink(ownerPath);
   } catch (error) {
-    if (isErrorCode(error, 'ENOENT')) {
+    if (!isErrorCode(error, 'ENOENT')) {
+      throw new OpenPError(`failed to release session lock: ${lockDir}`, EXIT_CODES.sessionState);
+    }
+  }
+  try {
+    await rmdir(lockDir);
+  } catch (error) {
+    if (isErrorCode(error, 'ENOENT') || isErrorCode(error, 'ENOTEMPTY') || isErrorCode(error, 'EEXIST')) {
       return;
     }
-    throw new OpenPError(`failed to release session lock: ${path}`, EXIT_CODES.sessionState);
+    throw new OpenPError(`failed to release session lock: ${lockDir}`, EXIT_CODES.sessionState);
   }
+}
+
+async function readLockFile(path: string): Promise<LockFile> {
+  let value: unknown;
+  try {
+    value = JSON.parse(await readFile(path, 'utf8'));
+  } catch (error) {
+    if (isErrorCode(error, 'ENOENT')) {
+      throw error;
+    }
+    throw new OpenPError(`failed to read session lock: ${path}`, EXIT_CODES.sessionState);
+  }
+  if (!isLockFile(value)) {
+    throw new OpenPError(`invalid session lock: ${path}`, EXIT_CODES.sessionState);
+  }
+  return value;
+}
+
+async function isStaleLock(lock: LockFile): Promise<boolean> {
+  if (!isProcessAlive(lock.pid)) {
+    return true;
+  }
+  const currentProcessStartedAt = await readProcessStartIdentity(lock.pid);
+  return isReusedProcessIdentity(lock, currentProcessStartedAt);
 }
 
 function isLockFile(value: unknown): value is LockFile {
@@ -166,8 +281,42 @@ function isLockFile(value: unknown): value is LockFile {
     typeof candidate.token === 'string' &&
     typeof candidate.sessionId === 'string' &&
     typeof candidate.pid === 'number' &&
-    typeof candidate.createdAt === 'string'
+    typeof candidate.createdAt === 'string' &&
+    (candidate.processStartedAt === undefined ||
+      candidate.processStartedAt === null ||
+      typeof candidate.processStartedAt === 'string')
   );
+}
+
+function isReusedProcessIdentity(lock: LockFile, currentProcessStartedAt: string | null): boolean {
+  if (currentProcessStartedAt === null) {
+    return false;
+  }
+  if (typeof lock.processStartedAt === 'string' && lock.processStartedAt.length > 0) {
+    return lock.processStartedAt !== currentProcessStartedAt;
+  }
+  const lockCreatedAtMs = Date.parse(lock.createdAt);
+  const processStartedAtMs = Date.parse(currentProcessStartedAt);
+  return Number.isFinite(lockCreatedAtMs) &&
+    Number.isFinite(processStartedAtMs) &&
+    processStartedAtMs > lockCreatedAtMs;
+}
+
+function readProcessStartIdentity(pid: number): Promise<string | null> {
+  return new Promise((resolve) => {
+    execFile('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8', timeout: 1000 }, (error, stdout) => {
+      if (error) {
+        resolve(null);
+        return;
+      }
+      const value = stdout.trim();
+      resolve(value || null);
+    });
+  });
+}
+
+function ownerFileName(token: string): string {
+  return `${token}.json`;
 }
 
 function isErrorCode(error: unknown, code: string): boolean {
@@ -179,15 +328,11 @@ function isProcessAlive(pid: number): boolean {
     return false;
   }
   try {
-    // Signal 0 checks process existence without sending a terminating signal.
     process.kill(pid, 0);
     return true;
   } catch (error) {
     if (isErrorCode(error, 'ESRCH')) {
       return false;
-    }
-    if (isErrorCode(error, 'EPERM')) {
-      return true;
     }
     return true;
   }

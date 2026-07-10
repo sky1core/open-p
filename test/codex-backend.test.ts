@@ -355,7 +355,8 @@ test('CodexBackend.runTurn throws on timeout', withFakeBin('fake-codex-slow.sh',
       { turnId: 'turn-1', prompt: 'hello' },
       { ...BASE_OPTIONS, timeoutMs: 500 },
     ),
-    (err: Error) => err.message.includes('did not respond within'),
+    (err: Error) => err.message.includes('did not respond within')
+      && err.message.includes('slow backend diagnostic'),
   );
 }));
 

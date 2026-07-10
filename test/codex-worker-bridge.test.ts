@@ -635,7 +635,8 @@ test('CodexWorkerBridge.runTurn throws on timeout', withFakeBin('fake-codex-slow
       message: 'hello',
       timeoutMs: 500,
     }),
-    (err: Error) => err.message.includes('did not respond within'),
+    (err: Error) => err.message.includes('did not respond within')
+      && err.message.includes('slow backend diagnostic'),
   );
 }));
 

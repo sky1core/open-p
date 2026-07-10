@@ -539,6 +539,7 @@ test('stream-json worker does not repeat a streamed result text snapshot', async
     true,
     [{
       message: {
+        id: 'msg_worker_final',
         type: 'message',
         role: 'assistant',
         content: [{ type: 'text', text: 'worker final' }],
@@ -577,6 +578,7 @@ test('stream-json worker preserves non-result text snapshots without streaming o
     [
       {
         message: {
+          id: 'msg_worker_progress',
           type: 'message',
           role: 'assistant',
           content: [{ type: 'text', text: 'worker' }],
@@ -589,6 +591,7 @@ test('stream-json worker preserves non-result text snapshots without streaming o
       },
       {
         message: {
+          id: 'msg_worker_final',
           type: 'message',
           role: 'assistant',
           content: [{ type: 'text', text: 'worker final' }],
@@ -748,6 +751,7 @@ test('stream-json worker preserves non-result reasoning snapshots without stream
     [
       {
         message: {
+          id: 'msg_reasoning_snapshot',
           type: 'message',
           role: 'assistant',
           content: [{ type: 'thinking', thinking: 'thinking snapshot' }],
@@ -760,6 +764,7 @@ test('stream-json worker preserves non-result reasoning snapshots without stream
       },
       {
         message: {
+          id: 'msg_reasoning_final',
           type: 'message',
           role: 'assistant',
           content: [{ type: 'text', text: 'worker final' }],
@@ -801,6 +806,7 @@ test('stream-json worker ignores intermediate reasoning callbacks without stream
     [
       {
         message: {
+          id: 'msg_ignored_live_reasoning',
           type: 'message',
           role: 'assistant',
           content: [{ type: 'thinking', thinking: 'thinking live' }],
@@ -813,6 +819,7 @@ test('stream-json worker ignores intermediate reasoning callbacks without stream
       },
       {
         message: {
+          id: 'msg_ignored_live_final',
           type: 'message',
           role: 'assistant',
           content: [{ type: 'text', text: 'worker final' }],
@@ -890,6 +897,7 @@ test('stream-json worker emits backend-owned live text while json schema result 
   const snapshot: AssistantEventSnapshot = {
     semanticKind: 'commentary',
     message: {
+      id: 'msg_schema_progress',
       type: 'message',
       role: 'assistant',
       content: [{ type: 'text', text: 'schema progress' }],
@@ -1125,6 +1133,7 @@ test('stream-json worker publishes JSONL assistant snapshot text and ignores pri
       request.onIntermediateAssistantSnapshot?.({
         semanticKind: 'commentary',
         message: {
+          id: 'msg_jsonl_progress',
           type: 'message',
           role: 'assistant',
           content: [{ type: 'text', text: 'jsonl progress' }],
@@ -1181,6 +1190,7 @@ test('stream-json worker emits backend-owned reasoning before answer when snapsh
       request.onIntermediateAssistantSnapshot?.({
         semanticKind: 'commentary',
         message: {
+          id: 'msg_reasoning_answer',
           type: 'message',
           role: 'assistant',
           content: [
@@ -1823,6 +1833,7 @@ test('stream-json worker uses JSONL snapshot when screen preview matches result 
       request.onIntermediateText?.('Title', 'screen');
       request.onIntermediateAssistantSnapshot?.({
         message: {
+          id: 'msg_screen_match',
           type: 'message',
           role: 'assistant',
           content: [{ type: 'text', text: '## Title' }],
@@ -1878,6 +1889,7 @@ test('stream-json worker publishes replacement JSONL snapshot after ignoring scr
       request.onIntermediateText?.('draft from screen', 'screen');
       request.onIntermediateAssistantSnapshot?.({
         message: {
+          id: 'msg_jsonl_replacement',
           type: 'message',
           role: 'assistant',
           content: [{ type: 'text', text: 'replacement from jsonl' }],
@@ -2446,6 +2458,7 @@ test('stream-json worker keeps background assistant snapshots out of active stre
     semanticKind: 'background',
     message: {
       id: 'snap-background',
+      type: 'message',
       role: 'assistant',
       content: [
         { type: 'text', text: 'background done' },
@@ -2980,7 +2993,7 @@ test('stream-json worker releases returned session lock when provisional lock re
     acquire: async (sessionId: string) => {
       const lock = await state.lockStore.acquire(sessionId);
       if (sessionId === NATIVE_SESSION_ID) {
-        await rm(provisionalLockPath, { force: true });
+        await rm(provisionalLockPath, { recursive: true, force: true });
         await mkdir(provisionalLockPath);
       }
       return lock;

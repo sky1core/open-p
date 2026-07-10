@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 
 import type { AssistantEventSnapshot } from '../../core/types.js';
 import { isSafeSessionId } from '../../core/session-id.js';
+import { CodexNativeAssistantClassifier } from './native-assistant.js';
 
 export interface CodexParsedOutput {
   readonly content: string | null;
@@ -23,18 +24,24 @@ export interface CodexStreamCallbacks {
   readonly onAssistantSnapshot?: (snapshot: AssistantEventSnapshot) => void;
 }
 
+export function createCodexStreamState(streamFinalAssistantText: boolean): CodexStreamState {
+  return {
+    assistantText: '',
+    reasoningText: '',
+    lastAssistantText: null,
+    assistantClassifier: new CodexNativeAssistantClassifier(),
+    assistantEventSequence: 0,
+    streamFinalAssistantText,
+  };
+}
+
 export interface CodexStreamState {
   assistantText: string;
   reasoningText: string;
   lastAssistantText: string | null;
-  lastAgentMessageMirrorCandidate: CodexAgentMessageMirrorCandidate | null;
+  assistantClassifier: CodexNativeAssistantClassifier;
   assistantEventSequence: number;
   streamFinalAssistantText: boolean;
-}
-
-interface CodexAgentMessageMirrorCandidate {
-  readonly phase: string;
-  readonly text: string;
 }
 
 export function parseCodexJsonlLine(line: string): Record<string, unknown> | null {
@@ -91,7 +98,7 @@ function extractFromEvents(
   const reasoningParts: string[] = [];
   const assistantEvents: AssistantEventSnapshot[] = [];
   let lastResponseItemText: string | null = null;
-  let lastAgentMessageMirrorCandidate: CodexAgentMessageMirrorCandidate | null = null;
+  const assistantClassifier = new CodexNativeAssistantClassifier();
   let assistantEventSequence = 0;
   const nextAssistantEventId = (nativeId: unknown): string => {
     if (typeof nativeId === 'string' && nativeId.trim()) {
@@ -112,9 +119,7 @@ function extractFromEvents(
 
   for (const event of events) {
     const type = event.type as string | undefined;
-    const precedingAgentMessageMirrorCandidate = lastAgentMessageMirrorCandidate;
-    // A mirror candidate is valid for exactly the next parsed native record.
-    lastAgentMessageMirrorCandidate = null;
+    const assistantClassification = assistantClassifier.classify(event);
 
     if (type === 'thread.started') {
       if (!sessionId && typeof event.thread_id === 'string') {
@@ -145,39 +150,29 @@ function extractFromEvents(
       if (!payload) continue;
 
       if (payload.type === 'reasoning') {
-        lastAgentMessageMirrorCandidate = null;
         const text = extractReasoningSummaryText(payload);
         if (text) reasoningParts.push(text);
         continue;
       }
 
       if (payload.type === 'message' && payload.role === 'assistant') {
-        const text = extractMessageOutputText(payload);
-        const mirrorText = extractRawMessageOutputText(payload);
-        if (text) {
-          if (mirrorText !== null && isCodexAgentMessageMirror(
-            precedingAgentMessageMirrorCandidate,
-            payload.phase,
-            mirrorText,
-          )) {
-            lastAgentMessageMirrorCandidate = null;
+        const assistant = assistantClassification.assistant;
+        if (assistant?.source === 'response_item') {
+          if (assistantClassification.mirrored) {
             continue;
           }
-          lastAgentMessageMirrorCandidate = null;
-          if (isFinalResponsePhase(payload.phase)) {
-            lastResponseItemText = text;
-            pushAnswerSnapshot(text, payload.phase, payload.id);
-          } else if (isVisibleAssistantMessagePhase(payload.phase)) {
-            pushVisibleAssistantSnapshot(text, payload.phase);
+          if (isFinalResponsePhase(assistant.phase)) {
+            lastResponseItemText = assistant.text;
+            pushAnswerSnapshot(assistant.text, assistant.phase, assistant.nativeId);
+          } else if (isVisibleAssistantMessagePhase(assistant.phase)) {
+            pushVisibleAssistantSnapshot(assistant.text, assistant.phase);
           } else {
-            lastResponseItemText ??= text;
-            pushAnswerSnapshot(text, payload.phase, payload.id);
+            lastResponseItemText ??= assistant.text;
+            pushAnswerSnapshot(assistant.text, assistant.phase, assistant.nativeId);
           }
         }
-        lastAgentMessageMirrorCandidate = null;
         continue;
       }
-      lastAgentMessageMirrorCandidate = null;
       const toolSnapshot = buildCodexToolSnapshot(payload, type);
       if (toolSnapshot) {
         assistantEvents.push(toolSnapshot);
@@ -189,23 +184,20 @@ function extractFromEvents(
       const payload = asObject(event.payload);
       if (!payload) continue;
       if (payload.type === 'agent_message') {
-        if (typeof payload.message === 'string' && payload.message.trim()) {
-          const mirrorText = payload.message;
-          const text = mirrorText.trim();
-          if (isFinalResponsePhase(payload.phase)) {
-            lastResponseItemText = text;
-            pushAnswerSnapshot(text, payload.phase, payload.id);
-          } else if (isVisibleAssistantMessagePhase(payload.phase)) {
-            pushVisibleAssistantSnapshot(text, payload.phase);
+        const assistant = assistantClassification.assistant;
+        if (assistant?.source === 'event_msg') {
+          if (isFinalResponsePhase(assistant.phase)) {
+            lastResponseItemText = assistant.text;
+            pushAnswerSnapshot(assistant.text, assistant.phase, assistant.nativeId);
+          } else if (isVisibleAssistantMessagePhase(assistant.phase)) {
+            pushVisibleAssistantSnapshot(assistant.text, assistant.phase);
           } else {
-            lastResponseItemText ??= text;
-            pushAnswerSnapshot(text, payload.phase, payload.id);
+            lastResponseItemText ??= assistant.text;
+            pushAnswerSnapshot(assistant.text, assistant.phase, assistant.nativeId);
           }
-          lastAgentMessageMirrorCandidate = buildCodexAgentMessageMirrorCandidate(payload.phase, mirrorText);
         }
         continue;
       }
-      lastAgentMessageMirrorCandidate = null;
       const toolSnapshot = buildCodexToolSnapshot(payload, type);
       if (toolSnapshot) {
         assistantEvents.push(toolSnapshot);
@@ -214,7 +206,6 @@ function extractFromEvents(
     }
 
     if (type === 'item.started' || type === 'item.completed') {
-      lastAgentMessageMirrorCandidate = null;
       const item = asObject(event.item);
       if (!item) continue;
       const text = extractAgentMessageText(item);
@@ -295,38 +286,6 @@ function extractReasoningSummaryText(payload: Record<string, unknown>): string |
   return parts.length > 0 ? parts.join('\n\n') : null;
 }
 
-function extractMessageOutputText(payload: Record<string, unknown>): string | null {
-  const contentArr = payload.content;
-  if (!Array.isArray(contentArr)) return null;
-
-  const parts: string[] = [];
-  for (const block of contentArr) {
-    if (block && typeof block === 'object' && !Array.isArray(block)) {
-      const record = block as Record<string, unknown>;
-      if (record.type === 'output_text' && typeof record.text === 'string' && record.text.trim()) {
-        parts.push(record.text.trim());
-      }
-    }
-  }
-  return parts.length > 0 ? parts.join('\n') : null;
-}
-
-function extractRawMessageOutputText(payload: Record<string, unknown>): string | null {
-  const contentArr = payload.content;
-  if (!Array.isArray(contentArr)) return null;
-
-  const parts: string[] = [];
-  for (const block of contentArr) {
-    if (block && typeof block === 'object' && !Array.isArray(block)) {
-      const record = block as Record<string, unknown>;
-      if (record.type === 'output_text' && typeof record.text === 'string' && record.text.trim()) {
-        parts.push(record.text);
-      }
-    }
-  }
-  return parts.length > 0 ? parts.join('\n') : null;
-}
-
 function extractAgentMessageText(item: Record<string, unknown>): string | null {
   return item.type === 'agent_message' && typeof item.text === 'string' && item.text.trim()
     ? item.text.trim()
@@ -352,21 +311,18 @@ export function processCodexStdoutLine(
 ): void {
   const event = parseCodexJsonlLine(line);
   if (!event) {
-    state.lastAgentMessageMirrorCandidate = null;
+    state.assistantClassifier.reset();
     return;
   }
 
   const type = event.type as string | undefined;
-  const precedingAgentMessageMirrorCandidate = state.lastAgentMessageMirrorCandidate;
-  // A mirror candidate is valid for exactly the next stdout record.
-  state.lastAgentMessageMirrorCandidate = null;
+  const assistantClassification = state.assistantClassifier.classify(event);
 
   if (type === 'response_item') {
     const payload = asObject(event.payload);
     if (!payload) return;
 
     if (payload.type === 'reasoning') {
-      state.lastAgentMessageMirrorCandidate = null;
       const text = extractReasoningSummaryText(payload);
       if (text) {
         state.reasoningText += (state.reasoningText ? '\n\n' : '') + text;
@@ -376,33 +332,29 @@ export function processCodexStdoutLine(
     }
 
     if (payload.type === 'message' && payload.role === 'assistant') {
-      const text = extractMessageOutputText(payload);
-      const mirrorText = extractRawMessageOutputText(payload);
-      if (text) {
-        if (mirrorText !== null && isCodexAgentMessageMirror(
-          precedingAgentMessageMirrorCandidate,
-          payload.phase,
-          mirrorText,
-        )) {
-          state.lastAgentMessageMirrorCandidate = null;
+      const assistant = assistantClassification.assistant;
+      if (assistant?.source === 'response_item') {
+        if (assistantClassification.mirrored) {
           return;
         }
-        state.lastAgentMessageMirrorCandidate = null;
-        if (isFinalResponsePhase(payload.phase)) {
-          appendAssistantText(state, callbacks, text, {
+        if (isFinalResponsePhase(assistant.phase)) {
+          appendAssistantText(state, callbacks, assistant.text, {
             publish: state.streamFinalAssistantText,
           });
-        } else if (isVisibleAssistantMessagePhase(payload.phase)) {
-          appendAssistantText(state, callbacks, text);
-          emitAssistantSnapshot(callbacks, text, payload.phase, nextCodexAssistantEventId(state, payload.id));
+        } else if (isVisibleAssistantMessagePhase(assistant.phase)) {
+          appendAssistantText(state, callbacks, assistant.text);
+          emitAssistantSnapshot(
+            callbacks,
+            assistant.text,
+            assistant.phase,
+            nextCodexAssistantEventId(state, assistant.nativeId),
+          );
         } else {
-          appendAssistantText(state, callbacks, text);
+          appendAssistantText(state, callbacks, assistant.text);
         }
       }
-      state.lastAgentMessageMirrorCandidate = null;
       return;
     }
-    state.lastAgentMessageMirrorCandidate = null;
     const toolSnapshot = buildCodexToolSnapshot(payload, type);
     if (toolSnapshot) {
       emitAssistantSnapshotObject(callbacks, toolSnapshot);
@@ -415,24 +367,26 @@ export function processCodexStdoutLine(
     const payload = asObject(event.payload);
     if (!payload) return;
     if (payload.type === 'agent_message') {
-      if (typeof payload.message === 'string' && payload.message.trim()) {
-        const mirrorText = payload.message;
-        const text = mirrorText.trim();
-        if (isFinalResponsePhase(payload.phase)) {
-          appendAssistantText(state, callbacks, text, {
+      const assistant = assistantClassification.assistant;
+      if (assistant?.source === 'event_msg') {
+        if (isFinalResponsePhase(assistant.phase)) {
+          appendAssistantText(state, callbacks, assistant.text, {
             publish: state.streamFinalAssistantText,
           });
-        } else if (isVisibleAssistantMessagePhase(payload.phase)) {
-          appendAssistantText(state, callbacks, text);
-          emitAssistantSnapshot(callbacks, text, payload.phase, nextCodexAssistantEventId(state, payload.id));
+        } else if (isVisibleAssistantMessagePhase(assistant.phase)) {
+          appendAssistantText(state, callbacks, assistant.text);
+          emitAssistantSnapshot(
+            callbacks,
+            assistant.text,
+            assistant.phase,
+            nextCodexAssistantEventId(state, assistant.nativeId),
+          );
         } else {
-          appendAssistantText(state, callbacks, text);
+          appendAssistantText(state, callbacks, assistant.text);
         }
-        state.lastAgentMessageMirrorCandidate = buildCodexAgentMessageMirrorCandidate(payload.phase, mirrorText);
       }
       return;
     }
-    state.lastAgentMessageMirrorCandidate = null;
     const toolSnapshot = buildCodexToolSnapshot(payload, type);
     if (toolSnapshot) {
       emitAssistantSnapshotObject(callbacks, toolSnapshot);
@@ -441,7 +395,6 @@ export function processCodexStdoutLine(
   }
 
   if (type === 'item.started' || type === 'item.completed') {
-    state.lastAgentMessageMirrorCandidate = null;
     const item = asObject(event.item);
     if (!item) return;
     const toolSnapshot = buildCodexToolSnapshot(item, type);
@@ -680,30 +633,6 @@ function nextCodexAssistantEventId(state: CodexStreamState, nativeId: unknown): 
   }
   state.assistantEventSequence += 1;
   return `seq_${state.assistantEventSequence}`;
-}
-
-// Codex session-style JSONL writes one logical assistant message first as
-// event_msg.agent_message and then as an adjacent response_item.message. The event record has no
-// native id, so adjacency plus exact native phase/text is the complete structural mirror key.
-function buildCodexAgentMessageMirrorCandidate(phase: unknown, text: string): CodexAgentMessageMirrorCandidate {
-  return {
-    phase: codexPhaseKey(phase),
-    text,
-  };
-}
-
-function isCodexAgentMessageMirror(
-  candidate: CodexAgentMessageMirrorCandidate | null,
-  phase: unknown,
-  text: string,
-): boolean {
-  return candidate !== null &&
-    candidate.phase === codexPhaseKey(phase) &&
-    candidate.text === text;
-}
-
-function codexPhaseKey(phase: unknown): string {
-  return typeof phase === 'string' && phase.trim() ? phase.trim() : 'final_answer';
 }
 
 function appendAssistantText(

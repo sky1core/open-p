@@ -1,6 +1,14 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { AssistantContentBlock, AssistantEventSnapshot, BackendUsage, TurnResult } from './types.js';
 import type { WorkerTurnResult } from './worker-types.js';
+import { dedupeOpenPAssistantResultEvents } from './output-result-deduplication.js';
+import {
+  buildOpenPResultOutput,
+  compactRecord,
+  recordArray,
+  stringArray,
+  type OpenPResultOutput,
+} from './output-records.js';
 
 export type OutputFormat = 'text' | 'json' | 'stream-json';
 
@@ -671,14 +679,6 @@ type OpenPEventKind = 'answer' | 'reasoning' | 'tool_call' | 'tool_result' | 'st
 type OpenPAssistantEventKind = Exclude<OpenPEventKind, 'answer' | 'reasoning'>;
 type OpenPForm = 'streaming' | 'result';
 type OpenPScope = 'active' | 'background';
-type OpenPOutputKey = 'answer' | 'reasoning' | 'toolCall' | 'toolResult';
-type OpenPResultOutput = {
-  answer: string[];
-  reasoning: string[];
-  toolCall: Record<string, unknown>[];
-  toolResult: Record<string, unknown>[];
-};
-
 function openPScopeFromSemanticKind(semanticKind: AssistantEventSnapshot['semanticKind']): OpenPScope {
   return semanticKind === 'background' ? 'background' : 'active';
 }
@@ -713,15 +713,6 @@ function buildOpenPOutputRecord(event: {
     metadata: Object.keys(metadata).length > 0 ? metadata : {},
   });
   return assertOpenPOutputRecord(record);
-}
-
-function buildOpenPResultOutput(input: Partial<Record<OpenPOutputKey, unknown>> = {}): OpenPResultOutput {
-  return {
-    answer: stringArray(input.answer),
-    reasoning: stringArray(input.reasoning),
-    toolCall: recordArray(input.toolCall),
-    toolResult: recordArray(input.toolResult),
-  };
 }
 
 function openPOutputFromAssistantEvent(event: {
@@ -777,28 +768,6 @@ function assertOpenPOutputRecord(openp: Record<string, unknown>): Record<string,
     throw new Error('result openp.output must aggregate answer/reasoning/toolCall/toolResult arrays');
   }
   return openp;
-}
-
-function stringArray(value: unknown): string[] {
-  if (typeof value === 'string') {
-    return value.length > 0 ? [value] : [];
-  }
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  return value.filter((item): item is string => typeof item === 'string' && item.length > 0);
-}
-
-function recordArray(value: unknown): Record<string, unknown>[] {
-  if (value && typeof value === 'object' && !Array.isArray(value)) {
-    return [value as Record<string, unknown>];
-  }
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  return value.filter((item): item is Record<string, unknown> =>
-    Boolean(item) && typeof item === 'object' && !Array.isArray(item)
-  );
 }
 
 function buildOpenPAssistantMessage(event: {
@@ -1736,16 +1705,6 @@ function contextTokensFromUsage(usage: BackendUsage): number | null {
   return usage.inputTokens + usage.cacheReadInputTokens + cacheCreationInputTokens;
 }
 
-function compactRecord(record: Record<string, unknown>): Record<string, unknown> {
-  const compacted: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(record)) {
-    if (value !== undefined) {
-      compacted[key] = value;
-    }
-  }
-  return compacted;
-}
-
 function buildAssistantEventsFromSnapshots(
   snapshots: readonly AssistantEventSnapshot[] | undefined,
   sessionId?: string | null,
@@ -1878,127 +1837,11 @@ function buildNestedAssistantOpenPEvents(event: {
   ]);
 }
 
-function dedupeOpenPAssistantResultEvents(events: readonly Record<string, unknown>[]): Record<string, unknown>[] {
-  const seen = new Map<string, number>();
-  const output: Record<string, unknown>[] = [];
-  for (const event of events) {
-    const key = openPResultDeduplicationKey(event);
-    if (!key) {
-      output.push(event);
-      continue;
-    }
-    const existingIndex = seen.get(key);
-    if (existingIndex !== undefined) {
-      output[existingIndex] = mergeOpenPAssistantResultEvents(output[existingIndex]!, event);
-      continue;
-    }
-    seen.set(key, output.length);
-    output.push(event);
-  }
-  return output;
-}
-
-function openPResultDeduplicationKey(event: Record<string, unknown>): string | null {
-  if (event.form !== 'result') {
-    return null;
-  }
-  const metadata = event.metadata && typeof event.metadata === 'object' && !Array.isArray(event.metadata)
-    ? event.metadata as Record<string, unknown>
-    : {};
-  return JSON.stringify({
-    form: event.form,
-    output: event.output,
-    structuredOutput: event.structuredOutput,
-    messageId: metadata.messageId,
-    requestId: metadata.requestId,
-    nativePhase: metadata.nativePhase,
-    stopReason: metadata.stopReason,
-  });
-}
-
-function mergeOpenPAssistantResultEvents(
-  first: Record<string, unknown>,
-  second: Record<string, unknown>,
-): Record<string, unknown> {
-  return compactRecord({
-    ...second,
-    ...first,
-    output: mergeOpenPResultOutput(first.output, second.output),
-    metadata: mergeOpenPMetadataField(first.metadata, second.metadata),
-  });
-}
-
-function mergeOpenPResultOutput(first: unknown, second: unknown): OpenPResultOutput {
-  const firstOutput = first && typeof first === 'object' && !Array.isArray(first)
-    ? first as Record<string, unknown>
-    : {};
-  const secondOutput = second && typeof second === 'object' && !Array.isArray(second)
-    ? second as Record<string, unknown>
-    : {};
-  return buildOpenPResultOutput({
-    answer: mergeOpenPStringField(firstOutput.answer, secondOutput.answer),
-    reasoning: mergeOpenPStringField(firstOutput.reasoning, secondOutput.reasoning),
-    toolCall: mergeOpenPArrayField(firstOutput.toolCall, secondOutput.toolCall),
-    toolResult: mergeOpenPArrayField(firstOutput.toolResult, secondOutput.toolResult),
-  });
-}
-
-function mergeOpenPStringField(first: unknown, second: unknown): string[] | undefined {
-  const output: string[] = [];
-  const seen = new Set<string>();
-  for (const value of [
-    ...stringArray(first),
-    ...stringArray(second),
-  ]) {
-    if (seen.has(value)) {
-      continue;
-    }
-    seen.add(value);
-    output.push(value);
-  }
-  return output.length > 0 ? output : undefined;
-}
-
-function mergeOpenPArrayField(first: unknown, second: unknown): unknown[] | undefined {
-  const output: unknown[] = [];
-  const seen = new Set<string>();
-  for (const value of [
-    ...(Array.isArray(first) ? first : []),
-    ...(Array.isArray(second) ? second : []),
-  ]) {
-    const key = JSON.stringify(value);
-    if (seen.has(key)) {
-      continue;
-    }
-    seen.add(key);
-    output.push(value);
-  }
-  return output.length > 0 ? output : undefined;
-}
-
 function sameOpenPToolResult(left: Record<string, unknown>, right: Record<string, unknown>): boolean {
   return left.type === right.type &&
     left.toolUseId === right.toolUseId &&
     JSON.stringify(left.content) === JSON.stringify(right.content) &&
     left.isError === right.isError;
-}
-
-function mergeOpenPMetadataField(first: unknown, second: unknown): Record<string, unknown> | undefined {
-  const firstMetadata = first && typeof first === 'object' && !Array.isArray(first)
-    ? first as Record<string, unknown>
-    : {};
-  const secondMetadata = second && typeof second === 'object' && !Array.isArray(second)
-    ? second as Record<string, unknown>
-    : {};
-  const output: Record<string, unknown> = { ...secondMetadata };
-  for (const [key, value] of Object.entries(firstMetadata)) {
-    if (value !== undefined && value !== null) {
-      output[key] = value;
-    } else if (!Object.prototype.hasOwnProperty.call(output, key)) {
-      output[key] = value;
-    }
-  }
-  return Object.keys(output).length > 0 ? output : undefined;
 }
 
 function buildPreviouslyEmittedAssistantOpenPEvents(
@@ -2258,7 +2101,7 @@ function injectSnapshotUsage(snapshot: AssistantEventSnapshot, turnUsage: Backen
   };
 }
 
-function hasUsage(message: Record<string, unknown>): boolean {
+function hasUsage(message: AssistantEventSnapshot['message']): boolean {
   return message.usage !== null && message.usage !== undefined && typeof message.usage === 'object';
 }
 
@@ -2271,12 +2114,12 @@ function buildSnakeUsage(usage: BackendUsage): Record<string, unknown> {
   });
 }
 
-function normalizePublicAssistantMessage(message: Record<string, unknown>): Record<string, unknown> {
+function normalizePublicAssistantMessage(
+  message: AssistantEventSnapshot['message'],
+): AssistantEventSnapshot['message'] {
   return {
     ...message,
-    content: Array.isArray(message.content)
-      ? message.content.map(normalizePublicContentBlock)
-      : [],
+    content: message.content.map((block) => normalizePublicContentBlock(block) as AssistantContentBlock),
     stop_reason: null,
     stop_sequence: Object.prototype.hasOwnProperty.call(message, 'stop_sequence') ? message.stop_sequence : null,
     stop_details: Object.prototype.hasOwnProperty.call(message, 'stop_details') ? message.stop_details : null,
@@ -2323,7 +2166,7 @@ function normalizeStructuredOutputFallbackSnapshots(
     const hasStructuredOutputToolUse = content.some((block) => isStructuredOutputToolUseBlock(block));
     let insertedStructuredOutputToolUse = hasStructuredOutputToolUse;
     let changedSnapshot = false;
-    const nextContent: unknown[] = [];
+    const nextContent: AssistantContentBlock[] = [];
     for (const block of content) {
       if (textBlockEqualsStructuredOutput(block, structuredOutput)) {
         changed = true;
@@ -2862,7 +2705,7 @@ function buildOpenPStructuredOutputToolResult(toolUseId: string): Record<string,
   };
 }
 
-function buildStructuredOutputToolUseMessageBlock(toolUseId: string, input: unknown): Record<string, unknown> {
+function buildStructuredOutputToolUseMessageBlock(toolUseId: string, input: unknown): AssistantContentBlock {
   return {
     type: 'tool_use',
     id: toolUseId,

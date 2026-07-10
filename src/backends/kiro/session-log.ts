@@ -5,7 +5,7 @@ import { join } from 'node:path';
 
 import { ARTIFACT_REJECTION_REASONS, EXIT_CODES, OpenPError } from '../../core/errors.js';
 import { isSafeSessionId } from '../../core/session-id.js';
-import type { AssistantEventSnapshot } from '../../core/types.js';
+import type { AssistantContentBlock, AssistantEventSnapshot } from '../../core/types.js';
 
 type JsonObject = Record<string, unknown>;
 type KiroPromptEventClassification = 'caller' | 'continuation' | 'unsupported' | 'not_prompt';
@@ -390,7 +390,7 @@ function buildKiroToolResultSnapshot(event: JsonObject): AssistantEventSnapshot 
   };
 }
 
-function normalizeKiroToolUseBlock(block: JsonObject, index: number): Record<string, unknown> {
+function normalizeKiroToolUseBlock(block: JsonObject, index: number): AssistantContentBlock {
   const data = asObject(block.data);
   const id = typeof data?.toolUseId === 'string'
     ? data.toolUseId
@@ -408,7 +408,7 @@ function normalizeKiroToolUseBlock(block: JsonObject, index: number): Record<str
   };
 }
 
-function normalizeKiroToolResultBlock(block: JsonObject, index: number): Record<string, unknown> {
+function normalizeKiroToolResultBlock(block: JsonObject, index: number): AssistantContentBlock {
   const data = asObject(block.data);
   const toolUseId = typeof data?.toolUseId === 'string'
     ? data.toolUseId

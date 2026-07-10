@@ -239,6 +239,8 @@ Debug logs may contain session ids, prompts, response previews, and error contex
 `--event-log` writes caller-owned lifecycle records under `openpRun`. The first record contains
 `openpRun.header`, the final record contains `openpRun.terminal`, and long-running backend waits
 may emit `openpRun.activity` records such as Claude session-log wait stage and idle duration.
+The event-log file is created or tightened to owner-only read/write permissions (`0600`) because it
+can contain prompts, backend output, tool artifacts, and session identifiers.
 
 `--verbose` adds diagnostic markers to output. In text mode, a marker line is appended after the answer. In JSON modes, warnings appear under `openp.metadata.warnings`.
 

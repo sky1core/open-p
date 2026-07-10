@@ -1,5 +1,6 @@
 #!/bin/bash
 # Fake codex that takes too long (for timeout tests)
+printf '%s\n' 'slow backend diagnostic' >&2
 sleep 60 &
 child=$!
 log_signal() {

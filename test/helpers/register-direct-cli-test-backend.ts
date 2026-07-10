@@ -87,7 +87,8 @@ function assistantTextSnapshot(id: string, text: string) {
     semanticKind: 'commentary' as const,
     message: {
       id,
-      role: 'assistant',
+      type: 'message' as const,
+      role: 'assistant' as const,
       content: [{ type: 'text', text }],
       stop_reason: null,
     },
@@ -99,7 +100,8 @@ function assistantTextAndReasoningSnapshot(id: string, reasoning: string, text: 
     semanticKind: 'commentary' as const,
     message: {
       id,
-      role: 'assistant',
+      type: 'message' as const,
+      role: 'assistant' as const,
       content: [
         { type: 'thinking', thinking: reasoning },
         { type: 'text', text },
@@ -114,7 +116,8 @@ function backgroundAssistantSnapshot() {
     semanticKind: 'background' as const,
     message: {
       id: 'snap-background',
-      role: 'assistant',
+      type: 'message' as const,
+      role: 'assistant' as const,
       content: [
         { type: 'text', text: 'background done' },
         { type: 'tool_use', id: 'toolu_bg', name: 'Read', input: { file_path: 'bg.txt' } },

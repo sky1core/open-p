@@ -20,6 +20,7 @@ test('acquires one lock per session and releases it', async () => {
   assert.equal(mode, 0o600);
   assert.equal(raw.sessionId, SESSION_ID);
   assert.equal(raw.pid, process.pid);
+  assert.equal(typeof raw.processStartedAt, 'string');
   assert.equal(typeof raw.token, 'string');
   assert.equal(first.path.startsWith(projectRoot), false);
   await assert.rejects(
@@ -68,10 +69,30 @@ test('recovers a stale lock owned by a missing process', async () => {
   }));
 
   const lock = await store.acquire(SESSION_ID);
-  const raw = JSON.parse(await readFile(path, 'utf8'));
+  const raw = JSON.parse(await readFile(lock.path, 'utf8'));
 
   assert.notEqual(raw.token, 'stale-token');
   assert.equal(raw.sessionId, SESSION_ID);
+  await lock.release();
+});
+
+test('recovers a stale lock after its pid has been reused by a newer process', async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), 'openp-lock-'));
+  const stateRoot = await mkdtemp(join(tmpdir(), 'openp-lock-root-'));
+  const store = new SessionLockStore(projectRoot, stateRoot);
+  const path = store.pathForSession(SESSION_ID);
+  await mkdir(join(stateRoot, 'locks'), { recursive: true });
+  await writeFile(path, JSON.stringify({
+    token: 'reused-pid-token',
+    sessionId: SESSION_ID,
+    pid: process.pid,
+    createdAt: '2000-01-01T00:00:00.000Z',
+  }));
+
+  const lock = await store.acquire(SESSION_ID);
+  const raw = JSON.parse(await readFile(lock.path, 'utf8'));
+
+  assert.notEqual(raw.token, 'reused-pid-token');
   await lock.release();
 });
 
@@ -129,7 +150,7 @@ test('concurrent acquires over a stale lock yield at most one owner', async () =
     assert.equal(winners.length <= 1, true, `iteration ${iteration}: multiple lock owners`);
     if (winners.length === 1) {
       const winner = winners[0] as { lock: { path: string; release(): Promise<void> } };
-      const raw = JSON.parse(await readFile(path, 'utf8'));
+      const raw = JSON.parse(await readFile(winner.lock.path, 'utf8'));
       assert.notEqual(raw.token, `stale-token-${iteration}`, `iteration ${iteration}: stale lock left on disk`);
       await winner.lock.release();
     }

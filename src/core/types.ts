@@ -26,13 +26,24 @@ export interface TurnDiagnostics {
   readonly rawEventCount: number;
 }
 
+export interface AssistantSnapshotMessage {
+  readonly id: string;
+  readonly type: 'message';
+  readonly role: 'assistant';
+  readonly content: readonly AssistantContentBlock[];
+  readonly [key: string]: unknown;
+}
+
 export interface AssistantEventSnapshot {
-  readonly message: Record<string, unknown>;
+  readonly message: AssistantSnapshotMessage;
   readonly requestId?: string | null;
   readonly semanticKind?: 'commentary' | 'progress' | 'background';
 }
 
-export type AssistantContentBlock = Record<string, unknown>;
+export interface AssistantContentBlock {
+  readonly type: string;
+  readonly [key: string]: unknown;
+}
 
 export interface BackendRunActivity {
   readonly kind: 'backend_wait';

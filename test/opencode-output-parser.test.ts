@@ -23,7 +23,12 @@ test('parseOpenCodeJsonOutput normalizes nested assistant message snapshots', ()
     JSON.stringify({ type: 'result', sessionID: 'ses_abc', result: 'final' }),
   ].join('\n'));
   assert.deepEqual(parsed.assistantEvents.map((event) => event.message), [
-    { role: 'assistant', content: [{ type: 'text', text: 'draft' }] },
+    {
+      id: 'msg_opencode_1_assistant',
+      type: 'message',
+      role: 'assistant',
+      content: [{ type: 'text', text: 'draft' }],
+    },
   ]);
 });
 

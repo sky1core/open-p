@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -57,4 +57,23 @@ test('run event log writes activity lifecycle records', async () => {
       sawCallerUserTurn: true,
     },
   });
+  assert.equal((await stat(eventLogPath)).mode & 0o777, 0o600);
+});
+
+test('run event log tightens an existing caller-owned file to owner-only access', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-run-event-log-'));
+  const eventLogPath = join(dir, 'events.jsonl');
+  await writeFile(eventLogPath, '');
+  await chmod(eventLogPath, 0o644);
+
+  const eventLog = openRunEventLog(eventLogPath, {
+    runId: 'run-existing',
+    pid: process.pid,
+    startedAt: new Date().toISOString(),
+    backend: 'codex',
+    resume: null,
+  }, () => undefined);
+  eventLog.close();
+
+  assert.equal((await stat(eventLogPath)).mode & 0o777, 0o600);
 });

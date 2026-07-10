@@ -1,6 +1,7 @@
 import type {
   AssistantContentBlock,
   AssistantEventSnapshot,
+  AssistantSnapshotMessage,
   BackendUsage,
   TurnDiagnostics,
   TurnResult,
@@ -350,6 +351,7 @@ export function extractClaudeCodeIntermediateContent(
     lastReasoningContentBlockCount: 0,
   };
   let pendingAssistantSnapshot: AssistantEventSnapshot | null = null;
+  let parsedEventSequence = 0;
   const clearTextState = (): void => {
     textState.activeAssistantTexts = [];
     textState.lastActiveAssistantMessageId = null;
@@ -366,6 +368,7 @@ export function extractClaudeCodeIntermediateContent(
   for (const line of lines) {
     const event = parseJsonObject(line);
     if (!event) continue;
+    parsedEventSequence += 1;
     rememberLocalCommandTranscriptPromptId(localCommandTranscriptPromptIds, event);
     if (event.type === 'user' && isTaskNotification(event)) {
       clearTextState();
@@ -445,7 +448,7 @@ export function extractClaudeCodeIntermediateContent(
         const reasoningText = extractReasoningBlockText(item);
         if (reasoningText) {
           eventReasoningBlocks.push(reasoningText);
-          eventReasoningContentBlocks.push(item);
+          eventReasoningContentBlocks.push({ ...item, type: item.type });
         }
       }
     }
@@ -464,7 +467,7 @@ export function extractClaudeCodeIntermediateContent(
       );
     }
     if (eventTextBlocks.length > 0 || eventReasoningBlocks.length > 0) {
-      pendingAssistantSnapshot = buildAssistantSnapshot(event);
+      pendingAssistantSnapshot = buildAssistantSnapshot(event, parsedEventSequence);
     }
   }
 
@@ -626,7 +629,7 @@ function hasPreCallerCompletionEvidence(state: ParserState): boolean {
 }
 
 function consumeUserToolResultEvent(state: ParserState, event: JsonObject): void {
-  const snapshot = buildUserToolResultSnapshot(event);
+  const snapshot = buildUserToolResultSnapshot(event, state.rawEventCount);
   if (snapshot) {
     state.sawToolResult = true;
     state.assistantEvents.push(snapshot);
@@ -707,7 +710,7 @@ function consumeAssistantEvent(state: ParserState, event: JsonObject): void {
   }
   const stopReason = typeof message?.stop_reason === 'string' ? message.stop_reason : null;
   state.stopReason = stopReason;
-  const snapshot = buildAssistantSnapshot(event);
+  const snapshot = buildAssistantSnapshot(event, state.rawEventCount);
   if (snapshot) {
     state.assistantEvents.push(snapshot);
   }
@@ -736,7 +739,7 @@ function consumeAssistantEvent(state: ParserState, event: JsonObject): void {
       const reasoningText = extractReasoningBlockText(item);
       if (reasoningText) {
         eventReasoningBlocks.push(reasoningText);
-        eventReasoningContentBlocks.push(item);
+        eventReasoningContentBlocks.push({ ...item, type: item.type });
       }
     }
     if (item.type === 'text' && typeof item.text === 'string') {
@@ -761,19 +764,22 @@ function consumeAssistantEvent(state: ParserState, event: JsonObject): void {
   }
 }
 
-function buildAssistantSnapshot(event: JsonObject): AssistantEventSnapshot | null {
+function buildAssistantSnapshot(event: JsonObject, eventSequence: number): AssistantEventSnapshot | null {
   const message = asObject(event.message);
   if (!message) {
     return null;
   }
+  const messageId = stringOrNull(message.id)
+    ?? stringOrNull(event.uuid)
+    ?? `claude_event_${eventSequence}`;
   const requestId = stringOrNull(event.requestId) ?? stringOrNull(event.request_id);
   return {
-    message: normalizeAssistantMessage(message),
+    message: normalizeAssistantMessage(message, messageId),
     ...(requestId ? { requestId } : {}),
   };
 }
 
-function buildUserToolResultSnapshot(event: JsonObject): AssistantEventSnapshot | null {
+function buildUserToolResultSnapshot(event: JsonObject, eventSequence: number): AssistantEventSnapshot | null {
   const message = asObject(event.message);
   if (!message) {
     return null;
@@ -784,6 +790,7 @@ function buildUserToolResultSnapshot(event: JsonObject): AssistantEventSnapshot 
   if (content.length === 0) {
     return null;
   }
+  const eventId = stringOrNull(event.uuid) ?? `claude_event_${eventSequence}`;
   const requestId = stringOrNull(event.requestId) ?? stringOrNull(event.request_id);
   return {
     message: normalizeAssistantMessage({
@@ -791,18 +798,24 @@ function buildUserToolResultSnapshot(event: JsonObject): AssistantEventSnapshot 
       role: 'assistant',
       content,
       stop_reason: null,
-    }),
+    }, eventId),
     ...(requestId ? { requestId } : {}),
   };
 }
 
-function normalizeAssistantMessage(message: JsonObject): Record<string, unknown> {
+function normalizeAssistantMessage(message: JsonObject, messageId: string): AssistantSnapshotMessage {
+  const content = Array.isArray(message.content)
+    ? message.content
+        .map(asObject)
+        .filter((block): block is JsonObject => typeof block?.type === 'string')
+        .map((block) => ({ ...block, type: block.type as string }))
+    : [];
   return {
     ...(typeof message.model === 'string' ? { model: message.model } : {}),
-    ...(typeof message.id === 'string' ? { id: message.id } : {}),
-    type: typeof message.type === 'string' ? message.type : 'message',
-    role: typeof message.role === 'string' ? message.role : 'assistant',
-    content: Array.isArray(message.content) ? message.content : [],
+    id: messageId,
+    type: 'message',
+    role: 'assistant',
+    content,
     stop_reason: Object.prototype.hasOwnProperty.call(message, 'stop_reason') ? message.stop_reason : null,
     stop_sequence: Object.prototype.hasOwnProperty.call(message, 'stop_sequence') ? message.stop_sequence : null,
     stop_details: Object.prototype.hasOwnProperty.call(message, 'stop_details') ? message.stop_details : null,

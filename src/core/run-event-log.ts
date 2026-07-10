@@ -1,4 +1,4 @@
-import { closeSync, constants, fsyncSync, openSync, writeSync } from 'node:fs';
+import { closeSync, constants, fchmodSync, fsyncSync, openSync, writeSync } from 'node:fs';
 import { EXIT_CODES, OpenPError } from './errors.js';
 import type { BackendRunActivity } from './types.js';
 
@@ -94,12 +94,23 @@ export function openRunEventLog(
   header: RunEventLogHeader,
   warn: (message: string) => void,
 ): RunEventLog {
-  let fd: number;
+  let fd: number | null = null;
   try {
-    fd = openSync(path, constants.O_CREAT | constants.O_APPEND | constants.O_WRONLY, 0o666);
+    fd = openSync(path, constants.O_CREAT | constants.O_APPEND | constants.O_WRONLY, 0o600);
+    fchmodSync(fd, 0o600);
   } catch (error) {
+    if (fd !== null) {
+      try {
+        closeSync(fd);
+      } catch {
+        // The open/chmod failure remains the primary error.
+      }
+    }
     const message = error instanceof Error ? error.message : String(error);
     throw new OpenPError(`failed to open --event-log: ${message}`, EXIT_CODES.usage);
+  }
+  if (fd === null) {
+    throw new OpenPError('failed to open --event-log', EXIT_CODES.usage);
   }
   const eventLog = new RunEventLog(fd, warn);
   eventLog.writeHeader(header);

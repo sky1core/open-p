@@ -1,6 +1,6 @@
 {
   "name": "open-p",
-  "version": "0.19.5",
+  "version": "0.19.6",
   "license": "MIT",
   "type": "module",
   "bin": {
@@ -14,7 +14,8 @@
     "clean": "node scripts/clean-dist.mjs",
     "build": "npm run clean && tsc -p tsconfig.build.json && chmod +x dist/src/cli.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "tsx --test test/*.test.ts",
+    "test": "tsx --test --test-concurrency=1 test/*.test.ts",
+    "test:parallel": "tsx --test test/*.test.ts",
     "verify": "npm run typecheck && npm test",
     "prepare": "npm run build",
     "smoke:live": "node scripts/live-smoke.mjs",
