@@ -107,6 +107,12 @@ If Codex rejects the requested model or effort, `openp` preserves the Codex diag
 
 When a Codex session log exposes the actual selected model, result metadata reports that model before falling back to the requested model string.
 
+## Kiro Backend Notes
+
+The Kiro backend does not publish a hardcoded model or reasoning-effort catalog. `--model <model>` is passed through to Kiro CLI as `--model <model>`, and `--effort <level>` is passed through as `--effort <level>`.
+
+If Kiro rejects the requested model or effort, `openp` preserves the Kiro stderr diagnostic in the non-zero exit error instead of replacing it with a local enum-validation error.
+
 ## Claude Backend Notes
 
 The Claude backend runs through a PTY-backed interactive Claude Code session and reads Claude's local session log for structured turn data. It does not use Claude print mode.

@@ -5,7 +5,6 @@ import { readRequiredFirstTurnFlag } from '../../core/worker-input.js';
 
 import { buildKiroAcpArgs } from './args.js';
 import { resolveKiroBin } from './bin.js';
-import { validateKiroReasoningEffort } from './effort.js';
 import { runKiroAcp } from './acp-runner.js';
 
 export class KiroWorkerBridge implements BackendWorkerBridge {
@@ -78,7 +77,6 @@ function rejectUnsupportedOptions(request: WorkerTurnRequest): void {
   if (request.jsonSchema) {
     throw new OpenPError('Kiro backend does not support jsonSchema', EXIT_CODES.unsupportedOption);
   }
-  validateKiroReasoningEffort(request.reasoningEffort);
   if (request.local === true) {
     throw new OpenPError('Kiro backend does not support local worker mode', EXIT_CODES.unsupportedOption);
   }

@@ -138,7 +138,7 @@ test('KiroWorkerBridge.runTurn accepts public effort option', withFakeKiro('succ
   assert.equal(result.content, 'partial answer');
 }));
 
-test('KiroWorkerBridge.runTurn rejects invalid public effort before launch', withFakeKiro('error', async () => {
+test('KiroWorkerBridge.runTurn relays invalid public effort to Kiro', withFakeKiro('error', async () => {
   const bridge = new KiroWorkerBridge();
   await assert.rejects(
     bridge.runTurn({
@@ -149,7 +149,9 @@ test('KiroWorkerBridge.runTurn rejects invalid public effort before launch', wit
       timeoutMs: 5000,
       reasoningEffort: 'bogus',
     }),
-    (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.unsupportedOption,
+    (error) => error instanceof OpenPError &&
+      error.exitCode === EXIT_CODES.backendExited &&
+      error.message.includes('fake kiro failed'),
   );
 }));
 

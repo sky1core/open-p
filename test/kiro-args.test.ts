@@ -14,6 +14,11 @@ test('buildKiroAcpArgs adds model', () => {
   assert.deepEqual(result.args, ['acp', '--model', 'claude-haiku-4.5']);
 });
 
+test('buildKiroAcpArgs preserves caller-provided model string', () => {
+  const result = buildKiroAcpArgs({ model: ' claude-haiku-4.5 ' });
+  assert.deepEqual(result.args, ['acp', '--model', ' claude-haiku-4.5 ']);
+});
+
 test('buildKiroAcpArgs maps danger-full-access to trust-all-tools', () => {
   const result = buildKiroAcpArgs({ executionMode: 'danger-full-access' });
   assert.deepEqual(result.args, ['acp', '--trust-all-tools']);
@@ -84,16 +89,18 @@ test('buildKiroAcpArgs omits --effort when no effort is requested', () => {
   assert.equal(result.args.includes('--effort'), false);
 });
 
-test('buildKiroAcpArgs rejects an unsupported effort before building args', () => {
-  assert.throws(
-    () => buildKiroAcpArgs({ reasoningEffort: 'bogus' }),
-    (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.unsupportedOption,
-  );
+test('buildKiroAcpArgs passes unsupported effort values to Kiro', () => {
+  const result = buildKiroAcpArgs({ reasoningEffort: 'bogus' });
+  assert.deepEqual(result.args, ['acp', '--effort', 'bogus']);
 });
 
-test('buildKiroAcpArgs accepts every supported effort level', () => {
-  for (const level of ['low', 'medium', 'high', 'xhigh', 'max']) {
+test('buildKiroAcpArgs passes arbitrary non-empty effort values without normalization', () => {
+  for (const level of ['low', 'medium', 'high', 'xhigh', 'max', ' future-effort ', '']) {
     const result = buildKiroAcpArgs({ reasoningEffort: level });
-    assert.deepEqual(result.args, ['acp', '--effort', level]);
+    if (level.length === 0) {
+      assert.deepEqual(result.args, ['acp']);
+    } else {
+      assert.deepEqual(result.args, ['acp', '--effort', level]);
+    }
   }
 });

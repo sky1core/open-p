@@ -15,7 +15,7 @@ test('Kiro descriptor publishes ACP backend boundaries', () => {
   });
 });
 
-test('Kiro descriptor publishes common execution modes and effort values', () => {
-  assert.deepEqual(KIRO_DESCRIPTOR.reasoningEfforts, ['low', 'medium', 'high', 'xhigh', 'max']);
+test('Kiro descriptor publishes common execution modes without a hardcoded effort catalog', () => {
+  assert.deepEqual(KIRO_DESCRIPTOR.reasoningEfforts, []);
   assert.deepEqual(KIRO_DESCRIPTOR.executionModes, ['default', 'danger-full-access']);
 });

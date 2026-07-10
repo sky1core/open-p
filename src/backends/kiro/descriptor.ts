@@ -14,7 +14,7 @@ export const KIRO_DESCRIPTOR: BackendDescriptor = {
   executionModes: ['default', 'danger-full-access'],
   defaultReasoningEffort: null,
   defaultReasoningEffortsByModel: {},
-  reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+  reasoningEfforts: [],
   reasoningEffortsByModel: {},
   contextWindowsByModel: {},
   contextWindow: null,

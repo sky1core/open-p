@@ -5,7 +5,6 @@ import type { TurnRequest, TurnResult, BackendRunOptions } from '../../core/type
 
 import { buildKiroAcpArgs } from './args.js';
 import { resolveKiroBin } from './bin.js';
-import { validateKiroReasoningEffort } from './effort.js';
 import { runKiroAcp } from './acp-runner.js';
 
 export class KiroBackend implements Backend {
@@ -31,7 +30,6 @@ export class KiroBackend implements Backend {
   private async runTurnWithLock(request: TurnRequest, options: BackendRunOptions): Promise<TurnResult> {
     rejectUnsupportedOptions({
       jsonSchema: options.jsonSchema,
-      reasoningEffort: options.reasoningEffort,
     });
 
     const startMs = Date.now();
@@ -85,10 +83,8 @@ export class KiroBackend implements Backend {
 
 function rejectUnsupportedOptions(options: {
   readonly jsonSchema: string | null;
-  readonly reasoningEffort: string | null;
 }): void {
   if (options.jsonSchema) {
     throw new OpenPError('Kiro backend does not support --json-schema', EXIT_CODES.unsupportedOption);
   }
-  validateKiroReasoningEffort(options.reasoningEffort);
 }

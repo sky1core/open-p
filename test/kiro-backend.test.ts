@@ -119,14 +119,16 @@ test('KiroBackend.runTurn accepts public effort option', withFakeKiro('success',
   assert.equal(result.text, 'partial answer');
 }));
 
-test('KiroBackend.runTurn rejects invalid public effort before launch', withFakeKiro('error', async () => {
+test('KiroBackend.runTurn relays invalid public effort to Kiro', withFakeKiro('error', async () => {
   const backend = new KiroBackend();
   await assert.rejects(
     backend.runTurn(
       { turnId: 'turn-1', prompt: 'hello' },
       { ...BASE_OPTIONS, reasoningEffort: 'bogus' },
     ),
-    (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.unsupportedOption,
+    (error) => error instanceof OpenPError &&
+      error.exitCode === EXIT_CODES.backendExited &&
+      error.message.includes('fake kiro failed'),
   );
 }));
 
