@@ -6,7 +6,17 @@ import { readRequiredFirstTurnFlag } from '../../core/worker-input.js';
 import { resolveCodexBin } from './bin.js';
 import { executeCodexTurn } from './turn-executor.js';
 
+export interface CodexWorkerBridgeOptions {
+  readonly homeDir?: string | null;
+}
+
 export class CodexWorkerBridge implements BackendWorkerBridge {
+  private readonly homeDir: string | null;
+
+  constructor(options: CodexWorkerBridgeOptions = {}) {
+    this.homeDir = options.homeDir ?? null;
+  }
+
   async runTurn(request: WorkerTurnRequest): Promise<WorkerTurnResult> {
     if (request.local === true) {
       throw new OpenPError('Codex backend does not support local worker mode', EXIT_CODES.unsupportedOption);
@@ -26,6 +36,7 @@ export class CodexWorkerBridge implements BackendWorkerBridge {
       binArgs: request.binArgs ?? [],
       timeoutMs: request.timeoutMs ?? 0,
       env: request.env ? { ...process.env, ...request.env } : undefined,
+      homeDir: this.homeDir,
       signal: request.signal,
       forceSignal: request.forceSignal,
       killSignal: request.killSignal,

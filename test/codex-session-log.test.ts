@@ -8,8 +8,11 @@ import {
   extractLatestTokenCount,
   extractSessionLogResult,
   findCodexSessionLogPath,
+  getCodexSessionLogBaseline,
   readCodexSessionLogResult,
+  readCodexSessionLogResultSinceBaseline,
 } from '../src/backends/codex/session-log.js';
+import { createCodexBackendProvider } from '../src/backends/codex/index.js';
 import { EXIT_CODES, OpenPError } from '../src/core/errors.js';
 import { formatWorkerTurnResult } from '../src/core/output.js';
 
@@ -367,6 +370,66 @@ test('findCodexSessionLogPath rejects duplicate session id log paths', async () 
       process.env.CODEX_HOME = prev;
     }
   }
+});
+
+test('Codex session-log helpers use only the explicit homeDir', async () => {
+  const sessionId = 'explicit-home-session';
+  const firstHome = await mkdtemp(join(tmpdir(), 'openp-codex-home-a-'));
+  const secondHome = await mkdtemp(join(tmpdir(), 'openp-codex-home-b-'));
+  const firstDir = join(firstHome, 'sessions', '2026', '05', '20');
+  const secondDir = join(secondHome, 'sessions', '2026', '05', '20');
+  await mkdir(firstDir, { recursive: true });
+  await mkdir(secondDir, { recursive: true });
+  const firstPath = join(firstDir, `rollout-${sessionId}.jsonl`);
+  const secondPath = join(secondDir, `rollout-${sessionId}.jsonl`);
+  await writeFile(firstPath, [
+    JSON.stringify({ type: 'turn_context', payload: { model: 'codex-first-home' } }),
+    codexUserTurn(),
+    JSON.stringify({
+      type: 'response_item',
+      payload: {
+        type: 'message',
+        role: 'assistant',
+        phase: 'final_answer',
+        content: [{ type: 'output_text', text: 'first home answer' }],
+      },
+    }),
+    JSON.stringify({ type: 'event_msg', payload: { type: 'task_complete' } }),
+    '',
+  ].join('\n'));
+  await writeFile(secondPath, [
+    JSON.stringify({ type: 'turn_context', payload: { model: 'codex-second-home' } }),
+    codexUserTurn(),
+    JSON.stringify({
+      type: 'response_item',
+      payload: {
+        type: 'message',
+        role: 'assistant',
+        phase: 'final_answer',
+        content: [{ type: 'output_text', text: 'second home answer' }],
+      },
+    }),
+    JSON.stringify({ type: 'event_msg', payload: { type: 'task_complete' } }),
+    '',
+  ].join('\n'));
+
+  assert.equal(await findCodexSessionLogPath(sessionId, secondHome), secondPath);
+  assert.equal(
+    await createCodexBackendProvider({ id: 'codex-explicit', homeDir: secondHome })
+      .resolveSessionLogPath(sessionId, process.cwd()),
+    secondPath,
+  );
+  const baseline = await getCodexSessionLogBaseline(sessionId, { homeDir: secondHome });
+  assert.equal(baseline.logPath, secondPath);
+  const result = await readCodexSessionLogResult(sessionId, 0, { homeDir: secondHome });
+  assert.equal(result?.content, 'second home answer');
+  assert.equal(result?.model, 'codex-second-home');
+  const resultSinceBaseline = await readCodexSessionLogResultSinceBaseline(sessionId, {
+    offsetBytes: 0,
+    preexisting: false,
+    logPath: null,
+  }, { homeDir: secondHome });
+  assert.equal(resultSinceBaseline?.content, 'second home answer');
 });
 
 test('findCodexSessionLogPath fails closed when the sessions directory cannot be read', async () => {

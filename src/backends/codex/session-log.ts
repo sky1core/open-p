@@ -42,21 +42,34 @@ export interface CodexSessionLogBaseline {
   readonly logPath: string | null;
 }
 
-function getCodexHome(): string {
+export interface CodexSessionLogOptions {
+  readonly homeDir?: string | null;
+}
+
+function getCodexHome(homeDir?: string | null): string {
+  if (homeDir) {
+    return homeDir;
+  }
   const envHome = process.env.CODEX_HOME?.trim();
   return envHome || join(homedir(), '.codex');
 }
 
-export async function findCodexSessionLogPath(sessionId: string): Promise<string | null> {
+export async function findCodexSessionLogPath(
+  sessionId: string,
+  homeDir?: string | null,
+): Promise<string | null> {
   const normalizedId = sessionId.trim();
   if (!normalizedId) return null;
 
-  const sessionsRoot = join(getCodexHome(), 'sessions');
+  const sessionsRoot = join(getCodexHome(homeDir), 'sessions');
   return findMatchingLog(sessionsRoot, normalizedId);
 }
 
-export async function getCodexSessionLogSize(sessionId: string): Promise<number | null> {
-  const logPath = await findCodexSessionLogPath(sessionId);
+export async function getCodexSessionLogSize(
+  sessionId: string,
+  options: CodexSessionLogOptions = {},
+): Promise<number | null> {
+  const logPath = await findCodexSessionLogPath(sessionId, options.homeDir);
   if (!logPath) return null;
   try {
     const st = await stat(logPath);
@@ -66,8 +79,11 @@ export async function getCodexSessionLogSize(sessionId: string): Promise<number 
   }
 }
 
-export async function getCodexSessionLogBaseline(sessionId: string): Promise<CodexSessionLogBaseline> {
-  const logPath = await findCodexSessionLogPath(sessionId);
+export async function getCodexSessionLogBaseline(
+  sessionId: string,
+  options: CodexSessionLogOptions = {},
+): Promise<CodexSessionLogBaseline> {
+  const logPath = await findCodexSessionLogPath(sessionId, options.homeDir);
   if (!logPath) {
     return { offsetBytes: 0, preexisting: false, logPath: null };
   }
@@ -138,8 +154,9 @@ function isCodexSessionLogName(name: string, sessionId: string): boolean {
 export async function readCodexSessionLogResult(
   sessionId: string,
   offsetBytes = 0,
+  options: CodexSessionLogOptions = {},
 ): Promise<CodexSessionLogResult | null> {
-  const logPath = await findCodexSessionLogPath(sessionId);
+  const logPath = await findCodexSessionLogPath(sessionId, options.homeDir);
   if (!logPath) return null;
   return readCodexSessionLogResultAtPath(
     logPath,
@@ -151,13 +168,14 @@ export async function readCodexSessionLogResult(
 export async function readCodexSessionLogResultSinceBaseline(
   sessionId: string,
   baseline: CodexSessionLogBaseline | null,
+  options: CodexSessionLogOptions = {},
 ): Promise<CodexSessionLogResult | null> {
   if (baseline?.preexisting) {
     return baseline.logPath
       ? readCodexSessionLogResultAtPath(baseline.logPath, baseline.offsetBytes)
       : null;
   }
-  return readCodexSessionLogResult(sessionId, baseline?.offsetBytes ?? 0);
+  return readCodexSessionLogResult(sessionId, baseline?.offsetBytes ?? 0, options);
 }
 
 async function readCodexSessionLogResultAtPath(

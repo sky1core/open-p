@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { createAbortError } from '../../core/abort.js';
@@ -36,6 +36,7 @@ export interface CodexTurnExecutionInput {
   readonly binArgs: readonly string[];
   readonly timeoutMs: number;
   readonly env?: NodeJS.ProcessEnv;
+  readonly homeDir?: string | null;
   readonly signal?: AbortSignal;
   readonly forceSignal?: AbortSignal;
   readonly killSignal?: AbortSignal;
@@ -65,6 +66,8 @@ export async function executeCodexTurn(input: CodexTurnExecutionInput): Promise<
   }
 
   const startMs = Date.now();
+  const codexHome = resolveCodexHome(input.homeDir ?? null, input.env ?? process.env);
+  const childEnv = buildCodexChildEnv(input.env, input.homeDir ?? null);
   const outputLastMessagePath = join(tmpdir(), `openp-codex-last-${randomUUID()}.txt`);
   let outputSchemaPath: string | null = null;
   const structuredOutputSchema = parseCodexStructuredOutputSchema(input.jsonSchema);
@@ -92,13 +95,13 @@ export async function executeCodexTurn(input: CodexTurnExecutionInput): Promise<
       : buildResumeTurnArgs(input.sessionId!, input.prompt, argsOptions);
     const streamState = createCodexStreamState(structuredOutputSchema === null);
     const resumeLogBaseline = !input.isFirstTurn && input.sessionId
-      ? await getCodexSessionLogBaseline(input.sessionId)
+      ? await getCodexSessionLogBaseline(input.sessionId, { homeDir: codexHome })
       : null;
     const result = await runCodexExec({
       bin: input.bin,
       args,
       cwd: input.projectRoot,
-      env: input.env,
+      env: childEnv,
       timeoutMs: input.timeoutMs,
       signal: input.signal,
       forceSignal: input.forceSignal,
@@ -123,6 +126,7 @@ export async function executeCodexTurn(input: CodexTurnExecutionInput): Promise<
         outputLastMessagePath,
         sessionId: input.isFirstTurn ? null : input.sessionId,
         sessionLogBaseline: resumeLogBaseline,
+        homeDir: codexHome,
       });
     }
 
@@ -144,7 +148,9 @@ export async function executeCodexTurn(input: CodexTurnExecutionInput): Promise<
       throw new OpenPError('Codex CLI did not return a session id', EXIT_CODES.protocolViolation);
     }
 
-    const sessionLog = await readCodexSessionLogResultSinceBaseline(resultSessionId, resumeLogBaseline);
+    const sessionLog = await readCodexSessionLogResultSinceBaseline(resultSessionId, resumeLogBaseline, {
+      homeDir: codexHome,
+    });
     if (!input.isFirstTurn && resumeLogBaseline?.preexisting && !sessionLog) {
       throw new OpenPError('Codex session log became unavailable for resume turn', EXIT_CODES.protocolViolation);
     }
@@ -190,6 +196,24 @@ export async function executeCodexTurn(input: CodexTurnExecutionInput): Promise<
       await safeUnlink(outputSchemaPath);
     }
   }
+}
+
+function resolveCodexHome(homeDir: string | null, env: NodeJS.ProcessEnv): string {
+  if (homeDir) {
+    return homeDir;
+  }
+  const envHome = env.CODEX_HOME?.trim();
+  return envHome || join(homedir(), '.codex');
+}
+
+function buildCodexChildEnv(env: NodeJS.ProcessEnv | undefined, homeDir: string | null): NodeJS.ProcessEnv | undefined {
+  if (!homeDir) {
+    return env;
+  }
+  return {
+    ...(env ?? process.env),
+    CODEX_HOME: homeDir,
+  };
 }
 
 function buildCodexTimeoutError(timeoutMs: number, stderr: string): OpenPError {

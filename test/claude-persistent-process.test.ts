@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { appendFile, chmod, mkdtemp, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -12,6 +12,7 @@ import {
   waitForClaudeCodeInputReady,
 } from '../src/backends/claude/interactive.js';
 import { PersistentClaudeCodeProcess, startPersistentClaudeCodeProcess } from '../src/backends/claude/persistent-process.js';
+import { resolveClaudeCodeProjectLogDir } from '../src/backends/claude/session-log.js';
 import { buildLaunchSignature } from '../src/core/launch-signature.js';
 import { EXIT_CODES, OpenPError } from '../src/core/errors.js';
 import type { IntermediateTextSource } from '../src/core/types.js';
@@ -329,6 +330,9 @@ class PreCallerLocalCommandThenTurnSession implements PtySession {
   }
 
   async captureCursorLine(): Promise<string> {
+    if (this.submitCount === 0 && this.lastWrite) {
+      return `❯ ${this.lastWrite}`;
+    }
     if (this.submitCount === 1 && this.draftLineAfterFirstSubmit) {
       return this.draftLineAfterFirstSubmit;
     }
@@ -400,6 +404,9 @@ class PreCallerLocalCommandThenLateCallerSession implements PtySession {
   }
 
   async captureCursorLine(): Promise<string> {
+    if (this.submitCount === 0 && this.lastWrite) {
+      return `❯ ${this.lastWrite}`;
+    }
     if (this.submitCount === 0) {
       return '❯';
     }
@@ -432,6 +439,155 @@ class PreCallerLocalCommandThenLateCallerSession implements PtySession {
       ].join('\n') + '\n');
     }
     return 'Generating response...';
+  }
+}
+
+class LostInitialSubmitStableDraftSession implements PtySession {
+  readonly id = 'lost-initial-submit-stable-draft-session';
+  alive = true;
+  submitCount = 0;
+  readonly writes: string[] = [];
+  captureAfterFirstSubmitCount = 0;
+  private lastWrite = '';
+  private pendingCallerCompletion = false;
+
+  constructor(
+    private readonly logPath: string,
+    private readonly draftLine: string,
+    private readonly options: {
+      readonly unchangedLineAcrossWrite?: string;
+      readonly currentLineAfterFirstSubmit?: string;
+      readonly appendCallerDuringFirstPostSubmitCapture?: boolean;
+      readonly appendCallerOnlyDuringFirstPostSubmitCapture?: boolean;
+      readonly secondSubmitWritesResult?: boolean;
+      readonly throwOnFirstPostSubmitCapture?: boolean;
+      readonly eventIdentity?: { readonly cwd: string; readonly sessionId: string };
+    } = {},
+  ) {}
+
+  async write(input: string): Promise<void> {
+    this.lastWrite = input;
+    this.writes.push(input);
+  }
+
+  async submit(): Promise<void> {
+    this.submitCount += 1;
+    if (this.submitCount === 1) {
+      return;
+    }
+    if (this.options.secondSubmitWritesResult === false) {
+      return;
+    }
+    await appendFile(this.logPath, [
+      eventLine({
+        ...this.options.eventIdentity,
+        type: 'user',
+        uuid: 'active-user',
+        message: { content: this.lastWrite },
+      }),
+      eventLine({
+        ...this.options.eventIdentity,
+        type: 'assistant',
+        parentUuid: 'active-user',
+        message: {
+          content: [{ type: 'text', text: 'recovered after lost initial submit' }],
+          stop_reason: 'end_turn',
+        },
+      }),
+      eventLine({
+        ...this.options.eventIdentity,
+        type: 'system',
+        subtype: 'turn_duration',
+        durationMs: 10,
+      }),
+    ].join('\n') + '\n');
+  }
+
+  async interrupt(): Promise<void> {}
+
+  async terminate(): Promise<void> {
+    this.alive = false;
+  }
+
+  async exit(): Promise<void> {
+    this.alive = false;
+  }
+
+  async isAlive(): Promise<boolean> {
+    if (this.pendingCallerCompletion) {
+      this.pendingCallerCompletion = false;
+      await appendFile(this.logPath, [
+        eventLine({
+          ...this.options.eventIdentity,
+          type: 'assistant',
+          parentUuid: 'active-user',
+          message: {
+            content: [{ type: 'text', text: 'late caller after initial submit' }],
+            stop_reason: 'end_turn',
+          },
+        }),
+        eventLine({
+          ...this.options.eventIdentity,
+          type: 'system',
+          subtype: 'turn_duration',
+          durationMs: 10,
+        }),
+      ].join('\n') + '\n');
+    }
+    return this.alive;
+  }
+
+  async captureText(): Promise<string> {
+    return 'Claude Code v\n❯';
+  }
+
+  async captureCursorLine(): Promise<string> {
+    if (this.submitCount === 0) {
+      if (this.options.unchangedLineAcrossWrite) {
+        return this.options.unchangedLineAcrossWrite;
+      }
+      return this.lastWrite ? this.draftLine : '❯';
+    }
+    if (this.submitCount === 1) {
+      this.captureAfterFirstSubmitCount += 1;
+      if (this.options.throwOnFirstPostSubmitCapture) {
+        throw new Error('cursor read failed');
+      }
+      if (this.options.appendCallerDuringFirstPostSubmitCapture && this.captureAfterFirstSubmitCount === 1) {
+        const events = [
+          eventLine({
+            ...this.options.eventIdentity,
+            type: 'user',
+            uuid: 'active-user',
+            message: { content: this.lastWrite },
+          }),
+        ];
+        if (this.options.appendCallerOnlyDuringFirstPostSubmitCapture) {
+          this.pendingCallerCompletion = true;
+        } else {
+          events.push(
+            eventLine({
+              ...this.options.eventIdentity,
+              type: 'assistant',
+              parentUuid: 'active-user',
+              message: {
+                content: [{ type: 'text', text: 'late caller after initial submit' }],
+                stop_reason: 'end_turn',
+              },
+            }),
+            eventLine({
+              ...this.options.eventIdentity,
+              type: 'system',
+              subtype: 'turn_duration',
+              durationMs: 10,
+            }),
+          );
+        }
+        await appendFile(this.logPath, events.join('\n') + '\n');
+      }
+      return this.options.currentLineAfterFirstSubmit ?? this.draftLine;
+    }
+    return this.draftLine;
   }
 }
 
@@ -1390,8 +1546,6 @@ test('persistent recovery fails closed instead of retyping when no input draft i
 
   try {
     await assert.rejects(
-      // The no-draft recovery path spends ~11s of graces (1s missing-caller + 10s recovery); the turn
-      // timeout must stay well above that or a loaded suite run hits exit 30 before the expected 40.
       () => process.sendTurn('hello after compact', {
         timeoutMs: 30_000,
       }),
@@ -1416,8 +1570,6 @@ test('persistent recovery does not submit Claude Code menu selection cursor line
 
   try {
     await assert.rejects(
-      // The no-draft recovery path spends ~11s of graces (1s missing-caller + 10s recovery); the turn
-      // timeout must stay well above that or a loaded suite run hits exit 30 before the expected 40.
       () => process.sendTurn('hello after compact', {
         timeoutMs: 30_000,
       }),
@@ -1480,6 +1632,185 @@ test('persistent retry submits an existing input draft instead of writing the pr
     assert.equal(result.text, 'retry result');
     assert.equal(session.submitCount, 2);
     assert.deepEqual(session.writes, ['hello after compact']);
+  } finally {
+    await process.shutdown();
+  }
+});
+
+test('persistent recovery resubmits stable wrapped draft when the initial submit is not accepted', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-lost-initial-submit-draft-'));
+  const logPath = join(dir, 'session.jsonl');
+  await writeFile(logPath, '');
+  const sessionId = randomUUID();
+  const session = new LostInitialSubmitStableDraftSession(logPath, 'continuation cursor row from wrapped prompt');
+  const process = new PersistentClaudeCodeProcess(sessionId, signature(), dir, session, logPath, logPath, 0);
+
+  try {
+    const result = await process.sendTurn('a long prompt that wraps to another row', {
+      timeoutMs: 1_500,
+    });
+
+    assert.equal(result.text, 'recovered after lost initial submit');
+    assert.equal(session.submitCount, 2);
+    assert.deepEqual(session.writes, ['a long prompt that wraps to another row']);
+  } finally {
+    await process.shutdown();
+  }
+});
+
+test('persistent recovery does not treat an unchanged placeholder as a written draft', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-lost-write-placeholder-'));
+  const logPath = join(dir, 'session.jsonl');
+  await writeFile(logPath, '');
+  const sessionId = randomUUID();
+  const session = new LostInitialSubmitStableDraftSession(logPath, '❯ Try "edit a file"', {
+    unchangedLineAcrossWrite: '❯ Try "edit a file"',
+  });
+  const process = new PersistentClaudeCodeProcess(sessionId, signature(), dir, session, logPath, logPath, 0);
+
+  try {
+    await assert.rejects(
+      () => process.sendTurn('prompt draft', { timeoutMs: 1_500 }),
+      (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.timeout,
+    );
+    assert.equal(session.submitCount, 1);
+    assert.deepEqual(session.writes, ['prompt draft']);
+  } finally {
+    await process.shutdown();
+  }
+});
+
+test('persistent recovery does not resubmit when caller boundary appears during draft check', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-lost-initial-submit-late-caller-'));
+  const logDir = resolveClaudeCodeProjectLogDir(dir);
+  await mkdir(logDir, { recursive: true });
+  const sessionId = randomUUID();
+  const logPath = join(logDir, `${sessionId}.jsonl`);
+  await writeFile(logPath, '');
+  const session = new LostInitialSubmitStableDraftSession(logPath, '❯ prompt draft', {
+    appendCallerDuringFirstPostSubmitCapture: true,
+    appendCallerOnlyDuringFirstPostSubmitCapture: true,
+    eventIdentity: { cwd: dir, sessionId },
+  });
+  const process = new PersistentClaudeCodeProcess(
+    sessionId,
+    signature(),
+    dir,
+    session,
+    null,
+    null,
+    0,
+    null,
+    Date.now() - 1_000,
+    new Set(),
+  );
+
+  try {
+    const result = await process.sendTurn('prompt draft', {
+      timeoutMs: 1_500,
+    });
+
+    assert.equal(result.text, 'late caller after initial submit');
+    assert.equal(session.submitCount, 1);
+    assert.deepEqual(session.writes, ['prompt draft']);
+  } finally {
+    await process.shutdown();
+  }
+});
+
+test('persistent recovery keeps session-log wait when the draft surface changes', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-lost-initial-submit-changed-'));
+  const logPath = join(dir, 'session.jsonl');
+  await writeFile(logPath, '');
+  const sessionId = randomUUID();
+  const session = new LostInitialSubmitStableDraftSession(logPath, '❯ prompt draft', {
+    currentLineAfterFirstSubmit: 'Generating response...',
+  });
+  const process = new PersistentClaudeCodeProcess(sessionId, signature(), dir, session, logPath, logPath, 0);
+
+  try {
+    await assert.rejects(
+      () => process.sendTurn('prompt draft', {
+        timeoutMs: 1_500,
+      }),
+      (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.timeout,
+    );
+    assert.equal(session.submitCount, 1);
+    assert.deepEqual(session.writes, ['prompt draft']);
+  } finally {
+    await process.shutdown();
+  }
+});
+
+test('persistent recovery keeps session-log wait when the draft surface is ambiguous', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-lost-initial-submit-ambiguous-'));
+  const logPath = join(dir, 'session.jsonl');
+  await writeFile(logPath, '');
+  const sessionId = randomUUID();
+  const session = new LostInitialSubmitStableDraftSession(logPath, '❯ prompt draft', {
+    currentLineAfterFirstSubmit: RAW_BYPASS_MENU_CURSOR_LINE,
+  });
+  const process = new PersistentClaudeCodeProcess(sessionId, signature(), dir, session, logPath, logPath, 0);
+
+  try {
+    await assert.rejects(
+      () => process.sendTurn('prompt draft', {
+        timeoutMs: 1_500,
+      }),
+      (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.timeout,
+    );
+    assert.equal(session.submitCount, 1);
+    assert.deepEqual(session.writes, ['prompt draft']);
+  } finally {
+    await process.shutdown();
+  }
+});
+
+test('persistent recovery keeps session-log wait when cursor line reading fails', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-lost-initial-submit-read-failure-'));
+  const logPath = join(dir, 'session.jsonl');
+  await writeFile(logPath, '');
+  const sessionId = randomUUID();
+  const session = new LostInitialSubmitStableDraftSession(logPath, '❯ prompt draft', {
+    throwOnFirstPostSubmitCapture: true,
+  });
+  const process = new PersistentClaudeCodeProcess(sessionId, signature(), dir, session, logPath, logPath, 0);
+
+  try {
+    await assert.rejects(
+      () => process.sendTurn('prompt draft', {
+        timeoutMs: 1_500,
+      }),
+      (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.timeout,
+    );
+    assert.equal(session.submitCount, 1);
+    assert.deepEqual(session.writes, ['prompt draft']);
+  } finally {
+    await process.shutdown();
+  }
+});
+
+test('persistent recovery returns resend-safe prompt_not_executed when second submit is not accepted', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-lost-initial-submit-second-failure-'));
+  const logPath = join(dir, 'session.jsonl');
+  await writeFile(logPath, '');
+  const sessionId = randomUUID();
+  const session = new LostInitialSubmitStableDraftSession(logPath, '❯ prompt draft', {
+    secondSubmitWritesResult: false,
+  });
+  const process = new PersistentClaudeCodeProcess(sessionId, signature(), dir, session, logPath, logPath, 0);
+
+  try {
+    await assert.rejects(
+      () => process.sendTurn('prompt draft', {
+        timeoutMs: 2_500,
+      }),
+      (error) => error instanceof OpenPError &&
+        error.exitCode === EXIT_CODES.protocolViolation &&
+        error.reasonCode === 'prompt_not_executed',
+    );
+    assert.equal(session.submitCount, 2);
+    assert.deepEqual(session.writes, ['prompt draft']);
   } finally {
     await process.shutdown();
   }

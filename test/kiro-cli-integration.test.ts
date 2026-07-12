@@ -14,7 +14,7 @@ import {
   runCommand,
   streamingAnswerTexts,
   terminalOpenPResult,
-  waitForFile,
+  tsxLoaderArgs,
   withFakeCommandEnv,
 } from './helpers/cli-integration.js';
 
@@ -250,22 +250,41 @@ test('text CLI maps SIGINT to backend graceful interrupt before exiting 130', as
     OPENP_FAKE_KIRO_RPC_LOG: rpcLog,
     OPENP_FAKE_KIRO_SIGNAL_LOG: signalLog,
   });
-  const child = spawn(tsxBin, [
+  const child = spawn(process.execPath, tsxLoaderArgs(repoRoot, [
     join(repoRoot, 'src/cli.ts'),
     'kiro',
     'hello',
-  ], {
+  ]), {
     cwd: projectRoot,
     env,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+  const childResultPromise = collectChild(child);
 
-  await waitForFile(rpcLog);
+  await waitForKiroRpcMethod(rpcLog, 'session/prompt');
   child.kill('SIGINT');
-  const result = await collectChild(child);
+  const result = await childResultPromise;
 
   assert.equal(result.code, 130);
   assert.equal(result.stdout, '');
   assert.match(result.stderr, /operation aborted/);
   assert.deepEqual((await readFile(signalLog, 'utf8')).trimEnd().split('\n'), ['SIGINT']);
 });
+
+async function waitForKiroRpcMethod(path: string, method: string): Promise<void> {
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    try {
+      const text = await readFile(path, 'utf8');
+      if (text.split('\n').some((line) => line.startsWith(`${method}\t`))) {
+        return;
+      }
+    } catch (error) {
+      if (!(typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT')) {
+        throw error;
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`timed out waiting for fake Kiro RPC method: ${method}`);
+}

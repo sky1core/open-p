@@ -17,17 +17,17 @@ import type { PtyProvider, PtySession } from '../../runners/types.js';
 import { rejectStructuredClaudeCodeBackendArgs } from './args-validation.js';
 import { ClaudeCodeBackgroundRouter, isClaudeCodeTaskNotificationLine } from './background-parser.js';
 import {
-  isClaudeCodeEmptyInputPromptLine,
-  isClaudeCodeInputPromptLine,
   readinessTimeoutMs,
   waitForClaudeCodeInputReady,
 } from './interactive.js';
 import {
   findClaudeCodeSessionLog,
+  findRecentClaudeCodeSessionLog,
   getFileSize,
   hasClaudeCodeCallerUserTurnInSessionLogSegment,
   isMissingCallerAfterLocalCommandError,
-  MissingCallerAfterLocalCommandError,
+  isMissingCallerAfterPromptSubmissionError,
+  MissingCallerAfterPromptSubmissionError,
   readNewText,
   resolveClaudeCodeSessionLogPath,
   snapshotClaudeCodeSessionLogPaths,
@@ -51,8 +51,16 @@ import {
   createClaudeSessionLogIdleDebugLogger,
 } from './diagnostics.js';
 import { extractPromptLocalCommandName } from './prompt-command.js';
+import {
+  captureClaudeInputDraftSurface,
+  captureClaudeInputDraftFingerprint,
+  changedClaudeInputDraftSurface,
+  sameClaudeInputDraftFingerprint,
+  type ClaudeInputDraftFingerprint,
+} from './submission-recovery.js';
 
-const PRE_CALLER_LOCAL_COMMAND_PROMPT_RETRY_LIMIT = 1;
+const PROMPT_SUBMISSION_CALLER_GRACE_MS = 750;
+const PROMPT_SUBMISSION_RECOVERY_VERIFY_GRACE_MS = 750;
 
 export interface StartPersistentClaudeCodeProcessOptions extends ProcessStartRequest {
   readonly cwd: string;
@@ -178,8 +186,13 @@ export class PersistentClaudeCodeProcess implements ManagedBackendProcess {
           let retryLogPath: string | null = null;
           let retryInitialOffset: number | null = null;
           let retryLocalCommandTranscriptPromptIds: ReadonlySet<string> = new Set();
+          let initialSubmitDone = false;
+          let recoverySubmitDone = false;
+          let initialSubmitRecoveryDisabled = false;
+          let recoveryVerificationDisabled = false;
+          let postWriteDraftFingerprint: ClaudeInputDraftFingerprint | null = null;
           const promptLocalCommandName = extractPromptLocalCommandName(prompt);
-          for (let attempt = 0; ; attempt += 1) {
+          for (;;) {
             if (retryLogPath) {
               this.sessionLogPath = retryLogPath;
             }
@@ -187,7 +200,7 @@ export class PersistentClaudeCodeProcess implements ManagedBackendProcess {
               ? await findClaudeCodeSessionLog(this.nativeSessionId, this.cwd, this.configDir) ?? this.sessionLogPath
               : this.sessionLogPath;
             const initialOffset = retryInitialOffset ?? await getFileSize(this.sessionLogPath ?? this.expectedLogPath);
-            if (attempt === 0) {
+            if (!initialSubmitDone) {
               const readinessAttemptTimeoutMs = remainingTurnTimeoutMs(
                 turnDeadlineMs,
                 request.turnId,
@@ -200,14 +213,8 @@ export class PersistentClaudeCodeProcess implements ManagedBackendProcess {
                 readinessTimeoutMs(readinessAttemptTimeoutMs),
                 { confirmTrustPrompt: false },
               );
-              await submitPrompt(this.pty, prompt);
-            } else if (!(await hasCallerUserTurnAtRecoveryOffset(
-              this.sessionLogPath,
-              this.expectedLogPath,
-              initialOffset,
-              retryLocalCommandTranscriptPromptIds,
-            ))) {
-              await submitRecoveryDraftIfPresent(this.pty);
+              postWriteDraftFingerprint = await submitPrompt(this.pty, prompt);
+              initialSubmitDone = true;
             }
             const waitAttemptTimeoutMs = remainingTurnTimeoutMs(
               turnDeadlineMs,
@@ -236,8 +243,16 @@ export class PersistentClaudeCodeProcess implements ManagedBackendProcess {
                   publishJsonlIntermediateText(text);
                 },
                 promptLocalCommandName,
-                recoveryAttempt: attempt > 0,
-                initialLocalCommandTranscriptPromptIds: attempt > 0
+                recoveryAttempt: recoverySubmitDone && !recoveryVerificationDisabled,
+                recoveryMissingCallerLogIdleGraceMs: recoverySubmitDone && !recoveryVerificationDisabled
+                  ? PROMPT_SUBMISSION_RECOVERY_VERIFY_GRACE_MS
+                  : undefined,
+                missingCallerAfterSubmitGraceMs: !recoverySubmitDone &&
+                    !initialSubmitRecoveryDisabled &&
+                    postWriteDraftFingerprint !== null
+                  ? PROMPT_SUBMISSION_CALLER_GRACE_MS
+                  : null,
+                initialLocalCommandTranscriptPromptIds: retryInitialOffset !== null
                   ? retryLocalCommandTranscriptPromptIds
                   : undefined,
                 onIntermediateReasoning: (text, source, contentBlocks) => {
@@ -279,14 +294,18 @@ export class PersistentClaudeCodeProcess implements ManagedBackendProcess {
               this.lastCompletedBackgroundCallback = turnBackgroundCallback;
               return result;
             } catch (error) {
-              if (
-                !isMissingCallerAfterLocalCommandError(error) ||
-                attempt >= PRE_CALLER_LOCAL_COMMAND_PROMPT_RETRY_LIMIT
-              ) {
-                if (isMissingCallerAfterLocalCommandError(error)) {
+              if (!isMissingCallerAfterPromptSubmissionError(error)) {
+                throw error;
+              }
+              if (recoverySubmitDone) {
+                if (await isSameVisibleDraft(this.pty, postWriteDraftFingerprint)) {
                   throw await dischargeResendSafetyBeforeThrow(this.pty, error);
                 }
-                throw error;
+                recoveryVerificationDisabled = true;
+                retryLogPath = error.logPath ?? this.sessionLogPath;
+                retryInitialOffset = error.nextOffset;
+                retryLocalCommandTranscriptPromptIds = error.localCommandTranscriptPromptIds;
+                continue;
               }
               lastPublishedJsonlIntermediate = null;
               this.lastIntermediateText = null;
@@ -294,6 +313,49 @@ export class PersistentClaudeCodeProcess implements ManagedBackendProcess {
               retryLogPath = error.logPath ?? this.sessionLogPath;
               retryInitialOffset = error.nextOffset;
               retryLocalCommandTranscriptPromptIds = error.localCommandTranscriptPromptIds;
+              if (await hasCallerUserTurnAtRecoveryOffset(
+                retryLogPath,
+                this.expectedLogPath,
+                retryInitialOffset,
+                retryLocalCommandTranscriptPromptIds,
+              )) {
+                continue;
+              }
+              const stableDraft = await isSameVisibleDraft(this.pty, postWriteDraftFingerprint);
+              if (stableDraft && retryLogPath === null && this.nativeSessionId === null) {
+                retryLogPath = await findRecentClaudeCodeSessionLog(
+                  this.cwd,
+                  this.discoveryStartedAtMs!,
+                  this.excludedLogPaths,
+                  this.configDir,
+                  promptLocalCommandName,
+                );
+              }
+              if (stableDraft && await hasCallerUserTurnAtRecoveryOffset(
+                retryLogPath,
+                this.expectedLogPath,
+                retryInitialOffset,
+                retryLocalCommandTranscriptPromptIds,
+              )) {
+                continue;
+              }
+              if (stableDraft) {
+                await this.pty.submit();
+                recoverySubmitDone = true;
+                continue;
+              }
+              if (await hasCallerUserTurnAtRecoveryOffset(
+                retryLogPath,
+                this.expectedLogPath,
+                retryInitialOffset,
+                retryLocalCommandTranscriptPromptIds,
+              )) {
+                continue;
+              }
+              if (isMissingCallerAfterLocalCommandError(error)) {
+                throw await dischargeResendSafetyBeforeThrow(this.pty, error);
+              }
+              initialSubmitRecoveryDisabled = true;
             }
           }
         },
@@ -507,10 +569,13 @@ function remainingTurnTimeoutMs(
   return remainingMs;
 }
 
-async function submitPrompt(pty: PtySession, prompt: string): Promise<void> {
+async function submitPrompt(pty: PtySession, prompt: string): Promise<ClaudeInputDraftFingerprint | null> {
+  const beforeWriteSurface = await captureClaudeInputDraftSurface(pty);
   await pty.write(prompt);
   await sleep(150);
+  const afterWriteSurface = await captureClaudeInputDraftSurface(pty);
   await pty.submit();
+  return changedClaudeInputDraftSurface(beforeWriteSurface, afterWriteSurface);
 }
 
 async function hasCallerUserTurnAtRecoveryOffset(
@@ -528,17 +593,14 @@ async function hasCallerUserTurnAtRecoveryOffset(
     );
 }
 
-async function submitRecoveryDraftIfPresent(pty: PtySession): Promise<boolean> {
-  const cursorLine = await pty.captureCursorLine().catch(() => null);
-  if (
-    cursorLine === null ||
-    !isClaudeCodeInputPromptLine(cursorLine) ||
-    isClaudeCodeEmptyInputPromptLine(cursorLine)
-  ) {
-    return false;
-  }
-  await pty.submit();
-  return true;
+async function isSameVisibleDraft(
+  pty: Pick<PtySession, 'captureCursorLine'>,
+  postWriteDraftFingerprint: ClaudeInputDraftFingerprint | null,
+): Promise<boolean> {
+  return sameClaudeInputDraftFingerprint(
+    postWriteDraftFingerprint,
+    await captureClaudeInputDraftFingerprint(pty),
+  );
 }
 
 // `prompt_not_executed` promises the caller that the preempted prompt can never run, which is only
@@ -546,7 +608,7 @@ async function submitRecoveryDraftIfPresent(pty: PtySession): Promise<boolean> {
 // if the process survives termination escalation, downgrade to a reason code with no resend guarantee.
 async function dischargeResendSafetyBeforeThrow(
   pty: PtySession,
-  error: MissingCallerAfterLocalCommandError,
+  error: MissingCallerAfterPromptSubmissionError,
 ): Promise<OpenPError> {
   await pty.exit().catch(() => undefined);
   if (await pty.isAlive().catch(() => true)) {
@@ -554,7 +616,7 @@ async function dischargeResendSafetyBeforeThrow(
   }
   if (await pty.isAlive().catch(() => true)) {
     return new OpenPError(
-      `Claude Code backend did not terminate after a local command preempted prompt submission for turn ${error.turnId}; the prompt may still execute. Resubmitting is not known to be safe.`,
+      `Claude Code backend did not terminate after prompt submission was not confirmed for turn ${error.turnId}; the prompt may still execute. Resubmitting is not known to be safe.`,
       EXIT_CODES.protocolViolation,
       ARTIFACT_REJECTION_REASONS.missingTurnBoundary,
     );

@@ -181,6 +181,120 @@ test('configured backend instance id is accepted by stream-json worker dispatch'
   assert.doesNotMatch(result.stderr, /unknown backend/);
 });
 
+test('configured Codex instance id is accepted by text CLI dispatch', async () => {
+  const repoRoot = process.cwd();
+  const tsxBin = join(repoRoot, 'node_modules', '.bin', 'tsx');
+  const projectRoot = await realpath(await mkdtemp(join(tmpdir(), 'openp-cli-')));
+  const stateRoot = await mkdtemp(join(tmpdir(), 'openp-cli-state-'));
+  const configuredHome = await mkdtemp(join(tmpdir(), 'openp-cli-codex-configured-home-'));
+  const ambientHome = await mkdtemp(join(tmpdir(), 'openp-cli-codex-ambient-home-'));
+  const argsLog = join(stateRoot, 'codex-alt-args.log');
+  const configHome = await writeCodexInstanceConfig('codex-alt', configuredHome);
+  const env = await withFakeCommandEnv('codex', join(repoRoot, 'test', 'fixtures', 'codex', 'fake-codex-success.sh'), {
+    XDG_CONFIG_HOME: configHome,
+    XDG_STATE_HOME: stateRoot,
+    CODEX_HOME: ambientHome,
+    OPENP_FAKE_CODEX_ARGS_LOG: argsLog,
+  });
+
+  const result = await runCommand(tsxBin, [
+    join(repoRoot, 'src/cli.ts'),
+    'codex-alt',
+    'hello',
+  ], projectRoot, env);
+
+  assert.equal(result.code, 0);
+  assert.equal(result.stdout, 'final answer here\n');
+  assert.equal(result.stderr, '');
+  assert.match(await readFile(join(configuredHome, 'sessions', '2026', '05', '23', `rollout-${CODEX_SESSION_ID}.jsonl`), 'utf8'), /final answer here/);
+  await assert.rejects(
+    () => readFile(join(ambientHome, 'sessions', '2026', '05', '23', `rollout-${CODEX_SESSION_ID}.jsonl`), 'utf8'),
+    (error) => typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT',
+  );
+
+  const resume = await runCommand(tsxBin, [
+    join(repoRoot, 'src/cli.ts'),
+    'codex-alt',
+    '--resume',
+    CODEX_SESSION_ID,
+    'follow up',
+  ], projectRoot, env);
+
+  assert.equal(resume.code, 0);
+  assert.equal(resume.stdout, 'final answer here\n');
+  assert.equal(resume.stderr, '');
+  const argLines = (await readFile(argsLog, 'utf8')).trimEnd().split('\n');
+  assert.match(argLines[0]!, /\texec\t/);
+  assert.doesNotMatch(argLines[0]!, /\tresume\t/);
+  assert.match(argLines[1]!, new RegExp(`\\texec\\tresume\\t.*\\t${CODEX_SESSION_ID}\\tfollow up$`));
+});
+
+test('configured Codex instance id is accepted by stream-json worker dispatch', async () => {
+  const repoRoot = process.cwd();
+  const tsxBin = join(repoRoot, 'node_modules', '.bin', 'tsx');
+  const projectRoot = await realpath(await mkdtemp(join(tmpdir(), 'openp-cli-')));
+  const stateRoot = await mkdtemp(join(tmpdir(), 'openp-cli-state-'));
+  const configuredHome = await mkdtemp(join(tmpdir(), 'openp-cli-codex-configured-home-'));
+  const ambientHome = await mkdtemp(join(tmpdir(), 'openp-cli-codex-ambient-home-'));
+  const configHome = await writeCodexInstanceConfig('codex-alt', configuredHome);
+  const env = await withFakeCommandEnv('codex', join(repoRoot, 'test', 'fixtures', 'codex', 'fake-codex-success.sh'), {
+    XDG_CONFIG_HOME: configHome,
+    XDG_STATE_HOME: stateRoot,
+    CODEX_HOME: ambientHome,
+  });
+
+  const result = await runCommand(tsxBin, [
+    join(repoRoot, 'src/cli.ts'),
+    'codex-alt',
+    '--input-format',
+    'stream-json',
+    '--output-format',
+    'stream-json',
+  ], projectRoot, env, `${JSON.stringify({ type: 'user', message: { content: 'hello' } })}\n`);
+  const events = result.stdout.trimEnd().split('\n').filter(Boolean).map(parseOutputLine);
+  const terminal = events.at(-1)?.openp;
+
+  assert.equal(result.code, 0);
+  assert.equal(result.stderr, '');
+  assert.equal(terminal.form, 'result');
+  assert.equal(terminal.metadata.backend, 'codex-alt');
+  assert.equal(terminal.sessionId, CODEX_SESSION_ID);
+  assert.match(await readFile(join(configuredHome, 'sessions', '2026', '05', '23', `rollout-${CODEX_SESSION_ID}.jsonl`), 'utf8'), /final answer here/);
+});
+
+test('configured Codex instances block cross-instance resume through session state backend id', async () => {
+  const repoRoot = process.cwd();
+  const tsxBin = join(repoRoot, 'node_modules', '.bin', 'tsx');
+  const projectRoot = await realpath(await mkdtemp(join(tmpdir(), 'openp-cli-')));
+  const stateRoot = await mkdtemp(join(tmpdir(), 'openp-cli-state-'));
+  const firstHome = await mkdtemp(join(tmpdir(), 'openp-cli-codex-a-home-'));
+  const secondHome = await mkdtemp(join(tmpdir(), 'openp-cli-codex-b-home-'));
+  const configHome = await writeTwoCodexInstanceConfig('codex-a', firstHome, 'codex-b', secondHome);
+  await new SessionStateStore(projectRoot, resolveOpenPStateRoot(projectRoot, { XDG_STATE_HOME: stateRoot })).save({
+    backend: 'codex-a',
+    backendSessionId: CODEX_SESSION_ID,
+    cwd: projectRoot,
+    lastProviderSessionId: null,
+    sessionLogPath: null,
+    lastTurnId: 'previous-turn',
+  });
+
+  const result = await runCommand(tsxBin, [
+    join(repoRoot, 'src/cli.ts'),
+    'codex-b',
+    '--resume',
+    CODEX_SESSION_ID,
+    'follow up',
+  ], projectRoot, {
+    XDG_CONFIG_HOME: configHome,
+    XDG_STATE_HOME: stateRoot,
+  });
+
+  assert.equal(result.code, 20);
+  assert.equal(result.stdout, '');
+  assert.match(result.stderr, /belongs to backend codex-a/);
+});
+
 test('version after prompt separator remains prompt text', async () => {
   const repoRoot = process.cwd();
   const tsxBin = join(repoRoot, 'node_modules', '.bin', 'tsx');
@@ -257,6 +371,7 @@ test('busy session lock fails before backend launch', async () => {
     env: { ...process.env, XDG_STATE_HOME: stateRoot },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+  const holderResultPromise = collectChild(holder);
 
   let lockPath = '';
   holder.stdout?.setEncoding('utf8');
@@ -273,7 +388,7 @@ test('busy session lock fails before backend launch', async () => {
     SESSION_ID,
     'hello',
   ], projectRoot, { XDG_STATE_HOME: stateRoot });
-  const holderResult = await collectChild(holder);
+  const holderResult = await holderResultPromise;
 
   assert.equal(result.code, 21);
   assert.equal(result.stdout, '');
@@ -770,6 +885,38 @@ instances:
   ${instanceId}:
     backend: claude
     configDir: ${join(configHome, `${instanceId}-config`)}
+`);
+  return configHome;
+}
+
+async function writeCodexInstanceConfig(instanceId: string, homeDir: string): Promise<string> {
+  const configHome = await mkdtemp(join(tmpdir(), 'openp-cli-config-'));
+  await mkdir(join(configHome, 'open-p'), { recursive: true });
+  await writeFile(join(configHome, 'open-p', 'instances.yaml'), `
+instances:
+  ${instanceId}:
+    backend: codex
+    homeDir: ${homeDir}
+`);
+  return configHome;
+}
+
+async function writeTwoCodexInstanceConfig(
+  firstId: string,
+  firstHomeDir: string,
+  secondId: string,
+  secondHomeDir: string,
+): Promise<string> {
+  const configHome = await mkdtemp(join(tmpdir(), 'openp-cli-config-'));
+  await mkdir(join(configHome, 'open-p'), { recursive: true });
+  await writeFile(join(configHome, 'open-p', 'instances.yaml'), `
+instances:
+  ${firstId}:
+    backend: codex
+    homeDir: ${firstHomeDir}
+  ${secondId}:
+    backend: codex
+    homeDir: ${secondHomeDir}
 `);
   return configHome;
 }

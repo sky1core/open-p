@@ -14,6 +14,7 @@ export interface CodexNonZeroExitErrorOptions {
   readonly outputLastMessagePath: string;
   readonly sessionId: string | null;
   readonly sessionLogBaseline: CodexSessionLogBaseline | null;
+  readonly homeDir?: string | null;
 }
 
 export async function createCodexNonZeroExitError(options: CodexNonZeroExitErrorOptions): Promise<OpenPError> {
@@ -28,7 +29,9 @@ export async function createCodexNonZeroExitError(options: CodexNonZeroExitError
   }
 
   try {
-    const sessionLog = await readCodexSessionLogResultSinceBaseline(sessionId, options.sessionLogBaseline);
+    const sessionLog = await readCodexSessionLogResultSinceBaseline(sessionId, options.sessionLogBaseline, {
+      homeDir: options.homeDir,
+    });
     if (sessionLog?.hasCompletionEvidence && !sessionLog.content?.trim()) {
       if (stdoutDiagnostic) {
         return new OpenPError(fallbackMessage, EXIT_CODES.backendExited);

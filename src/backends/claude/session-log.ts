@@ -52,20 +52,43 @@ export interface ClaudeCodeLocalCommandNameMismatchDiagnostic {
   readonly logPath: string | null;
 }
 
-export class MissingCallerAfterLocalCommandError extends OpenPError {
+export class MissingCallerAfterPromptSubmissionError extends OpenPError {
   constructor(
     readonly turnId: string,
     readonly logPath: string | null = null,
     readonly nextOffset: number = 0,
     readonly localCommandTranscriptPromptIds: ReadonlySet<string> = new Set(),
+    message = `Claude Code did not record a caller user turn after prompt submission for turn ${turnId}; the prompt was not confirmed as executed. Resubmitting the same prompt is safe only after the backend has shut down.`,
   ) {
     super(
-      `Claude Code ran a local command (e.g. automatic context compaction) during prompt submission for turn ${turnId}; the prompt never became a conversation turn and was not executed. Resubmitting the same prompt is safe.`,
+      message,
       EXIT_CODES.protocolViolation,
       ARTIFACT_REJECTION_REASONS.promptNotExecuted,
     );
+    this.name = 'MissingCallerAfterPromptSubmissionError';
+  }
+}
+
+export class MissingCallerAfterLocalCommandError extends MissingCallerAfterPromptSubmissionError {
+  constructor(
+    turnId: string,
+    logPath: string | null = null,
+    nextOffset: number = 0,
+    localCommandTranscriptPromptIds: ReadonlySet<string> = new Set(),
+  ) {
+    super(
+      turnId,
+      logPath,
+      nextOffset,
+      localCommandTranscriptPromptIds,
+      `Claude Code ran a local command (e.g. automatic context compaction) during prompt submission for turn ${turnId}; the prompt never became a conversation turn and was not executed. Resubmitting the same prompt is safe.`,
+    );
     this.name = 'MissingCallerAfterLocalCommandError';
   }
+}
+
+export function isMissingCallerAfterPromptSubmissionError(error: unknown): error is MissingCallerAfterPromptSubmissionError {
+  return error instanceof MissingCallerAfterPromptSubmissionError;
 }
 
 export function isMissingCallerAfterLocalCommandError(error: unknown): error is MissingCallerAfterLocalCommandError {
@@ -207,6 +230,7 @@ export async function waitForClaudeCodeTurnResult(options: {
   readonly promptLocalCommandName?: string | null;
   readonly recoveryAttempt?: boolean;
   readonly recoveryMissingCallerLogIdleGraceMs?: number;
+  readonly missingCallerAfterSubmitGraceMs?: number | null;
   readonly initialLocalCommandTranscriptPromptIds?: ReadonlySet<string>;
   readonly onIntermediateReasoning?: (
     text: string,
@@ -246,6 +270,10 @@ export async function waitForClaudeCodeTurnResult(options: {
   let sawCallerUserTurn = false;
   let callerUserTurnLineIndex: number | null = null;
   let preCallerTerminalLocalCommandObservedAtMs: number | null = options.recoveryAttempt === true ? Date.now() : null;
+  let callerMissingAfterSubmitObservedAtMs: number | null =
+    options.missingCallerAfterSubmitGraceMs === null || options.missingCallerAfterSubmitGraceMs === undefined
+      ? null
+      : Date.now();
   const activeTurnLocalCommandPromptIds = new Set(options.initialLocalCommandTranscriptPromptIds ?? []);
   const preCallerLocalCommandGroups = new Map<string, LocalCommandTranscriptGroup>();
   let mostRecentPreCallerCommandGroup: LocalCommandTranscriptGroup | null = null;
@@ -322,6 +350,27 @@ export async function waitForClaudeCodeTurnResult(options: {
       );
     }
   };
+  const assertCallerUserTurnAppearedAfterSubmit = (): void => {
+    if (
+      sawCallerUserTurn ||
+      callerMissingAfterSubmitObservedAtMs === null ||
+      preCallerTerminalLocalCommandObservedAtMs !== null
+    ) {
+      return;
+    }
+    const graceMs = options.missingCallerAfterSubmitGraceMs;
+    if (graceMs === null || graceMs === undefined) {
+      return;
+    }
+    if (Date.now() - callerMissingAfterSubmitObservedAtMs >= graceMs) {
+      throw new MissingCallerAfterPromptSubmissionError(
+        options.turnId,
+        logPath,
+        offset,
+        new Set(activeTurnLocalCommandPromptIds),
+      );
+    }
+  };
   const reportSessionLogIdleIfNeeded = async (): Promise<void> => {
     if (sessionLogIdleDiagnosticIntervalMs <= 0) {
       return;
@@ -385,6 +434,7 @@ export async function waitForClaudeCodeTurnResult(options: {
             throw new OpenPError(`backend exited while waiting for session log for turn ${options.turnId}`, EXIT_CODES.backendExited);
           }
           assertCallerUserTurnDidNotDisappear();
+          assertCallerUserTurnAppearedAfterSubmit();
           await reportSessionLogIdleIfNeeded();
           await sleepUntilDiscoveryDeadline(SESSION_LOG_DISCOVERY_POLL_INTERVAL_MS, discoveryDeadline);
           continue;
@@ -449,6 +499,7 @@ export async function waitForClaudeCodeTurnResult(options: {
               callerUserTurnLineIndex = lines.length;
               completionWithoutResultObserved = false;
               preCallerTerminalLocalCommandObservedAtMs = null;
+              callerMissingAfterSubmitObservedAtMs = null;
             } else if (!sawCallerUserTurn) {
               const preCallerLocalCommandObservation = observePreCallerLocalCommandEvent({
                 event,
@@ -523,6 +574,7 @@ export async function waitForClaudeCodeTurnResult(options: {
       throw new OpenPError(`backend exited during active turn ${options.turnId}`, EXIT_CODES.backendExited);
     }
     assertCallerUserTurnDidNotDisappear();
+    assertCallerUserTurnAppearedAfterSubmit();
     assertPostCompletionIdleGrace();
     await reportSessionLogIdleIfNeeded();
     await waitForLogChange(logPath, ACTIVE_TURN_LOG_POLL_INTERVAL_MS);

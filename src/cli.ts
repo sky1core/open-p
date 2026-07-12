@@ -48,7 +48,7 @@ import { registerBackend, getBackendProvider, getKnownBackendNames, resolveRegis
 import { loadConfiguredBackendInstances } from './core/configured-backend-instances.js';
 import { getOpenPVersion } from './core/version.js';
 import { claudeBackendProvider, createClaudeBackendProvider } from './backends/claude/index.js';
-import { codexBackendProvider } from './backends/codex/index.js';
+import { codexBackendProvider, createCodexBackendProvider } from './backends/codex/index.js';
 import { kiroBackendProvider } from './backends/kiro/index.js';
 import { opencodeBackendProvider } from './backends/opencode/index.js';
 
@@ -568,10 +568,12 @@ async function registerConfiguredBackendInstances(): Promise<void> {
       }));
       continue;
     }
-    throw new OpenPError(
-      `backend ${instance.backend} does not support configured instances`,
-      EXIT_CODES.usage,
-    );
+    if (instance.backend === 'codex') {
+      registerBackend(createCodexBackendProvider({
+        id: instance.id,
+        homeDir: instance.homeDir,
+      }));
+    }
   }
 }
 

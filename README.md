@@ -127,7 +127,7 @@ To keep one `openp` invocation mapped to one synchronous prompt turn, the Claude
 
 ### Backend Instances
 
-The Claude backend supports configured instances: derived backend ids that run Claude Code with a separate configuration directory (`CLAUDE_CONFIG_DIR`). Each instance keeps its own Claude Code login, settings, and session logs, so you can keep independent Claude Code profiles side by side.
+Claude and Codex support configured instances: derived backend ids that run with a separate account/config home. Each instance keeps its own login, settings, and session logs, so you can keep independent local CLI profiles side by side.
 
 Define instances in `${XDG_CONFIG_HOME:-~/.config}/open-p/instances.yaml`:
 
@@ -136,22 +136,36 @@ instances:
   claude-alt:
     backend: claude
     configDir: ~/.claude-alt
+  codex-alt:
+    backend: codex
+    homeDir: ~/.codex-alt
 ```
 
 Then select the instance like any backend:
 
 ```bash
 openp claude-alt "prompt"
+openp codex-alt "prompt"
+```
+
+Initialize a Codex home before selecting it through open-p:
+
+```bash
+CODEX_HOME="$HOME/.codex-alt" codex login
+CODEX_HOME="$HOME/.codex-alt" codex login status
 ```
 
 Notes:
 
-- `configDir` is required and must be absolute or `~/`-prefixed. Run `claude` once with that `CLAUDE_CONFIG_DIR` to log the profile in before using it through `openp`.
+- Claude instances require `configDir`; Codex instances require `homeDir`. The fields are backend-specific and cannot be mixed.
+- `configDir` and `homeDir` must be absolute or `~/`-prefixed. Run the backend CLI once with that account/config home to log the profile in before using it through `openp`.
 - Instance ids must not collide with built-in backend ids.
 - Sessions are bound to the instance that created them; resuming a session through a different backend or instance id fails.
 - The base `claude` backend always uses the default Claude Code configuration directory; it does not read an ambient `CLAUDE_CONFIG_DIR`.
-- An instance reads user-scope skills, subagents, and `settings.json` (hooks, permissions) only from its own `configDir`; they are not inherited from the default `~/.claude` profile. Replicate them in the instance directory (copy, or symlink the `skills`/`agents` directories) if you want the same behavior.
-- Give the instance `configDir` its own `CLAUDE.md`. Without one, a workspace under `$HOME` makes Claude Code pick up the default `~/.claude/CLAUDE.md` as a project file, and any external `@` import it declares raises a per-workspace "Allow external CLAUDE.md file imports?" approval prompt that an unattended run cannot answer. A `CLAUDE.md` in the instance `configDir` loads the same imports as user scope and skips that prompt.
+- The base `codex` backend keeps Codex's existing `CODEX_HOME` behavior. A Codex instance always uses its configured `homeDir`, even if ambient env or a worker request supplies another `CODEX_HOME`.
+- Multiple Codex homes may use the same ChatGPT account, but they share that account's quota and limits; separate homes isolate local auth/config/session files, not billing.
+- A Claude instance reads user-scope skills, subagents, and `settings.json` (hooks, permissions) only from its own `configDir`; they are not inherited from the default `~/.claude` profile. Replicate them in the instance directory (copy, or symlink the `skills`/`agents` directories) if you want the same behavior.
+- Give each Claude instance `configDir` its own `CLAUDE.md`. Without one, a workspace under `$HOME` makes Claude Code pick up the default `~/.claude/CLAUDE.md` as a project file, and any external `@` import it declares raises a per-workspace "Allow external CLAUDE.md file imports?" approval prompt that an unattended run cannot answer. A `CLAUDE.md` in the instance `configDir` loads the same imports as user scope and skips that prompt.
 
 ## OpenCode Backend Notes
 
@@ -239,8 +253,9 @@ Debug logs may contain session ids, prompts, response previews, and error contex
 `--event-log` writes caller-owned lifecycle records under `openpRun`. The first record contains
 `openpRun.header`, the final record contains `openpRun.terminal`, and long-running backend waits
 may emit `openpRun.activity` records such as Claude session-log wait stage and idle duration.
-The event-log file is created or tightened to owner-only read/write permissions (`0600`) because it
-can contain prompts, backend output, tool artifacts, and session identifiers.
+New event-log files are created with normal caller ownership and the caller's umask. Existing
+caller-owned event-log files keep their current mode and ACL; open-p never tightens or rewrites
+the file permissions.
 
 `--verbose` adds diagnostic markers to output. In text mode, a marker line is appended after the answer. In JSON modes, warnings appear under `openp.metadata.warnings`.
 

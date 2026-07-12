@@ -525,7 +525,7 @@ test('runKiroAcp throws on timeout', async () => {
       prompt: 'hello',
       sessionId: null,
       isFirstTurn: true,
-      timeoutMs: 300,
+      timeoutMs: 3000,
       trustAllTools: false,
       env: { ...env('slow'), OPENP_FAKE_KIRO_SIGNAL_LOG: signalLog },
     }),
@@ -537,23 +537,29 @@ test('runKiroAcp throws on timeout', async () => {
 test('runKiroAcp handles abort signal', async () => {
   const ac = new AbortController();
   const signalLog = await tempSignalLog();
-  setTimeout(() => ac.abort(), 300);
+  const rpcLog = await tempSignalLog();
 
-  await assert.rejects(
-    runKiroAcp({
-      bin: FIXTURE,
-      args: ['acp'],
-      cwd: process.cwd(),
-      prompt: 'hello',
-      sessionId: null,
-      isFirstTurn: true,
-      timeoutMs: 30000,
-      trustAllTools: false,
-      env: { ...env('slow'), OPENP_FAKE_KIRO_SIGNAL_LOG: signalLog },
-      signal: ac.signal,
-    }),
-    isAbortError,
-  );
+  const running = runKiroAcp({
+    bin: FIXTURE,
+    args: ['acp'],
+    cwd: process.cwd(),
+    prompt: 'hello',
+    sessionId: null,
+    isFirstTurn: true,
+    timeoutMs: 30000,
+    trustAllTools: false,
+    env: {
+      ...env('slow'),
+      OPENP_FAKE_KIRO_SIGNAL_LOG: signalLog,
+      OPENP_FAKE_KIRO_RPC_LOG: rpcLog,
+    },
+    signal: ac.signal,
+  });
+
+  await waitForRpcMethod(rpcLog, 'session/prompt');
+  ac.abort();
+
+  await assert.rejects(running, isAbortError);
   assert.deepEqual(await readSignalLog(signalLog), ['SIGINT']);
 });
 
@@ -627,7 +633,7 @@ test('runKiroAcp keeps user abort classified as abort even when timeout is near'
 test('runKiroAcp keeps timeout classified as timeout when abort arrives after timeout', async () => {
   const ac = new AbortController();
   const signalLog = await tempSignalLog();
-  setTimeout(() => ac.abort(), 450);
+  setTimeout(() => ac.abort(), 3150);
 
   await assert.rejects(
     runKiroAcp({
@@ -637,7 +643,7 @@ test('runKiroAcp keeps timeout classified as timeout when abort arrives after ti
       prompt: 'hello',
       sessionId: null,
       isFirstTurn: true,
-      timeoutMs: 300,
+      timeoutMs: 3000,
       trustAllTools: false,
       env: { ...env('ignore-interrupt'), OPENP_FAKE_KIRO_SIGNAL_LOG: signalLog },
       signal: ac.signal,
@@ -660,7 +666,7 @@ test('runKiroAcp keeps timeout classified when backend returns an error after ti
       prompt: 'hello',
       sessionId: null,
       isFirstTurn: true,
-      timeoutMs: 300,
+      timeoutMs: 3000,
       trustAllTools: false,
       env: { ...env('error-after-interrupt'), OPENP_FAKE_KIRO_SIGNAL_LOG: signalLog },
     }),

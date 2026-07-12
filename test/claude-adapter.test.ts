@@ -597,6 +597,208 @@ test('single-turn retry submits an existing input draft instead of writing the p
   );
 });
 
+test('single-turn recovery resubmits stable wrapped draft when the initial submit is not accepted', async () => {
+  await withSingleTurnBackend(
+    'openp-claude-adapter-lost-submit-draft-',
+    (logPath, cwd, sessionId) => new LostInitialSubmitStableDraftSession(
+      logPath,
+      cwd,
+      sessionId,
+      'continuation cursor row from wrapped prompt',
+    ),
+    async ({ backend, cwd, session, sessionId }) => {
+      const result = await backend.runTurn(
+        {
+          turnId: '22222222-2222-4222-8222-222222222233',
+          prompt: 'a long prompt that wraps to another row',
+          jsonSchema: null,
+        },
+        adapterRunOptions(cwd, sessionId, 1_500),
+      );
+
+      assert.equal(result.text, 'single-turn recovered after lost initial submit');
+      assert.equal(session.submitCount, 2);
+      assert.deepEqual(session.writes, ['a long prompt that wraps to another row']);
+    },
+  );
+});
+
+test('single-turn recovery does not treat an unchanged placeholder as a written draft', async () => {
+  await withSingleTurnBackend(
+    'openp-claude-adapter-lost-write-placeholder-',
+    (logPath, cwd, sessionId) => new LostInitialSubmitStableDraftSession(
+      logPath,
+      cwd,
+      sessionId,
+      '❯ Try "edit a file"',
+      { unchangedLineAcrossWrite: '❯ Try "edit a file"' },
+    ),
+    async ({ backend, cwd, session, sessionId }) => {
+      await assert.rejects(
+        () => backend.runTurn(
+          {
+            turnId: '22222222-2222-4222-8222-222222222239',
+            prompt: 'prompt draft',
+            jsonSchema: null,
+          },
+          adapterRunOptions(cwd, sessionId, 1_500),
+        ),
+        (error) => error instanceof OpenPError &&
+          (error.exitCode === EXIT_CODES.timeout || error.exitCode === EXIT_CODES.sessionLogNotFound),
+      );
+      assert.equal(session.submitCount, 1);
+      assert.deepEqual(session.writes, ['prompt draft']);
+    },
+  );
+});
+
+test('single-turn recovery does not resubmit when caller boundary appears during draft check', async () => {
+  await withSingleTurnBackend(
+    'openp-claude-adapter-lost-submit-late-caller-',
+    (logPath, cwd, sessionId) => new LostInitialSubmitStableDraftSession(
+      logPath,
+      cwd,
+      sessionId,
+      '❯ prompt draft',
+      {
+        appendCallerDuringFirstPostSubmitCapture: true,
+        appendCallerOnlyDuringFirstPostSubmitCapture: true,
+      },
+    ),
+    async ({ backend, cwd, session, sessionId }) => {
+      const result = await backend.runTurn(
+        {
+          turnId: '22222222-2222-4222-8222-222222222234',
+          prompt: 'prompt draft',
+          jsonSchema: null,
+        },
+        adapterRunOptions(cwd, sessionId, 1_500),
+      );
+
+      assert.equal(result.text, 'single-turn late caller after initial submit');
+      assert.equal(session.submitCount, 1);
+      assert.deepEqual(session.writes, ['prompt draft']);
+    },
+  );
+});
+
+test('single-turn recovery keeps session-log wait when the draft surface changes', async () => {
+  await withSingleTurnBackend(
+    'openp-claude-adapter-lost-submit-changed-',
+    (logPath, cwd, sessionId) => new LostInitialSubmitStableDraftSession(
+      logPath,
+      cwd,
+      sessionId,
+      '❯ prompt draft',
+      { currentLineAfterFirstSubmit: 'Generating response...' },
+    ),
+    async ({ backend, cwd, session, sessionId }) => {
+      await assert.rejects(
+        () => backend.runTurn(
+          {
+            turnId: '22222222-2222-4222-8222-222222222235',
+            prompt: 'prompt draft',
+            jsonSchema: null,
+          },
+          adapterRunOptions(cwd, sessionId, 1_500),
+        ),
+        (error) => error instanceof OpenPError &&
+          (error.exitCode === EXIT_CODES.timeout || error.exitCode === EXIT_CODES.sessionLogNotFound),
+      );
+      assert.equal(session.submitCount, 1);
+      assert.deepEqual(session.writes, ['prompt draft']);
+    },
+  );
+});
+
+test('single-turn recovery keeps session-log wait when the draft surface is ambiguous', async () => {
+  await withSingleTurnBackend(
+    'openp-claude-adapter-lost-submit-ambiguous-',
+    (logPath, cwd, sessionId) => new LostInitialSubmitStableDraftSession(
+      logPath,
+      cwd,
+      sessionId,
+      '❯ prompt draft',
+      { currentLineAfterFirstSubmit: '  ❯ 1. No, exit' },
+    ),
+    async ({ backend, cwd, session, sessionId }) => {
+      await assert.rejects(
+        () => backend.runTurn(
+          {
+            turnId: '22222222-2222-4222-8222-222222222236',
+            prompt: 'prompt draft',
+            jsonSchema: null,
+          },
+          adapterRunOptions(cwd, sessionId, 1_500),
+        ),
+        (error) => error instanceof OpenPError &&
+          (error.exitCode === EXIT_CODES.timeout || error.exitCode === EXIT_CODES.sessionLogNotFound),
+      );
+      assert.equal(session.submitCount, 1);
+      assert.deepEqual(session.writes, ['prompt draft']);
+    },
+  );
+});
+
+test('single-turn recovery keeps session-log wait when cursor line reading fails', async () => {
+  await withSingleTurnBackend(
+    'openp-claude-adapter-lost-submit-read-failure-',
+    (logPath, cwd, sessionId) => new LostInitialSubmitStableDraftSession(
+      logPath,
+      cwd,
+      sessionId,
+      '❯ prompt draft',
+      { throwOnFirstPostSubmitCapture: true },
+    ),
+    async ({ backend, cwd, session, sessionId }) => {
+      await assert.rejects(
+        () => backend.runTurn(
+          {
+            turnId: '22222222-2222-4222-8222-222222222237',
+            prompt: 'prompt draft',
+            jsonSchema: null,
+          },
+          adapterRunOptions(cwd, sessionId, 1_500),
+        ),
+        (error) => error instanceof OpenPError &&
+          (error.exitCode === EXIT_CODES.timeout || error.exitCode === EXIT_CODES.sessionLogNotFound),
+      );
+      assert.equal(session.submitCount, 1);
+      assert.deepEqual(session.writes, ['prompt draft']);
+    },
+  );
+});
+
+test('single-turn recovery returns resend-safe prompt_not_executed when second submit is not accepted', async () => {
+  await withSingleTurnBackend(
+    'openp-claude-adapter-lost-submit-second-failure-',
+    (logPath, cwd, sessionId) => new LostInitialSubmitStableDraftSession(
+      logPath,
+      cwd,
+      sessionId,
+      '❯ prompt draft',
+      { secondSubmitWritesResult: false },
+    ),
+    async ({ backend, cwd, session, sessionId }) => {
+      await assert.rejects(
+        () => backend.runTurn(
+          {
+            turnId: '22222222-2222-4222-8222-222222222238',
+            prompt: 'prompt draft',
+            jsonSchema: null,
+          },
+          adapterRunOptions(cwd, sessionId, 2_500),
+        ),
+        (error) => error instanceof OpenPError &&
+          error.exitCode === EXIT_CODES.protocolViolation &&
+          error.reasonCode === 'prompt_not_executed',
+      );
+      assert.equal(session.submitCount, 2);
+      assert.deepEqual(session.writes, ['prompt draft']);
+    },
+  );
+});
+
 test('single-turn recovery enters wait without input readiness and picks up caller turn without submitting draft', async () => {
   await withSingleTurnBackend(
     'openp-claude-adapter-retry-late-caller-',
@@ -927,6 +1129,9 @@ class PreCallerLocalCommandThenTurnSession implements PtySession {
   }
 
   async captureCursorLine(): Promise<string> {
+    if (this.submitCount === 0 && this.lastWrite) {
+      return `❯ ${this.lastWrite}`;
+    }
     if (this.submitCount === 1 && this.draftLineAfterFirstSubmit) {
       return this.draftLineAfterFirstSubmit;
     }
@@ -939,6 +1144,165 @@ class ImmortalAdapterPreCallerLocalCommandSession extends PreCallerLocalCommandT
   override async terminate(): Promise<void> {}
   override async isAlive(): Promise<boolean> {
     return true;
+  }
+}
+
+class LostInitialSubmitStableDraftSession implements PtySession {
+  readonly id = 'lost-initial-submit-stable-draft-session';
+  submitCount = 0;
+  readonly writes: string[] = [];
+  captureAfterFirstSubmitCount = 0;
+  private alive = true;
+  private lastWrite = '';
+  private pendingCallerCompletion = false;
+
+  constructor(
+    private readonly logPath: string,
+    private readonly cwd: string,
+    private readonly sessionId: string,
+    private readonly draftLine: string,
+    private readonly options: {
+      readonly unchangedLineAcrossWrite?: string;
+      readonly currentLineAfterFirstSubmit?: string;
+      readonly appendCallerDuringFirstPostSubmitCapture?: boolean;
+      readonly appendCallerOnlyDuringFirstPostSubmitCapture?: boolean;
+      readonly secondSubmitWritesResult?: boolean;
+      readonly throwOnFirstPostSubmitCapture?: boolean;
+    } = {},
+  ) {}
+
+  async write(input: string): Promise<void> {
+    this.lastWrite = input;
+    this.writes.push(input);
+  }
+
+  async submit(): Promise<void> {
+    this.submitCount += 1;
+    if (this.submitCount === 1) {
+      return;
+    }
+    if (this.options.secondSubmitWritesResult === false) {
+      return;
+    }
+    await appendFile(this.logPath, [
+      eventLine({
+        type: 'user',
+        cwd: this.cwd,
+        sessionId: this.sessionId,
+        uuid: 'active-user',
+        message: { content: this.lastWrite },
+      }),
+      eventLine({
+        type: 'assistant',
+        cwd: this.cwd,
+        sessionId: this.sessionId,
+        parentUuid: 'active-user',
+        message: {
+          content: [{ type: 'text', text: 'single-turn recovered after lost initial submit' }],
+          stop_reason: 'end_turn',
+        },
+      }),
+      eventLine({
+        type: 'system',
+        subtype: 'turn_duration',
+        cwd: this.cwd,
+        sessionId: this.sessionId,
+        durationMs: 10,
+      }),
+    ].join('\n') + '\n');
+  }
+
+  async interrupt(): Promise<void> {}
+
+  async terminate(signal: NodeJS.Signals = 'SIGTERM'): Promise<void> {
+    void signal;
+    this.alive = false;
+  }
+
+  async exit(): Promise<void> {
+    this.alive = false;
+  }
+
+  async isAlive(): Promise<boolean> {
+    if (this.pendingCallerCompletion) {
+      this.pendingCallerCompletion = false;
+      await appendFile(this.logPath, [
+        eventLine({
+          type: 'assistant',
+          cwd: this.cwd,
+          sessionId: this.sessionId,
+          parentUuid: 'active-user',
+          message: {
+            content: [{ type: 'text', text: 'single-turn late caller after initial submit' }],
+            stop_reason: 'end_turn',
+          },
+        }),
+        eventLine({
+          type: 'system',
+          subtype: 'turn_duration',
+          cwd: this.cwd,
+          sessionId: this.sessionId,
+          durationMs: 10,
+        }),
+      ].join('\n') + '\n');
+    }
+    return this.alive;
+  }
+
+  async captureText(): Promise<string> {
+    return '❯';
+  }
+
+  async captureCursorLine(): Promise<string> {
+    if (this.submitCount === 0) {
+      if (this.options.unchangedLineAcrossWrite) {
+        return this.options.unchangedLineAcrossWrite;
+      }
+      return this.lastWrite ? this.draftLine : '❯';
+    }
+    if (this.submitCount === 1) {
+      this.captureAfterFirstSubmitCount += 1;
+      if (this.options.throwOnFirstPostSubmitCapture) {
+        throw new Error('cursor read failed');
+      }
+      if (this.options.appendCallerDuringFirstPostSubmitCapture && this.captureAfterFirstSubmitCount === 1) {
+        const events = [
+          eventLine({
+            type: 'user',
+            cwd: this.cwd,
+            sessionId: this.sessionId,
+            uuid: 'active-user',
+            message: { content: this.lastWrite },
+          }),
+        ];
+        if (this.options.appendCallerOnlyDuringFirstPostSubmitCapture) {
+          this.pendingCallerCompletion = true;
+        } else {
+          events.push(
+            eventLine({
+              type: 'assistant',
+              cwd: this.cwd,
+              sessionId: this.sessionId,
+              parentUuid: 'active-user',
+              message: {
+                content: [{ type: 'text', text: 'single-turn late caller after initial submit' }],
+                stop_reason: 'end_turn',
+              },
+            }),
+            eventLine({
+              type: 'system',
+              subtype: 'turn_duration',
+              cwd: this.cwd,
+              sessionId: this.sessionId,
+              durationMs: 10,
+            }),
+          );
+        }
+        await appendFile(this.logPath, events.join('\n') + '\n');
+      }
+      return this.options.currentLineAfterFirstSubmit ?? this.draftLine;
+    }
+    return this.draftLine;
   }
 }
 
@@ -1046,6 +1410,9 @@ class PreCallerLocalCommandThenLateCallerSession implements PtySession {
   }
 
   async captureCursorLine(): Promise<string> {
+    if (this.submitCount === 0 && this.lastWrite) {
+      return `❯ ${this.lastWrite}`;
+    }
     if (this.submitCount === 0) {
       return '❯';
     }

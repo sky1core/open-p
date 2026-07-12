@@ -26,6 +26,23 @@ instances:
   }]);
 });
 
+test('loads configured Codex backend instances from XDG config home', async () => {
+  const { env } = await writeInstancesYaml(`
+instances:
+  codex-alt:
+    backend: codex
+    homeDir: ~/.codex-alt
+`);
+
+  const instances = await loadConfiguredBackendInstances({ env });
+
+  assert.deepEqual(instances, [{
+    id: 'codex-alt',
+    backend: 'codex',
+    homeDir: join(homedir(), '.codex-alt').normalize('NFC'),
+  }]);
+});
+
 test('resolves the configured instances path from XDG config home', () => {
   assert.equal(
     resolveConfiguredBackendInstancesPath({ XDG_CONFIG_HOME: '/tmp/openp-config' }),
@@ -101,6 +118,20 @@ instances:
   );
 });
 
+test('rejects relative Codex instance homeDir', async () => {
+  const { env } = await writeInstancesYaml(`
+instances:
+  codex-alt:
+    backend: codex
+    homeDir: .codex-alt
+`);
+
+  await assertUsageError(
+    () => loadConfiguredBackendInstances({ env }),
+    /homeDir must be absolute or use ~/,
+  );
+});
+
 test('rejects instance entries missing backend', async () => {
   const { env } = await writeInstancesYaml(`
 instances:
@@ -127,17 +158,58 @@ instances:
   );
 });
 
-test('rejects unsupported instance backends', async () => {
+test('rejects Codex instance entries missing homeDir', async () => {
   const { env } = await writeInstancesYaml(`
 instances:
   codex-alt:
     backend: codex
-    configDir: ~/.codex-alt
 `);
 
   await assertUsageError(
     () => loadConfiguredBackendInstances({ env }),
-    /backend codex does not support configured instances/,
+    /homeDir is required/,
+  );
+});
+
+test('rejects Claude instances with Codex homeDir', async () => {
+  const { env } = await writeInstancesYaml(`
+instances:
+  claude-alt:
+    backend: claude
+    homeDir: ~/.codex-alt
+`);
+
+  await assertUsageError(
+    () => loadConfiguredBackendInstances({ env }),
+    /homeDir is not valid for backend claude/,
+  );
+});
+
+test('rejects Codex instances with Claude configDir', async () => {
+  const { env } = await writeInstancesYaml(`
+instances:
+  codex-alt:
+    backend: codex
+    configDir: ~/.claude-alt
+`);
+
+  await assertUsageError(
+    () => loadConfiguredBackendInstances({ env }),
+    /configDir is not valid for backend codex/,
+  );
+});
+
+test('rejects unsupported instance backends', async () => {
+  const { env } = await writeInstancesYaml(`
+instances:
+  kiro-alt:
+    backend: kiro
+    homeDir: ~/.kiro-alt
+`);
+
+  await assertUsageError(
+    () => loadConfiguredBackendInstances({ env }),
+    /backend kiro does not support configured instances/,
   );
 });
 

@@ -1,6 +1,6 @@
 {
   "name": "open-p",
-  "version": "0.19.6",
+  "version": "0.20.0",
   "license": "MIT",
   "type": "module",
   "bin": {

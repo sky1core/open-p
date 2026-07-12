@@ -5,7 +5,17 @@ import type { BackendRunOptions, TurnRequest, TurnResult } from '../../core/type
 import { resolveCodexBin } from './bin.js';
 import { executeCodexTurn } from './turn-executor.js';
 
+export interface CodexBackendOptions {
+  readonly homeDir?: string | null;
+}
+
 export class CodexBackend implements Backend {
+  private readonly homeDir: string | null;
+
+  constructor(options: CodexBackendOptions = {}) {
+    this.homeDir = options.homeDir ?? null;
+  }
+
   async runTurn(request: TurnRequest, options: BackendRunOptions): Promise<TurnResult> {
     const lock = await new SessionLockStore(options.cwd).acquire(options.backendSessionId);
     let primaryError: unknown = null;
@@ -24,6 +34,7 @@ export class CodexBackend implements Backend {
         jsonSchema: options.jsonSchema,
         binArgs: options.backendArgs,
         timeoutMs: options.timeoutMs,
+        homeDir: this.homeDir,
         signal: options.signal,
         forceSignal: options.forceSignal,
         killSignal: options.killSignal,

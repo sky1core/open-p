@@ -299,6 +299,109 @@ test('CodexWorkerBridge.runTurn passes request env to Codex child process', asyn
   }
 });
 
+test('CodexWorkerBridge.runTurn uses request CODEX_HOME for child and session-log result', withFakeBin('fake-codex-success.sh', async () => {
+  const requestHome = await mkdtemp(join(tmpdir(), 'openp-codex-request-home-'));
+  const ambientHome = process.env.CODEX_HOME;
+  assert.ok(ambientHome);
+
+  const bridge = new CodexWorkerBridge();
+  const result = await bridge.runTurn({
+    sessionId: null,
+    isFirstTurn: true,
+    projectRoot: process.cwd(),
+    message: 'hello',
+    timeoutMs: 10000,
+    env: { CODEX_HOME: requestHome },
+  });
+
+  assert.equal(result.content, 'final answer here');
+  assert.match(await readFile(codexTestLogPath(requestHome), 'utf8'), /final answer here/);
+  await assert.rejects(
+    () => readFile(codexTestLogPath(ambientHome), 'utf8'),
+    (error) => typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT',
+  );
+}));
+
+test('configured CodexWorkerBridge.runTurn gives configured CODEX_HOME priority over request env', withFakeBin('fake-codex-success.sh', async () => {
+  const requestHome = await mkdtemp(join(tmpdir(), 'openp-codex-request-home-'));
+  const configuredHome = await mkdtemp(join(tmpdir(), 'openp-codex-configured-home-'));
+
+  const bridge = new CodexWorkerBridge({ homeDir: configuredHome });
+  const result = await bridge.runTurn({
+    sessionId: null,
+    isFirstTurn: true,
+    projectRoot: process.cwd(),
+    message: 'hello',
+    timeoutMs: 10000,
+    env: { CODEX_HOME: requestHome },
+  });
+
+  assert.equal(result.content, 'final answer here');
+  assert.match(await readFile(codexTestLogPath(configuredHome), 'utf8'), /final answer here/);
+  await assert.rejects(
+    () => readFile(codexTestLogPath(requestHome), 'utf8'),
+    (error) => typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT',
+  );
+}));
+
+test('configured CodexWorkerBridge.runTurn keeps simultaneous homes isolated', async () => {
+  const binDir = await mkdtemp(join(tmpdir(), 'openp-codex-multi-bin-'));
+  const fakeCodex = join(binDir, 'codex');
+  const homeA = await mkdtemp(join(tmpdir(), 'openp-codex-home-a-'));
+  const homeB = await mkdtemp(join(tmpdir(), 'openp-codex-home-b-'));
+  await writeFile(fakeCodex, [
+    '#!/usr/bin/env node',
+    'const { mkdirSync, appendFileSync } = require("node:fs");',
+    'const { join } = require("node:path");',
+    'const sessionId = "22222222-2222-4222-8222-222222222222";',
+    'const home = process.env.CODEX_HOME;',
+    'if (!home) throw new Error("missing CODEX_HOME");',
+    'const answer = process.env.OPENP_FAKE_CODEX_ANSWER;',
+    'const model = process.env.OPENP_FAKE_CODEX_MODEL;',
+    'const dir = join(home, "sessions", "2026", "05", "23");',
+    'mkdirSync(dir, { recursive: true });',
+    'const logPath = join(dir, `rollout-${sessionId}.jsonl`);',
+    'for (const event of [',
+    '  { type: "turn_context", payload: { model } },',
+    '  { type: "event_msg", payload: { type: "user_message", message: "hello" } },',
+    '  { type: "response_item", payload: { type: "message", role: "assistant", phase: "final_answer", content: [{ type: "output_text", text: answer }] } },',
+    '  { type: "event_msg", payload: { type: "task_complete" } },',
+    ']) appendFileSync(logPath, JSON.stringify(event) + "\\n");',
+    'process.stdout.write(JSON.stringify({ type: "thread.started", thread_id: sessionId }) + "\\n");',
+    'process.stdout.write(JSON.stringify({ type: "turn.completed", session_id: sessionId, result: answer, usage: { input_tokens: 1, output_tokens: 1 } }) + "\\n");',
+    '',
+  ].join('\n'));
+  await chmod(fakeCodex, 0o755);
+
+  const [resultA, resultB] = await Promise.all([
+    new CodexWorkerBridge({ homeDir: homeA }).runTurn({
+      bin: fakeCodex,
+      sessionId: null,
+      isFirstTurn: true,
+      projectRoot: process.cwd(),
+      message: 'hello A',
+      timeoutMs: 10000,
+      env: { OPENP_FAKE_CODEX_ANSWER: 'answer from home A', OPENP_FAKE_CODEX_MODEL: 'model-home-a' },
+    }),
+    new CodexWorkerBridge({ homeDir: homeB }).runTurn({
+      bin: fakeCodex,
+      sessionId: null,
+      isFirstTurn: true,
+      projectRoot: process.cwd(),
+      message: 'hello B',
+      timeoutMs: 10000,
+      env: { OPENP_FAKE_CODEX_ANSWER: 'answer from home B', OPENP_FAKE_CODEX_MODEL: 'model-home-b' },
+    }),
+  ]);
+
+  assert.equal(resultA.content, 'answer from home A');
+  assert.equal(resultA.diagnostics.model, 'model-home-a');
+  assert.equal(resultB.content, 'answer from home B');
+  assert.equal(resultB.diagnostics.model, 'model-home-b');
+  assert.match(await readFile(codexTestLogPath(homeA), 'utf8'), /answer from home A/);
+  assert.match(await readFile(codexTestLogPath(homeB), 'utf8'), /answer from home B/);
+});
+
 test('CodexWorkerBridge.runTurn rejects local worker mode before launching Codex', async () => {
   const binDir = await mkdtemp(join(tmpdir(), 'openp-codex-local-bin-'));
   const markerPath = join(binDir, 'spawned');

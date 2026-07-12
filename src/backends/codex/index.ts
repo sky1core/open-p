@@ -5,19 +5,38 @@ import { CodexWorkerBridge } from './worker-bridge.js';
 import { findCodexSessionLogPath } from './session-log.js';
 import { CodexBackend } from './backend.js';
 
-export const codexBackendProvider: BackendProvider = {
-  id: 'codex',
-  descriptor: CODEX_DESCRIPTOR,
+export interface CodexBackendProviderOptions {
+  readonly id?: string;
+  readonly homeDir?: string | null;
+}
 
-  createBackend(_provider: PtyProvider): Backend {
-    return new CodexBackend();
-  },
+export function createCodexBackendProvider(options: CodexBackendProviderOptions = {}): BackendProvider {
+  const id = options.id ?? 'codex';
+  const homeDir = options.homeDir ?? null;
+  const descriptor = id === CODEX_DESCRIPTOR.id
+    ? CODEX_DESCRIPTOR
+    : {
+        ...CODEX_DESCRIPTOR,
+        id,
+        label: id,
+      };
 
-  createWorkerBridge(): BackendWorkerBridge {
-    return new CodexWorkerBridge();
-  },
+  return {
+    id,
+    descriptor,
 
-  async resolveSessionLogPath(sessionId: string, _cwd: string): Promise<string | null> {
-    return findCodexSessionLogPath(sessionId);
-  },
-};
+    createBackend(_provider: PtyProvider): Backend {
+      return new CodexBackend({ homeDir });
+    },
+
+    createWorkerBridge(): BackendWorkerBridge {
+      return new CodexWorkerBridge({ homeDir });
+    },
+
+    async resolveSessionLogPath(sessionId: string, _cwd: string): Promise<string | null> {
+      return findCodexSessionLogPath(sessionId, homeDir);
+    },
+  };
+}
+
+export const codexBackendProvider: BackendProvider = createCodexBackendProvider();

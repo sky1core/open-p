@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { mkdir, mkdtemp, readFile, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { CodexBackend } from '../src/backends/codex/backend.js';
+import { createCodexBackendProvider } from '../src/backends/codex/index.js';
 import { isAbortError } from '../src/core/abort.js';
 import { SessionLockStore } from '../src/core/session-lock.js';
 import { EXIT_CODES, OpenPError } from '../src/core/errors.js';
@@ -176,6 +177,58 @@ test('CodexBackend.runTurn succeeds on first turn', withFakeBin('fake-codex-succ
   assert.ok(result.diagnostics.durationMs! >= 0);
 }));
 
+test('configured Codex backend passes configured CODEX_HOME to child and result reader', async () => {
+  const prevPath = process.env.PATH;
+  const prevStateHome = process.env.XDG_STATE_HOME;
+  const prevCodexHome = process.env.CODEX_HOME;
+  const binDir = await mkdtemp(join(tmpdir(), 'openp-codex-bin-'));
+  const stateRoot = await mkdtemp(join(tmpdir(), 'openp-codex-backend-'));
+  const ambientHome = await mkdtemp(join(tmpdir(), 'openp-codex-ambient-home-'));
+  const configuredHome = await mkdtemp(join(tmpdir(), 'openp-codex-configured-home-'));
+  await symlink(join(FIXTURES, 'fake-codex-success.sh'), join(binDir, 'codex'));
+  process.env.PATH = `${binDir}:${prevPath ?? ''}`;
+  process.env.XDG_STATE_HOME = stateRoot;
+  process.env.CODEX_HOME = ambientHome;
+
+  try {
+    const backend = createCodexBackendProvider({
+      id: 'codex-alt',
+      homeDir: configuredHome,
+    }).createBackend({} as never);
+    const result = await backend.runTurn(
+      { turnId: 'turn-configured', prompt: 'hello' },
+      {
+        ...BASE_OPTIONS,
+        backendSessionId: 'configured-direct-session',
+      },
+    );
+
+    assert.equal(result.text, 'final answer here');
+    assert.equal(result.sessionId, FAKE_CODEX_SESSION_ID);
+    assert.match(await readFile(codexTestLogPath(configuredHome), 'utf8'), /final answer here/);
+    await assert.rejects(
+      () => readFile(codexTestLogPath(ambientHome), 'utf8'),
+      (error) => typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT',
+    );
+  } finally {
+    if (prevPath === undefined) {
+      delete process.env.PATH;
+    } else {
+      process.env.PATH = prevPath;
+    }
+    if (prevStateHome === undefined) {
+      delete process.env.XDG_STATE_HOME;
+    } else {
+      process.env.XDG_STATE_HOME = prevStateHome;
+    }
+    if (prevCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = prevCodexHome;
+    }
+  }
+});
+
 test('CodexBackend.runTurn reports actual Codex-selected model over requested model alias', withFakeBin('fake-codex-success.sh', async () => {
   const backend = new CodexBackend();
   const result = await backend.runTurn(
@@ -319,6 +372,71 @@ test('CodexBackend.runTurn diagnoses a first-turn Codex completion with no final
       error.message.includes('exit code 1'),
   );
 }));
+
+test('configured Codex backend uses its own home for non-zero exit diagnostics', async () => {
+  const prevPath = process.env.PATH;
+  const prevStateHome = process.env.XDG_STATE_HOME;
+  const prevCodexHome = process.env.CODEX_HOME;
+  const binDir = await mkdtemp(join(tmpdir(), 'openp-codex-bin-'));
+  const stateRoot = await mkdtemp(join(tmpdir(), 'openp-codex-backend-'));
+  const ambientHome = await mkdtemp(join(tmpdir(), 'openp-codex-ambient-home-'));
+  const configuredHome = await mkdtemp(join(tmpdir(), 'openp-codex-configured-home-'));
+  await symlink(join(FIXTURES, 'fake-codex-exit-no-final-session-log.mjs'), join(binDir, 'codex'));
+  await mkdir(join(ambientHome, 'sessions', '2026', '05', '23'), { recursive: true });
+  await writeFile(codexTestLogPath(ambientHome), [
+    JSON.stringify({ type: 'turn_context', payload: { model: 'ambient-decoy-model' } }),
+    codexUserTurn('ambient decoy prompt'),
+    JSON.stringify({
+      type: 'response_item',
+      payload: {
+        type: 'message',
+        role: 'assistant',
+        phase: 'final_answer',
+        content: [{ type: 'output_text', text: 'ambient decoy answer' }],
+      },
+    }),
+    JSON.stringify({ type: 'event_msg', payload: { type: 'task_complete' } }),
+    '',
+  ].join('\n'));
+  process.env.PATH = `${binDir}:${prevPath ?? ''}`;
+  process.env.XDG_STATE_HOME = stateRoot;
+  process.env.CODEX_HOME = ambientHome;
+
+  try {
+    const backend = createCodexBackendProvider({
+      id: 'codex-alt',
+      homeDir: configuredHome,
+    }).createBackend({} as never);
+    await assert.rejects(
+      backend.runTurn(
+        { turnId: 'turn-configured-no-final', prompt: 'hello' },
+        { ...BASE_OPTIONS, backendSessionId: 'configured-no-final-session' },
+      ),
+      (error) => error instanceof OpenPError &&
+        error.exitCode === EXIT_CODES.backendExited &&
+        error.message.includes('Codex CLI completed without a final answer') &&
+        !error.message.includes('ambient decoy answer'),
+    );
+    assert.match(await readFile(codexTestLogPath(configuredHome), 'utf8'), /checking status before final/);
+    assert.match(await readFile(codexTestLogPath(ambientHome), 'utf8'), /ambient decoy answer/);
+  } finally {
+    if (prevPath === undefined) {
+      delete process.env.PATH;
+    } else {
+      process.env.PATH = prevPath;
+    }
+    if (prevStateHome === undefined) {
+      delete process.env.XDG_STATE_HOME;
+    } else {
+      process.env.XDG_STATE_HOME = prevStateHome;
+    }
+    if (prevCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = prevCodexHome;
+    }
+  }
+});
 
 test('CodexBackend.runTurn throws on empty response', withFakeBin('fake-codex-empty.sh', async () => {
   const backend = new CodexBackend();

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { CODEX_DESCRIPTOR } from '../src/backends/codex/descriptor.js';
+import { createCodexBackendProvider } from '../src/backends/codex/index.js';
 
 test('Codex descriptor publishes backend identity and implemented capabilities', () => {
   assert.equal(CODEX_DESCRIPTOR.id, 'codex');
@@ -28,4 +29,16 @@ test('Codex descriptor declares execution modes', () => {
 
 test('Codex descriptor does not advertise a hardcoded reasoning effort catalog', () => {
   assert.deepEqual(CODEX_DESCRIPTOR.reasoningEfforts, []);
+});
+
+test('configured Codex provider descriptor uses the instance id', () => {
+  const provider = createCodexBackendProvider({
+    id: 'codex-alt',
+    homeDir: '/tmp/openp-codex-alt',
+  });
+
+  assert.equal(provider.id, 'codex-alt');
+  assert.equal(provider.descriptor.id, 'codex-alt');
+  assert.equal(provider.descriptor.label, 'codex-alt');
+  assert.equal(provider.descriptor.commandDisplay, CODEX_DESCRIPTOR.commandDisplay);
 });

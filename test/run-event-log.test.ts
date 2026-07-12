@@ -57,10 +57,30 @@ test('run event log writes activity lifecycle records', async () => {
       sawCallerUserTurn: true,
     },
   });
-  assert.equal((await stat(eventLogPath)).mode & 0o777, 0o600);
+  assert.equal((await stat(eventLogPath)).mode & 0o777, 0o666 & ~process.umask());
 });
 
-test('run event log tightens an existing caller-owned file to owner-only access', async () => {
+test('run event log creates files with caller umask instead of forcing owner-only access', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-run-event-log-'));
+  const eventLogPath = join(dir, 'events.jsonl');
+  const previousUmask = process.umask(0o027);
+  try {
+    const eventLog = openRunEventLog(eventLogPath, {
+      runId: 'run-created',
+      pid: process.pid,
+      startedAt: new Date().toISOString(),
+      backend: 'codex',
+      resume: null,
+    }, () => undefined);
+    eventLog.close();
+  } finally {
+    process.umask(previousUmask);
+  }
+
+  assert.equal((await stat(eventLogPath)).mode & 0o777, 0o640);
+});
+
+test('run event log preserves an existing caller-owned file mode', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'openp-run-event-log-'));
   const eventLogPath = join(dir, 'events.jsonl');
   await writeFile(eventLogPath, '');
@@ -75,5 +95,5 @@ test('run event log tightens an existing caller-owned file to owner-only access'
   }, () => undefined);
   eventLog.close();
 
-  assert.equal((await stat(eventLogPath)).mode & 0o777, 0o600);
+  assert.equal((await stat(eventLogPath)).mode & 0o777, 0o644);
 });

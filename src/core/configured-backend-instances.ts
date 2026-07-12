@@ -2,16 +2,26 @@ import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { parseDocument } from 'yaml';
-import { BUILT_IN_BACKEND_IDS, type BuiltInBackendId } from './backend-ids.js';
+import { BUILT_IN_BACKEND_IDS } from './backend-ids.js';
 import { EXIT_CODES, OpenPError } from './errors.js';
 
-export interface ConfiguredBackendInstance {
+export type ConfiguredBackendInstance =
+  | ClaudeConfiguredBackendInstance
+  | CodexConfiguredBackendInstance;
+
+export interface ClaudeConfiguredBackendInstance {
   readonly id: string;
-  readonly backend: BuiltInBackendId;
+  readonly backend: 'claude';
   readonly configDir: string;
 }
 
-const CONFIGURED_INSTANCE_BACKENDS = new Set<string>(['claude']);
+export interface CodexConfiguredBackendInstance {
+  readonly id: string;
+  readonly backend: 'codex';
+  readonly homeDir: string;
+}
+
+const CONFIGURED_INSTANCE_BACKENDS = new Set<string>(['claude', 'codex']);
 
 export function resolveConfiguredBackendInstancesPath(env: NodeJS.ProcessEnv = process.env): string {
   const base = resolveXdgConfigHome(env.XDG_CONFIG_HOME);
@@ -117,20 +127,43 @@ function parseConfiguredInstances(
     if (!options.supportedBackendIds.has(config.backend)) {
       throw usageError(options.path, `instance ${id} backend ${config.backend} does not support configured instances`);
     }
-    if (typeof config.configDir !== 'string' || !config.configDir) {
-      throw usageError(options.path, `instance ${id} configDir is required`);
+
+    if (config.backend === 'claude') {
+      if (Object.prototype.hasOwnProperty.call(config, 'homeDir')) {
+        throw usageError(options.path, `instance ${id} homeDir is not valid for backend claude`);
+      }
+      if (typeof config.configDir !== 'string' || !config.configDir) {
+        throw usageError(options.path, `instance ${id} configDir is required`);
+      }
+      output.push({
+        id,
+        backend: 'claude',
+        configDir: resolveInstancePath(config.configDir, options.path, id, 'configDir'),
+      });
+      continue;
     }
 
-    output.push({
-      id,
-      backend: config.backend as BuiltInBackendId,
-      configDir: resolveInstanceConfigDir(config.configDir, options.path, id),
-    });
+    if (config.backend === 'codex') {
+      if (Object.prototype.hasOwnProperty.call(config, 'configDir')) {
+        throw usageError(options.path, `instance ${id} configDir is not valid for backend codex`);
+      }
+      if (typeof config.homeDir !== 'string' || !config.homeDir) {
+        throw usageError(options.path, `instance ${id} homeDir is required`);
+      }
+      output.push({
+        id,
+        backend: 'codex',
+        homeDir: resolveInstancePath(config.homeDir, options.path, id, 'homeDir'),
+      });
+      continue;
+    }
+
+    throw usageError(options.path, `instance ${id} backend ${config.backend} does not support configured instances`);
   }
   return output;
 }
 
-function resolveInstanceConfigDir(value: string, path: string, instanceId: string): string {
+function resolveInstancePath(value: string, path: string, instanceId: string, fieldName: string): string {
   if (value === '~') {
     return homedir().normalize('NFC');
   }
@@ -138,13 +171,13 @@ function resolveInstanceConfigDir(value: string, path: string, instanceId: strin
     return join(homedir(), value.slice(2)).normalize('NFC');
   }
   if (!isAbsolute(value)) {
-    throw usageError(path, `instance ${instanceId} configDir must be absolute or use ~/ expansion`);
+    throw usageError(path, `instance ${instanceId} ${fieldName} must be absolute or use ~/ expansion`);
   }
   return value.normalize('NFC');
 }
 
 const ROOT_KEYS = new Set<string>(['instances']);
-const INSTANCE_KEYS = new Set<string>(['backend', 'configDir']);
+const INSTANCE_KEYS = new Set<string>(['backend', 'configDir', 'homeDir']);
 
 function resolveXdgConfigHome(value: string | undefined): string {
   if (typeof value === 'string' && value && isAbsolute(value)) {
