@@ -4,6 +4,7 @@ import { CLAUDE_CODE_DESCRIPTOR } from './descriptor.js';
 import { ClaudeCodeBackend } from './adapter.js';
 import { ClaudeCodeWorkerBridge } from './worker-bridge.js';
 import { findClaudeCodeSessionLog } from './session-log.js';
+import { probeClaudeCodeLogin } from './login.js';
 
 export interface ClaudeBackendProviderOptions {
   readonly id?: string;
@@ -24,6 +25,13 @@ export function createClaudeBackendProvider(options: ClaudeBackendProviderOption
   return {
     id,
     descriptor,
+
+    async probeLogin() {
+      return {
+        backend: 'claude',
+        loggedIn: await probeClaudeCodeLogin(configDir),
+      };
+    },
 
     createBackend(provider: PtyProvider): Backend {
       return new ClaudeCodeBackend(provider, {

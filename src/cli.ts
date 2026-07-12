@@ -44,8 +44,15 @@ import { SessionStateStore, validateSessionStateCompatibility } from './core/ses
 import { runStreamJsonWorkerLines } from './core/stream-json-worker-runner.js';
 import type { AssistantEventSnapshot, TurnResult } from './core/types.js';
 import { TmuxProvider } from './runners/tmux.js';
-import { registerBackend, getBackendProvider, getKnownBackendNames, resolveRegisteredBackendId } from './core/backend-registry.js';
+import {
+  registerBackend,
+  getBackendProvider,
+  getKnownBackendNames,
+  getRegisteredBackendIds,
+  resolveRegisteredBackendId,
+} from './core/backend-registry.js';
 import { loadConfiguredBackendInstances } from './core/configured-backend-instances.js';
+import { collectBackendLoginStatuses, formatBackendLoginStatuses } from './core/auth-status.js';
 import { getOpenPVersion } from './core/version.js';
 import { claudeBackendProvider, createClaudeBackendProvider } from './backends/claude/index.js';
 import { codexBackendProvider, createCodexBackendProvider } from './backends/codex/index.js';
@@ -92,6 +99,7 @@ Streaming and diagnostics:
   --verbose                   Mark verbose text output and include diagnostics
 
 Top-level commands:
+  openp auth-status           Print Claude, Codex, and Kiro CLI login booleans as JSON
   openp --version             Show version
   openp -h, openp --help      Show this help
 
@@ -122,6 +130,15 @@ async function main(argv: readonly string[]): Promise<number> {
   let disposeEventLogSignalGuard: (() => void) | null = null;
   try {
     await registerConfiguredBackendInstances();
+    if (argv[0] === 'auth-status') {
+      if (argv.length !== 1) {
+        throw new OpenPError('auth-status does not accept options or arguments', EXIT_CODES.usage);
+      }
+      const providers = getRegisteredBackendIds().map((id) => getBackendProvider(id));
+      const statuses = await collectBackendLoginStatuses(providers);
+      process.stdout.write(formatBackendLoginStatuses(statuses));
+      return EXIT_CODES.success;
+    }
     const rawOptions = parseCliArgs(argv, getKnownBackendNames());
     const registeredBackendId = resolveRegisteredBackendId(rawOptions.backend);
     const registeredOptions = { ...rawOptions, backend: registeredBackendId } as typeof rawOptions;

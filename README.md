@@ -45,6 +45,22 @@ Pipe from stdin:
 echo "summarize this" | openp claude
 ```
 
+## Backend Login Status
+
+Check whether the installed Claude, Codex, and Kiro CLIs recognize a logged-in account:
+
+```bash
+openp auth-status
+```
+
+The command returns one boolean per built-in backend and configured Claude/Codex instance:
+
+```json
+{"openp":{"version":1,"backends":[{"id":"claude","backend":"claude","loggedIn":true}]}}
+```
+
+The output intentionally excludes account identity fields. A probe failure fails the command instead of reporting `loggedIn: false`. Login status does not guarantee available quota or a successful model turn.
+
 ## Output Formats
 
 | Flag | stdout |

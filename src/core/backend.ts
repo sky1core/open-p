@@ -15,7 +15,13 @@ export interface BackendWorkerBridge {
 export interface BackendProvider {
   readonly id: string;
   readonly descriptor: BackendDescriptor;
+  probeLogin?(): Promise<BackendLoginStatus>;
   createBackend(provider: PtyProvider): Backend;
   createWorkerBridge(): BackendWorkerBridge;
   resolveSessionLogPath(sessionId: string, cwd: string): Promise<string | null>;
+}
+
+export interface BackendLoginStatus {
+  readonly backend: string;
+  readonly loggedIn: boolean;
 }

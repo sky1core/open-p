@@ -4,6 +4,7 @@ import { CODEX_DESCRIPTOR } from './descriptor.js';
 import { CodexWorkerBridge } from './worker-bridge.js';
 import { findCodexSessionLogPath } from './session-log.js';
 import { CodexBackend } from './backend.js';
+import { probeCodexLogin } from './login.js';
 
 export interface CodexBackendProviderOptions {
   readonly id?: string;
@@ -24,6 +25,13 @@ export function createCodexBackendProvider(options: CodexBackendProviderOptions 
   return {
     id,
     descriptor,
+
+    async probeLogin() {
+      return {
+        backend: 'codex',
+        loggedIn: await probeCodexLogin(homeDir),
+      };
+    },
 
     createBackend(_provider: PtyProvider): Backend {
       return new CodexBackend({ homeDir });

@@ -4,10 +4,18 @@ import { KIRO_DESCRIPTOR } from './descriptor.js';
 import { KiroBackend } from './backend.js';
 import { KiroWorkerBridge } from './worker-bridge.js';
 import { resolveKiroSessionLogPath } from './session-log.js';
+import { probeKiroLogin } from './login.js';
 
 export const kiroBackendProvider: BackendProvider = {
   id: 'kiro',
   descriptor: KIRO_DESCRIPTOR,
+
+  async probeLogin() {
+    return {
+      backend: 'kiro',
+      loggedIn: await probeKiroLogin(),
+    };
+  },
 
   createBackend(_provider: PtyProvider): Backend {
     return new KiroBackend();
