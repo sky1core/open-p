@@ -48,6 +48,28 @@ export function changedClaudeInputDraftSurface(
   return after.fingerprint;
 }
 
+export async function waitForChangedClaudeInputDraftSurface(
+  pty: Pick<PtySession, 'captureCursorLine'>,
+  before: ClaudeInputDraftSurface | null,
+  timeoutMs: number,
+): Promise<ClaudeInputDraftFingerprint | null> {
+  if (before === null) {
+    return null;
+  }
+  const deadline = Date.now() + timeoutMs;
+  do {
+    const fingerprint = changedClaudeInputDraftSurface(
+      before,
+      await captureClaudeInputDraftSurface(pty),
+    );
+    if (fingerprint !== null) {
+      return fingerprint;
+    }
+    await sleep(25);
+  } while (Date.now() < deadline);
+  return null;
+}
+
 function fingerprintClaudeInputDraftLine(line: string): ClaudeInputDraftFingerprint | null {
   if (isClaudeCodeMenuSelectionLine(line) || isClaudeCodeEmptyInputPromptLine(line)) {
     return null;
@@ -59,4 +81,8 @@ function fingerprintClaudeInputDraftLine(line: string): ClaudeInputDraftFingerpr
     return null;
   }
   return { line: cleanLine };
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

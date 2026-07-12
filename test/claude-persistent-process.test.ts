@@ -450,12 +450,15 @@ class LostInitialSubmitStableDraftSession implements PtySession {
   captureAfterFirstSubmitCount = 0;
   private lastWrite = '';
   private pendingCallerCompletion = false;
+  private writeCompletedAtMs = 0;
 
   constructor(
     private readonly logPath: string,
     private readonly draftLine: string,
     private readonly options: {
       readonly unchangedLineAcrossWrite?: string;
+      readonly draftRenderDelayMs?: number;
+      readonly writeDelayMs?: number;
       readonly currentLineAfterFirstSubmit?: string;
       readonly appendCallerDuringFirstPostSubmitCapture?: boolean;
       readonly appendCallerOnlyDuringFirstPostSubmitCapture?: boolean;
@@ -468,6 +471,10 @@ class LostInitialSubmitStableDraftSession implements PtySession {
   async write(input: string): Promise<void> {
     this.lastWrite = input;
     this.writes.push(input);
+    if (this.options.writeDelayMs) {
+      await new Promise((resolve) => setTimeout(resolve, this.options.writeDelayMs));
+    }
+    this.writeCompletedAtMs = Date.now();
   }
 
   async submit(): Promise<void> {
@@ -545,6 +552,9 @@ class LostInitialSubmitStableDraftSession implements PtySession {
     if (this.submitCount === 0) {
       if (this.options.unchangedLineAcrossWrite) {
         return this.options.unchangedLineAcrossWrite;
+      }
+      if (this.lastWrite && Date.now() - this.writeCompletedAtMs < (this.options.draftRenderDelayMs ?? 0)) {
+        return '❯';
       }
       return this.lastWrite ? this.draftLine : '❯';
     }
@@ -1647,12 +1657,55 @@ test('persistent recovery resubmits stable wrapped draft when the initial submit
 
   try {
     const result = await process.sendTurn('a long prompt that wraps to another row', {
-      timeoutMs: 1_500,
+      timeoutMs: 3_000,
     });
 
     assert.equal(result.text, 'recovered after lost initial submit');
     assert.equal(session.submitCount, 2);
     assert.deepEqual(session.writes, ['a long prompt that wraps to another row']);
+  } finally {
+    await process.shutdown();
+  }
+});
+
+test('persistent recovery captures a draft that renders after the old fixed delay', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-delayed-draft-render-'));
+  const logPath = join(dir, 'session.jsonl');
+  await writeFile(logPath, '');
+  const sessionId = randomUUID();
+  const session = new LostInitialSubmitStableDraftSession(logPath, '❯ delayed draft', {
+    draftRenderDelayMs: 250,
+  });
+  const process = new PersistentClaudeCodeProcess(sessionId, signature(), dir, session, logPath, logPath, 0);
+
+  try {
+    const result = await process.sendTurn('delayed draft', { timeoutMs: 5_000 });
+    assert.equal(result.text, 'recovered after lost initial submit');
+    assert.equal(session.submitCount, 2);
+    assert.deepEqual(session.writes, ['delayed draft']);
+  } finally {
+    await process.shutdown();
+  }
+});
+
+test('persistent process does not submit a rendered draft after the turn deadline', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-draft-render-timeout-'));
+  const logPath = join(dir, 'session.jsonl');
+  await writeFile(logPath, '');
+  const sessionId = randomUUID();
+  const session = new LostInitialSubmitStableDraftSession(logPath, '❯ Try "edit a file"', {
+    unchangedLineAcrossWrite: '❯ Try "edit a file"',
+    writeDelayMs: 1_500,
+  });
+  const process = new PersistentClaudeCodeProcess(sessionId, signature(), dir, session, logPath, logPath, 0);
+
+  try {
+    await assert.rejects(
+      () => process.sendTurn('prompt draft', { timeoutMs: 1_500 }),
+      (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.timeout,
+    );
+    assert.equal(session.submitCount, 0);
+    assert.deepEqual(session.writes, ['prompt draft']);
   } finally {
     await process.shutdown();
   }

@@ -45,9 +45,9 @@ import { extractPromptLocalCommandName } from './prompt-command.js';
 import {
   captureClaudeInputDraftSurface,
   captureClaudeInputDraftFingerprint,
-  changedClaudeInputDraftSurface,
   sameClaudeInputDraftFingerprint,
   type ClaudeInputDraftFingerprint,
+  waitForChangedClaudeInputDraftSurface,
 } from './submission-recovery.js';
 
 // The non-interactive PTY turn cannot survive tools that outlive the synchronous turn or that block on
@@ -61,6 +61,7 @@ import {
 
 const PROMPT_SUBMISSION_CALLER_GRACE_MS = 750;
 const PROMPT_SUBMISSION_RECOVERY_VERIFY_GRACE_MS = 750;
+const PROMPT_DRAFT_RENDER_GRACE_MS = 400;
 
 export interface ClaudeCodeBackendOptions {
   readonly backendId?: string;
@@ -216,7 +217,16 @@ export class ClaudeCodeBackend implements Backend {
                 },
               );
               await waitForClaudeCodeInputReady(pty, readinessTimeoutMs(readinessAttemptTimeoutMs));
-              postWriteDraftFingerprint = await submitPrompt(pty, request.prompt);
+              postWriteDraftFingerprint = await submitPrompt(pty, request.prompt, () => {
+                throwIfAborted(options.signal);
+                return remainingTurnTimeoutMs(
+                  turnDeadlineMs,
+                  request.turnId,
+                  () => {
+                    interrupter.requestGracefulStop();
+                  },
+                );
+              });
               initialSubmitDone = true;
             }
             const waitAttemptTimeoutMs = remainingTurnTimeoutMs(
@@ -420,13 +430,25 @@ function remainingTurnTimeoutMs(
   return remainingMs;
 }
 
-async function submitPrompt(pty: PtySession, prompt: string): Promise<ClaudeInputDraftFingerprint | null> {
+async function submitPrompt(
+  pty: PtySession,
+  prompt: string,
+  assertCanSubmit: () => number,
+): Promise<ClaudeInputDraftFingerprint | null> {
+  assertCanSubmit();
   const beforeWriteSurface = await captureClaudeInputDraftSurface(pty);
   await pty.write(prompt);
-  await sleep(150);
-  const afterWriteSurface = await captureClaudeInputDraftSurface(pty);
+  const remainingMs = assertCanSubmit();
+  const draftFingerprint = await waitForChangedClaudeInputDraftSurface(
+    pty,
+    beforeWriteSurface,
+    remainingMs === 0
+      ? PROMPT_DRAFT_RENDER_GRACE_MS
+      : Math.min(PROMPT_DRAFT_RENDER_GRACE_MS, remainingMs),
+  );
+  assertCanSubmit();
   await pty.submit();
-  return changedClaudeInputDraftSurface(beforeWriteSurface, afterWriteSurface);
+  return draftFingerprint;
 }
 
 async function hasCallerUserTurnAtRecoveryOffset(

@@ -613,12 +613,70 @@ test('single-turn recovery resubmits stable wrapped draft when the initial submi
           prompt: 'a long prompt that wraps to another row',
           jsonSchema: null,
         },
-        adapterRunOptions(cwd, sessionId, 1_500),
+        adapterRunOptions(cwd, sessionId, 3_000),
       );
 
       assert.equal(result.text, 'single-turn recovered after lost initial submit');
       assert.equal(session.submitCount, 2);
       assert.deepEqual(session.writes, ['a long prompt that wraps to another row']);
+    },
+  );
+});
+
+test('single-turn recovery captures a draft that renders after the old fixed delay', async () => {
+  await withSingleTurnBackend(
+    'openp-claude-adapter-delayed-draft-render-',
+    (logPath, cwd, sessionId) => new LostInitialSubmitStableDraftSession(
+      logPath,
+      cwd,
+      sessionId,
+      '❯ delayed draft',
+      { draftRenderDelayMs: 250 },
+    ),
+    async ({ backend, cwd, session, sessionId }) => {
+      const result = await backend.runTurn(
+        {
+          turnId: '22222222-2222-4222-8222-222222222240',
+          prompt: 'delayed draft',
+          jsonSchema: null,
+        },
+        adapterRunOptions(cwd, sessionId, 5_000),
+      );
+
+      assert.equal(result.text, 'single-turn recovered after lost initial submit');
+      assert.equal(session.submitCount, 2);
+      assert.deepEqual(session.writes, ['delayed draft']);
+    },
+  );
+});
+
+test('single-turn does not submit a rendered draft after the turn deadline', async () => {
+  await withSingleTurnBackend(
+    'openp-claude-adapter-draft-render-timeout-',
+    (logPath, cwd, sessionId) => new LostInitialSubmitStableDraftSession(
+      logPath,
+      cwd,
+      sessionId,
+      '❯ Try "edit a file"',
+      {
+        unchangedLineAcrossWrite: '❯ Try "edit a file"',
+        writeDelayMs: 1_500,
+      },
+    ),
+    async ({ backend, cwd, session, sessionId }) => {
+      await assert.rejects(
+        () => backend.runTurn(
+          {
+            turnId: '22222222-2222-4222-8222-222222222241',
+            prompt: 'prompt draft',
+            jsonSchema: null,
+          },
+          adapterRunOptions(cwd, sessionId, 1_500),
+        ),
+        (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.timeout,
+      );
+      assert.equal(session.submitCount, 0);
+      assert.deepEqual(session.writes, ['prompt draft']);
     },
   );
 });
@@ -1155,6 +1213,7 @@ class LostInitialSubmitStableDraftSession implements PtySession {
   private alive = true;
   private lastWrite = '';
   private pendingCallerCompletion = false;
+  private writeCompletedAtMs = 0;
 
   constructor(
     private readonly logPath: string,
@@ -1163,6 +1222,8 @@ class LostInitialSubmitStableDraftSession implements PtySession {
     private readonly draftLine: string,
     private readonly options: {
       readonly unchangedLineAcrossWrite?: string;
+      readonly draftRenderDelayMs?: number;
+      readonly writeDelayMs?: number;
       readonly currentLineAfterFirstSubmit?: string;
       readonly appendCallerDuringFirstPostSubmitCapture?: boolean;
       readonly appendCallerOnlyDuringFirstPostSubmitCapture?: boolean;
@@ -1174,6 +1235,10 @@ class LostInitialSubmitStableDraftSession implements PtySession {
   async write(input: string): Promise<void> {
     this.lastWrite = input;
     this.writes.push(input);
+    if (this.options.writeDelayMs) {
+      await new Promise((resolve) => setTimeout(resolve, this.options.writeDelayMs));
+    }
+    this.writeCompletedAtMs = Date.now();
   }
 
   async submit(): Promise<void> {
@@ -1257,6 +1322,9 @@ class LostInitialSubmitStableDraftSession implements PtySession {
     if (this.submitCount === 0) {
       if (this.options.unchangedLineAcrossWrite) {
         return this.options.unchangedLineAcrossWrite;
+      }
+      if (this.lastWrite && Date.now() - this.writeCompletedAtMs < (this.options.draftRenderDelayMs ?? 0)) {
+        return '❯';
       }
       return this.lastWrite ? this.draftLine : '❯';
     }
