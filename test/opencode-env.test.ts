@@ -4,7 +4,11 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { requireLocalModel } from '../src/backends/opencode/args.js';
-import { buildOpenCodePrivateEnv, sanitizeOpenCodeEnv } from '../src/backends/opencode/env.js';
+import {
+  buildOpenCodeHistoryEnv,
+  buildOpenCodePrivateEnv,
+  sanitizeOpenCodeEnv,
+} from '../src/backends/opencode/env.js';
 
 test('sanitizeOpenCodeEnv strips cloud provider and backend-specific environment', () => {
   const env = sanitizeOpenCodeEnv({
@@ -55,6 +59,73 @@ test('buildOpenCodePrivateEnv supplies only the selected localhost provider conf
     assert.equal(privateEnv.env.OPENCODE_DISABLE_AUTOUPDATE, '1');
     assert.equal(privateEnv.env.OPENCODE_DISABLE_MODELS_FETCH, '1');
     assert.equal(privateEnv.env.OPENCODE_DISABLE_PROJECT_CONFIG, '1');
+  } finally {
+    await rm(projectRoot, { recursive: true, force: true });
+    await rm(stateRoot, { recursive: true, force: true });
+  }
+});
+
+test('buildOpenCodePrivateEnv keeps its exact turn-path env shape after the shared-base refactor', async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), 'openp-opencode-project-'));
+  const stateRoot = await mkdtemp(join(tmpdir(), 'openp-opencode-state-'));
+  try {
+    // XDG_STATE_HOME selects the isolated root but is not itself a passthrough variable.
+    const baseEnv = { PATH: '/bin', TMPDIR: '/tmp', XDG_STATE_HOME: stateRoot };
+    const turn = await buildOpenCodePrivateEnv(projectRoot, baseEnv, requireLocalModel('mlx-lm/qwen-coder'));
+
+    assert.deepEqual(Object.keys(turn.env).sort(), [
+      'HOME',
+      'OPENCODE_CONFIG_CONTENT',
+      'OPENCODE_DISABLE_AUTOUPDATE',
+      'OPENCODE_DISABLE_MODELS_FETCH',
+      'OPENCODE_DISABLE_PROJECT_CONFIG',
+      'PATH',
+      'TMPDIR',
+      'XDG_CACHE_HOME',
+      'XDG_CONFIG_HOME',
+      'XDG_DATA_HOME',
+    ]);
+    assert.equal(turn.env.PATH, '/bin');
+    assert.equal(turn.env.TMPDIR, '/tmp');
+    assert.equal(turn.env.HOME, turn.homeDir);
+    assert.equal(turn.env.XDG_CONFIG_HOME, turn.configDir);
+    assert.equal(turn.env.XDG_DATA_HOME, turn.dataDir);
+    assert.equal(turn.env.XDG_CACHE_HOME, turn.cacheDir);
+  } finally {
+    await rm(projectRoot, { recursive: true, force: true });
+    await rm(stateRoot, { recursive: true, force: true });
+  }
+});
+
+test('buildOpenCodeHistoryEnv equals the turn env exactly minus OPENCODE_CONFIG_CONTENT', async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), 'openp-opencode-project-'));
+  const stateRoot = await mkdtemp(join(tmpdir(), 'openp-opencode-state-'));
+  try {
+    const baseEnv = { PATH: '/bin', TMPDIR: '/tmp', XDG_STATE_HOME: stateRoot };
+    const turn = await buildOpenCodePrivateEnv(projectRoot, baseEnv, requireLocalModel('mlx-lm/qwen-coder'));
+    const history = await buildOpenCodeHistoryEnv(projectRoot, baseEnv);
+
+    // Identical isolated directory layout so the history runs see the same session store as turns.
+    assert.equal(history.homeDir, turn.homeDir);
+    assert.equal(history.configDir, turn.configDir);
+    assert.equal(history.dataDir, turn.dataDir);
+    assert.equal(history.cacheDir, turn.cacheDir);
+
+    // The history env drops exactly OPENCODE_CONFIG_CONTENT; no model provider config is present.
+    assert.equal(history.env.OPENCODE_CONFIG_CONTENT, undefined);
+    assert.equal(typeof turn.env.OPENCODE_CONFIG_CONTENT, 'string');
+    assert.deepEqual(
+      Object.keys(turn.env).filter((key) => key !== 'OPENCODE_CONFIG_CONTENT').sort(),
+      Object.keys(history.env).sort(),
+    );
+    for (const key of Object.keys(history.env)) {
+      assert.equal(history.env[key], turn.env[key], `env ${key} must match the turn env byte-for-byte`);
+    }
+    // Turn env is reconstructible as the history env plus only the model config content.
+    assert.deepEqual(
+      { ...history.env, OPENCODE_CONFIG_CONTENT: turn.env.OPENCODE_CONFIG_CONTENT },
+      turn.env,
+    );
   } finally {
     await rm(projectRoot, { recursive: true, force: true });
     await rm(stateRoot, { recursive: true, force: true });

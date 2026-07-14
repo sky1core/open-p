@@ -39,10 +39,13 @@ export interface OpenCodePrivateEnv {
   readonly cacheDir: string;
 }
 
-export async function buildOpenCodePrivateEnv(
+// Shared isolated-environment layout for every OpenCode child process (turns and history
+// export/import). Creates the private HOME/XDG dirs under the open-p state root and returns a
+// sanitized env with backend-owned XDG redirection plus the OPENCODE_DISABLE_* guards, but no
+// model-provider config. Callers that need a model layer OPENCODE_CONFIG_CONTENT on top of this.
+async function buildOpenCodeEnvBase(
   projectRoot: string,
   baseEnv: NodeJS.ProcessEnv,
-  model: OpenCodeLocalModel,
 ): Promise<OpenCodePrivateEnv> {
   const stateRoot = resolveOpenPStateRoot(projectRoot, baseEnv);
   const root = join(stateRoot, 'opencode');
@@ -65,8 +68,27 @@ export async function buildOpenCodePrivateEnv(
   env.OPENCODE_DISABLE_AUTOUPDATE = '1';
   env.OPENCODE_DISABLE_MODELS_FETCH = '1';
   env.OPENCODE_DISABLE_PROJECT_CONFIG = '1';
-  env.OPENCODE_CONFIG_CONTENT = JSON.stringify(buildOpenCodeLocalConfig(model));
   return { env, homeDir, configDir, dataDir, cacheDir };
+}
+
+export async function buildOpenCodePrivateEnv(
+  projectRoot: string,
+  baseEnv: NodeJS.ProcessEnv,
+  model: OpenCodeLocalModel,
+): Promise<OpenCodePrivateEnv> {
+  const base = await buildOpenCodeEnvBase(projectRoot, baseEnv);
+  base.env.OPENCODE_CONFIG_CONTENT = JSON.stringify(buildOpenCodeLocalConfig(model));
+  return base;
+}
+
+// History export/import runs against the same isolated OpenCode environment as turns but do not
+// select a model, so OPENCODE_CONFIG_CONTENT is intentionally omitted. Every other variable (the
+// XDG redirection that makes the seeded session discoverable, the DISABLE_* guards) is identical.
+export async function buildOpenCodeHistoryEnv(
+  projectRoot: string,
+  baseEnv: NodeJS.ProcessEnv,
+): Promise<OpenCodePrivateEnv> {
+  return buildOpenCodeEnvBase(projectRoot, baseEnv);
 }
 
 export function sanitizeOpenCodeEnv(baseEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
