@@ -1,8 +1,14 @@
-import type { BackendProvider, Backend, BackendWorkerBridge } from '../../core/backend.js';
+import type {
+  AppendSessionHistoryInput,
+  Backend,
+  BackendProvider,
+  BackendWorkerBridge,
+} from '../../core/backend.js';
 import type { PtyProvider } from '../../runners/types.js';
 import { CLAUDE_CODE_DESCRIPTOR } from './descriptor.js';
 import { ClaudeCodeBackend } from './adapter.js';
 import { ClaudeCodeWorkerBridge } from './worker-bridge.js';
+import { appendClaudeCodeSessionHistory } from './history-writer.js';
 import { findClaudeCodeSessionLog } from './session-log.js';
 import { probeClaudeCodeLogin } from './login.js';
 
@@ -49,6 +55,16 @@ export function createClaudeBackendProvider(options: ClaudeBackendProviderOption
 
     async resolveSessionLogPath(sessionId: string, cwd: string): Promise<string | null> {
       return findClaudeCodeSessionLog(sessionId, cwd, configDir);
+    },
+
+    async appendSessionHistory(input: AppendSessionHistoryInput): Promise<void> {
+      await appendClaudeCodeSessionHistory({
+        sessionId: input.sessionId,
+        cwd: input.cwd,
+        turns: input.turns,
+        configDir,
+        signal: input.signal,
+      });
     },
   };
 }

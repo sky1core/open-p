@@ -1,9 +1,15 @@
-import type { BackendProvider, Backend, BackendWorkerBridge } from '../../core/backend.js';
+import type {
+  AppendSessionHistoryInput,
+  Backend,
+  BackendProvider,
+  BackendWorkerBridge,
+} from '../../core/backend.js';
 import type { PtyProvider } from '../../runners/types.js';
 import { KIRO_DESCRIPTOR } from './descriptor.js';
 import { KiroBackend } from './backend.js';
 import { KiroWorkerBridge } from './worker-bridge.js';
 import { resolveKiroSessionLogPath } from './session-log.js';
+import { appendKiroSessionHistory } from './history-writer.js';
 import { probeKiroLogin } from './login.js';
 
 export const kiroBackendProvider: BackendProvider = {
@@ -27,5 +33,14 @@ export const kiroBackendProvider: BackendProvider = {
 
   async resolveSessionLogPath(sessionId: string, _cwd: string): Promise<string | null> {
     return resolveKiroSessionLogPath(sessionId);
+  },
+
+  async appendSessionHistory(input: AppendSessionHistoryInput): Promise<void> {
+    await appendKiroSessionHistory({
+      sessionId: input.sessionId,
+      cwd: input.cwd,
+      turns: input.turns,
+      signal: input.signal,
+    });
   },
 };

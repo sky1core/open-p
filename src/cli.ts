@@ -41,6 +41,9 @@ import {
   streamingIssuesToWarnings,
 } from './core/streaming-output-helpers.js';
 import { SessionStateStore, validateSessionStateCompatibility } from './core/session-state.js';
+import { parseSeedArgs } from './core/seed-args.js';
+import { loadSeedHistoryFile } from './core/seed-history.js';
+import { runSeed } from './core/seed.js';
 import { runStreamJsonWorkerLines } from './core/stream-json-worker-runner.js';
 import type { AssistantEventSnapshot, TurnResult } from './core/types.js';
 import { TmuxProvider } from './runners/tmux.js';
@@ -100,6 +103,8 @@ Streaming and diagnostics:
 
 Top-level commands:
   openp auth-status           Print Claude, Codex, and Kiro CLI login booleans as JSON
+  openp seed <backend> --history <path> [--resume <id>]
+                              Seed or extend a native backend session from prior turns
   openp --version             Show version
   openp -h, openp --help      Show this help
 
@@ -138,6 +143,30 @@ async function main(argv: readonly string[]): Promise<number> {
       const statuses = await collectBackendLoginStatuses(providers);
       process.stdout.write(formatBackendLoginStatuses(statuses));
       return EXIT_CODES.success;
+    }
+    if (argv[0] === 'seed') {
+      const seedOptions = parseSeedArgs(argv.slice(1), getKnownBackendNames());
+      const registeredId = resolveRegisteredBackendId(seedOptions.backend);
+      const provider = getBackendProvider(registeredId);
+      const turns = await loadSeedHistoryFile(seedOptions.historyPath);
+      const signalHandlers = installProcessSignalHandlers();
+      try {
+        const result = await runSeed({
+          options: { ...seedOptions, backend: registeredId },
+          provider,
+          createBackend: () => provider.createBackend(new TmuxProvider()),
+          cwd,
+          turns,
+          debugLog: debugLogPath,
+          signal: signalHandlers.signal,
+          forceSignal: signalHandlers.forceSignal,
+          killSignal: signalHandlers.killSignal,
+        });
+        process.stdout.write(`${JSON.stringify({ seed: result })}\n`);
+        return EXIT_CODES.success;
+      } finally {
+        signalHandlers.dispose();
+      }
     }
     const rawOptions = parseCliArgs(argv, getKnownBackendNames());
     const registeredBackendId = resolveRegisteredBackendId(rawOptions.backend);

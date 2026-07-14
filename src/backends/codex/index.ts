@@ -1,8 +1,14 @@
-import type { BackendProvider, Backend, BackendWorkerBridge } from '../../core/backend.js';
+import type {
+  AppendSessionHistoryInput,
+  Backend,
+  BackendProvider,
+  BackendWorkerBridge,
+} from '../../core/backend.js';
 import type { PtyProvider } from '../../runners/types.js';
 import { CODEX_DESCRIPTOR } from './descriptor.js';
 import { CodexWorkerBridge } from './worker-bridge.js';
 import { findCodexSessionLogPath } from './session-log.js';
+import { appendCodexSessionHistory } from './history-writer.js';
 import { CodexBackend } from './backend.js';
 import { probeCodexLogin } from './login.js';
 
@@ -43,6 +49,16 @@ export function createCodexBackendProvider(options: CodexBackendProviderOptions 
 
     async resolveSessionLogPath(sessionId: string, _cwd: string): Promise<string | null> {
       return findCodexSessionLogPath(sessionId, homeDir);
+    },
+
+    async appendSessionHistory(input: AppendSessionHistoryInput): Promise<void> {
+      await appendCodexSessionHistory({
+        sessionId: input.sessionId,
+        cwd: input.cwd,
+        turns: input.turns,
+        homeDir,
+        signal: input.signal,
+      });
     },
   };
 }
