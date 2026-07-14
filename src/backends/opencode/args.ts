@@ -55,7 +55,7 @@ export function buildOpenCodeArgs(input: {
 
   if (!input.isFirstTurn) {
     if (!input.sessionId || !isSafeSessionId(input.sessionId)) {
-      throw new OpenPError('unsafe OpenCode resume session id', EXIT_CODES.usage);
+      throw new OpenPError('invalid OpenCode resume session id', EXIT_CODES.usage);
     }
     args.push('--session', input.sessionId);
   }

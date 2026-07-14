@@ -224,8 +224,8 @@ test('CodexWorkerBridge.runTurn passes model and reasoning effort on resume and 
   }
 }));
 
-test('CodexWorkerBridge.runTurn rejects unsafe resume session ids before launching codex', async () => {
-  const binDir = await mkdtemp(join(tmpdir(), 'openp-codex-injection-bin-'));
+test('CodexWorkerBridge.runTurn rejects invalid resume session ids before launching codex', async () => {
+  const binDir = await mkdtemp(join(tmpdir(), 'openp-codex-invalid-id-bin-'));
   const markerPath = join(binDir, 'spawned');
   const fakeCodex = join(binDir, 'codex');
   await writeFile(fakeCodex, [
@@ -241,7 +241,7 @@ test('CodexWorkerBridge.runTurn rejects unsafe resume session ids before launchi
   await assert.rejects(
     () => bridge.runTurn({
       bin: fakeCodex,
-      sessionId: '-unsafe-session',
+      sessionId: '-invalid-session',
       isFirstTurn: false,
       projectRoot: process.cwd(),
       message: 'follow up',
@@ -249,7 +249,7 @@ test('CodexWorkerBridge.runTurn rejects unsafe resume session ids before launchi
     }),
     (error) => error instanceof OpenPError &&
       error.exitCode === EXIT_CODES.usage &&
-      error.message.includes('unsafe Codex resume session id'),
+      error.message.includes('invalid Codex resume session id'),
   );
   await assert.rejects(access(markerPath), { code: 'ENOENT' });
 });

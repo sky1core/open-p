@@ -74,7 +74,7 @@ export function sanitizeOpenCodeEnv(baseEnv: NodeJS.ProcessEnv): NodeJS.ProcessE
   for (const [key, value] of Object.entries(baseEnv)) {
     if (value === undefined) continue;
     if (!PASSTHROUGH_ENV_NAMES.has(key)) continue;
-    if (isSensitiveCredentialEnv(key)) continue;
+    if (isPrivateProviderEnv(key)) continue;
     if (CLOUD_ENV_NAMES.has(key)) continue;
     if (key.startsWith('OPENCODE_')) continue;
     if (key.startsWith('CLAUDE_')) continue;
@@ -84,7 +84,7 @@ export function sanitizeOpenCodeEnv(baseEnv: NodeJS.ProcessEnv): NodeJS.ProcessE
   return env;
 }
 
-function isSensitiveCredentialEnv(key: string): boolean {
+function isPrivateProviderEnv(key: string): boolean {
   return key.endsWith('_API_KEY') ||
     key.endsWith('_ACCESS_KEY_ID') ||
     key.endsWith('_ACCESS_TOKEN') ||

@@ -194,11 +194,11 @@ The OpenCode backend is intended for local-provider use. On Apple Silicon, prefe
 
 The backend does not publish a hardcoded model or reasoning-effort catalog. Within its required local-provider boundary, `--model <provider>/<model-id>` is passed as OpenCode `--model` and `--effort <level>` is passed unchanged as `--variant <level>`. Non-zero exits preserve bounded OpenCode stdout and stderr diagnostics, including non-JSON output.
 
-OpenCode provider ids are config keys, so the provider id alone is not a privacy boundary. `openp` injects a private OpenCode config for the selected local provider and does not load ambient OpenCode provider credentials.
+OpenCode provider ids are config keys, so the provider id alone is not a privacy boundary. `openp` supplies a private OpenCode config for the selected local provider and does not load ambient OpenCode account data.
 
 Use `lmstudio`, `ollama`, or `llama.cpp` when you want their model management or runtime compatibility layer. They are local-provider options, not the primary MLX-LM path.
 
-On macOS, OpenCode runs under `sandbox-exec` with outbound network access limited to localhost. Ambient cloud/API credential variables are not passed to the child process. If the network guard is unavailable, the backend fails closed.
+On macOS, OpenCode runs under `sandbox-exec` with outbound network access limited to localhost. Ambient cloud/API account variables are not passed to the child process. If the network guard is unavailable, the backend fails closed.
 
 ## Sessions
 

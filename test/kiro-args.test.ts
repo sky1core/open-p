@@ -55,7 +55,7 @@ test('buildKiroAcpArgs does not trust tools by default', () => {
 });
 
 test('buildKiroAcpArgs rejects non-canonical execution modes', () => {
-  for (const executionMode of ['read-only', 'plan', 'workspace-write', 'acceptEdits', 'auto_edit', 'bypassPermissions', 'yolo']) {
+  for (const executionMode of ['read-only', 'plan', 'workspace-write', 'acceptEdits', 'auto_edit', 'native-unrestricted-mode', 'yolo']) {
     assert.throws(
       () => buildKiroAcpArgs({ executionMode }),
       (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.unsupportedOption,

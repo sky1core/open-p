@@ -47,7 +47,7 @@ test('tmux shell command can isolate Anthropic env for local backends', () => {
   );
 });
 
-// ANTHROPIC_BASE_URL is always unset (even when absent from the ambient env) via the backend-injected
+// ANTHROPIC_BASE_URL is always unset (even when absent from the ambient env) via the backend-supplied
 // unsetEnv list — this preserves the prior hardcoded behavior of forcing the key onto the unset list.
 test('tmux shell command always unsets ANTHROPIC_BASE_URL via unsetEnv even when ambient lacks it', () => {
   assert.equal(
@@ -60,7 +60,7 @@ test('tmux shell command always unsets ANTHROPIC_BASE_URL via unsetEnv even when
   );
 });
 
-test('tmux shell command can unset ambient Claude config dir while injecting an instance config dir', () => {
+test('tmux shell command can unset ambient Claude config dir while supplying an instance config dir', () => {
   assert.equal(
     buildTmuxShellCommand('claude', [], {
       CLAUDE_CONFIG_DIR: '/tmp/openp-claude-alt',

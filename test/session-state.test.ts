@@ -207,7 +207,7 @@ test('rejects session state with empty backend', async () => {
   );
 });
 
-test('rejects unsafe session ids at the state path boundary', async () => {
+test('rejects invalid session ids at the state path boundary', async () => {
   const projectRoot = await mkdtemp(join(tmpdir(), 'openp-state-'));
   const stateRoot = await mkdtemp(join(tmpdir(), 'openp-state-root-'));
   const store = new SessionStateStore(projectRoot, stateRoot);

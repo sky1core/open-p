@@ -8,7 +8,7 @@ test('accepts opaque provider-generated session ids', () => {
   assert.equal(isSafeSessionId('019e424e-23f7-7fe3-a303-d6b64e11d51d'), true);
 });
 
-test('rejects session ids that are unsafe as path components', () => {
+test('rejects session ids that are invalid path components', () => {
   assert.equal(isSafeSessionId(''), false);
   assert.equal(isSafeSessionId(' leading-space'), false);
   assert.equal(isSafeSessionId('trailing-space '), false);

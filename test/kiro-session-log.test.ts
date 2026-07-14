@@ -69,7 +69,7 @@ test('resolveKiroSessionLogPath resolves the Kiro cli session jsonl path', () =>
   );
 });
 
-test('resolveKiroSessionLogPath rejects path-unsafe session ids', () => {
+test('resolveKiroSessionLogPath rejects session ids that are invalid path components', () => {
   assert.equal(resolveKiroSessionLogPath('../bad', { HOME: '/tmp/openp-home' }), null);
 });
 

@@ -450,7 +450,7 @@ test('rejects removed Claude-only pass-through flags', () => {
   }
 });
 
-test('rejects path-unsafe resume ids before they are used as state paths', () => {
+test('rejects resume ids that are invalid path components before state access', () => {
   assert.throws(
     () => parseCliArgs(['--resume', '../outside', 'hello']),
     (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.usage,

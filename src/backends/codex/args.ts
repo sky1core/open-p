@@ -1,5 +1,7 @@
 import { EXIT_CODES, OpenPError } from '../../core/errors.js';
 
+const CODEX_UNRESTRICTED_MODE_FLAG = '--dangerously-bypass-approvals-and-sandbox';
+
 export interface CodexArgsOptions {
   readonly model?: string | null;
   readonly reasoningEffort?: string | null;
@@ -77,7 +79,7 @@ function appendSandboxArgs(args: string[], executionMode: string | null | undefi
   }
 
   if (mode === 'danger-full-access') {
-    args.push('--dangerously-bypass-approvals-and-sandbox');
+    args.push(CODEX_UNRESTRICTED_MODE_FLAG);
     return;
   }
 
@@ -97,7 +99,7 @@ function appendResumeSandboxArgs(args: string[], executionMode: string | null | 
   }
 
   if (mode === 'danger-full-access') {
-    args.push('--dangerously-bypass-approvals-and-sandbox');
+    args.push(CODEX_UNRESTRICTED_MODE_FLAG);
     return;
   }
 

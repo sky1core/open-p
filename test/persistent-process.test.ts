@@ -113,13 +113,13 @@ test('quarantines a session when launch-signature restart cannot shut down the o
   );
 });
 
-test('quarantines a session when process start reports an unsafe leftover process', async () => {
+test('quarantines a session when process start reports an unresolved leftover process', async () => {
   const manager = new PersistentProcessManager<FakeProcess>();
   const signature = signatureFor('claude-haiku');
   let starts = 0;
   const start = async () => {
     starts += 1;
-    throw new OpenPError('unsafe leftover process', EXIT_CODES.sessionBusy);
+    throw new OpenPError('unresolved leftover process', EXIT_CODES.sessionBusy);
   };
 
   await assert.rejects(
@@ -193,7 +193,7 @@ test('shutdownAll shuts down tracked processes and clears state', async () => {
   assert.equal(await manager.isAliveForSession(SESSION_ID), false);
 });
 
-test('shutdownAll keeps an unsafe live process quarantined when graceful shutdown fails', async () => {
+test('shutdownAll keeps an unresolved live process quarantined when graceful shutdown fails', async () => {
   const manager = new PersistentProcessManager<FakeProcess>();
   const signature = signatureFor('claude-haiku');
   const start = async (request: ProcessStartRequest) => new FakeProcess(request.sessionId, request.launchSignature, true);

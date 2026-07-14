@@ -8,7 +8,7 @@ test('prepares first turn as raw user message', () => {
     isFirstTurn: true,
     projectRoot: '/work/open-p',
     message: 'continue',
-    seedContext: 'seed must not be injected',
+    seedContext: 'seed must not be forwarded',
     transcript: [{ role: 'assistant', content: 'old' }],
   });
 

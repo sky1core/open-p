@@ -32,7 +32,7 @@ export async function waitForClaudeCodeInputReady(
       if (consecutiveMenuSelectionFrames >= 2) {
         throw new OpenPError(
           `Claude Code is showing an interactive selection prompt that open-p cannot answer ` +
-            `(e.g., a first-run bypass permissions approval). Complete it manually by running ` +
+            `(e.g., a first-run trusted-tool approval). Complete it manually by running ` +
             `Claude Code once with the same configuration directory.${formatReadinessScreen(lastScreenText)}`,
           EXIT_CODES.backendStartFailed,
         );

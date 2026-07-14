@@ -23,6 +23,8 @@ import {
   writeCodexCliSessionLog,
 } from './helpers/cli-integration.js';
 
+const CODEX_UNRESTRICTED_MODE_FLAG = '--dangerously-bypass-approvals-and-sandbox';
+
 test('caller-selected first-turn session id is unsupported', async () => {
   const repoRoot = process.cwd();
   const tsxBin = join(repoRoot, 'node_modules', '.bin', 'tsx');
@@ -85,9 +87,9 @@ test('codex first turn returns generated session id and resume uses that id', as
   const argLines = (await readFile(argsLog, 'utf8')).trimEnd().split('\n');
   assert.match(argLines[0]!, /\texec\t/);
   assert.doesNotMatch(argLines[0]!, /\tresume\t/);
-  assert.doesNotMatch(argLines[0]!, /dangerously-bypass-approvals-and-sandbox/);
+  assert.ok(!argLines[0]!.includes(CODEX_UNRESTRICTED_MODE_FLAG));
   assert.match(argLines[1]!, new RegExp(`\\texec\\tresume\\t.*\\t${CODEX_SESSION_ID}\\tfollow up$`));
-  assert.doesNotMatch(argLines[1]!, /dangerously-bypass-approvals-and-sandbox/);
+  assert.ok(!argLines[1]!.includes(CODEX_UNRESTRICTED_MODE_FLAG));
 });
 
 test('codex stream-json first turn omits init session and returns generated result session id', async () => {

@@ -113,7 +113,7 @@ test('public CLI rejects Claude-native compatibility flags instead of ignoring t
   const stateRoot = await mkdtemp(join(tmpdir(), 'openp-cli-state-'));
 
   for (const args of [
-    ['claude', '--permission-mode', 'bypassPermissions', 'hello'],
+    ['claude', '--permission-mode', 'acceptEdits', 'hello'],
     ['claude', '--brief', 'hello'],
   ]) {
     const result = await runCommand(tsxBin, [

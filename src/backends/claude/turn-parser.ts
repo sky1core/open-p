@@ -688,7 +688,7 @@ function rememberSessionId(state: ParserState, event: JsonObject, turnId: string
     return;
   }
   if (!isSafeSessionId(sessionId)) {
-    throw new OpenPError(`unsafe Claude Code session id for turn ${turnId}`, EXIT_CODES.protocolViolation);
+    throw new OpenPError(`invalid Claude Code session id for turn ${turnId}`, EXIT_CODES.protocolViolation);
   }
   if (state.sessionId && state.sessionId !== sessionId) {
     throw new OpenPError(`Claude Code session id changed during turn ${turnId}`, EXIT_CODES.protocolViolation);

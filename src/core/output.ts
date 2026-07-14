@@ -1726,8 +1726,8 @@ function buildAssistantEventsFromSnapshots(
     return [];
   }
   return snapshots.flatMap((snapshot, index) => {
-    const shouldInjectUsage = shouldInjectSnapshotUsage(snapshots, index, turnUsage);
-    const openpSnapshot = shouldInjectUsage ? injectSnapshotUsage(snapshot, turnUsage) : snapshot;
+    const shouldAttachUsage = shouldAttachUsageToSnapshot(snapshots, index, turnUsage);
+    const openpSnapshot = shouldAttachUsage ? attachUsageToSnapshot(snapshot, turnUsage) : snapshot;
     return buildOpenPAssistantEventsFromSnapshot(openpSnapshot, {
         sessionId,
         turnId: context.turnId ?? null,
@@ -1765,8 +1765,8 @@ function buildOpenPAssistantEventsFromSnapshots(
     return [];
   }
   return snapshots.flatMap((snapshot, index) => buildOpenPAssistantEventsFromSnapshot(
-    shouldInjectSnapshotUsage(snapshots, index, turnUsage)
-      ? injectSnapshotUsage(snapshot, turnUsage)
+    shouldAttachUsageToSnapshot(snapshots, index, turnUsage)
+      ? attachUsageToSnapshot(snapshot, turnUsage)
       : snapshot,
     {
       sessionId,
@@ -2083,7 +2083,7 @@ function buildTerminalAssistantEventRecords(event: {
   return output;
 }
 
-function shouldInjectSnapshotUsage(
+function shouldAttachUsageToSnapshot(
   snapshots: readonly AssistantEventSnapshot[],
   index: number,
   turnUsage: BackendUsage | null | undefined,
@@ -2091,7 +2091,7 @@ function shouldInjectSnapshotUsage(
   return Boolean(turnUsage && index === snapshots.length - 1 && !hasUsage(snapshots[index]!.message));
 }
 
-function injectSnapshotUsage(snapshot: AssistantEventSnapshot, turnUsage: BackendUsage): AssistantEventSnapshot {
+function attachUsageToSnapshot(snapshot: AssistantEventSnapshot, turnUsage: BackendUsage): AssistantEventSnapshot {
   return {
     ...snapshot,
     message: {

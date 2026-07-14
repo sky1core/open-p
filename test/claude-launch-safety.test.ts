@@ -7,7 +7,7 @@ import {
   withClaudeCodeSafeLaunchEnv,
 } from '../src/backends/claude/launch-safety.js';
 
-test('Claude Code safe launch env injects resume modal suppression thresholds', () => {
+test('Claude Code launch env sets resume modal suppression thresholds', () => {
   const env = withClaudeCodeSafeLaunchEnv({
     CLAUDE_CODE_RESUME_THRESHOLD_MINUTES: '70',
     CLAUDE_CODE_RESUME_TOKEN_THRESHOLD: '100000',
@@ -25,8 +25,8 @@ test('Claude Code safe launch env injects resume modal suppression thresholds', 
 
 // The single-turn, persistent, and worker launch paths all call these env builders with an empty
 // ambient env (e.g. adapter passes withClaudeCodeAccountLaunchEnv({}, configDir)), so the empty-input
-// case is the actual production input — assert the thresholds are injected even with no ambient value.
-test('Claude Code launch env injects resume modal suppression thresholds with no ambient env', () => {
+// case is the actual production input — assert the thresholds are set even with no ambient value.
+test('Claude Code launch env sets resume modal suppression thresholds with no ambient env', () => {
   for (const env of [
     withClaudeCodeSafeLaunchEnv(),
     withClaudeCodeAccountLaunchEnv({}, '/tmp/openp-claude-config'),

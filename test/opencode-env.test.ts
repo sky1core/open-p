@@ -17,7 +17,7 @@ test('sanitizeOpenCodeEnv strips cloud provider and backend-specific environment
     AWS_SECRET_ACCESS_KEY: 'aws-secret-access',
     SSH_AUTH_SOCK: '/tmp/ssh.sock',
     PRIVATE_KEY: 'private-key',
-    OPENCODE_CONFIG: 'unsafe',
+    OPENCODE_CONFIG: 'blocked-value',
     CLAUDE_CONFIG_DIR: '/tmp/claude',
     CODEX_HOME: '/tmp/codex',
   });
@@ -35,7 +35,7 @@ test('sanitizeOpenCodeEnv strips cloud provider and backend-specific environment
   assert.equal(env.CODEX_HOME, undefined);
 });
 
-test('buildOpenCodePrivateEnv injects only the selected localhost provider config', async () => {
+test('buildOpenCodePrivateEnv supplies only the selected localhost provider config', async () => {
   const projectRoot = await mkdtemp(join(tmpdir(), 'openp-opencode-project-'));
   const stateRoot = await mkdtemp(join(tmpdir(), 'openp-opencode-state-'));
   try {

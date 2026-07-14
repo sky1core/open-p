@@ -10,7 +10,7 @@ import type { PtyProvider } from '../src/runners/types.js';
 
 const UNUSED_PROVIDER: PtyProvider = {
   start: async () => {
-    throw new Error('provider should not be used by injected starter');
+    throw new Error('provider should not be used by the supplied starter');
   },
 };
 

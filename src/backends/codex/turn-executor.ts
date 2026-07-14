@@ -62,7 +62,7 @@ export async function executeCodexTurn(input: CodexTurnExecutionInput): Promise<
     throw new OpenPError('Codex resume requires a session id', EXIT_CODES.usage);
   }
   if (!input.isFirstTurn && input.sessionId && !isSafeSessionId(input.sessionId)) {
-    throw new OpenPError('unsafe Codex resume session id', EXIT_CODES.usage);
+    throw new OpenPError('invalid Codex resume session id', EXIT_CODES.usage);
   }
 
   const startMs = Date.now();

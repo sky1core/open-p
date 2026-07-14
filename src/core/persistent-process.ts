@@ -38,7 +38,7 @@ export class PersistentProcessManager<TProcess extends ManagedBackendProcess> {
       throw new OpenPError(SHUTDOWN_DURING_START_MESSAGE, EXIT_CODES.sessionBusy);
     }
     if (this.quarantinedSessions.has(sessionId)) {
-      throw new OpenPError(`session ${sessionId} has an unsafe leftover process and cannot be reused automatically`, EXIT_CODES.sessionBusy);
+      throw new OpenPError(`session ${sessionId} has an unresolved leftover process and cannot be reused automatically`, EXIT_CODES.sessionBusy);
     }
     const existing = this.processes.get(sessionId);
     if (!existing) {

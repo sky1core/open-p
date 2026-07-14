@@ -12,7 +12,7 @@ export class OpenCodeWorkerBridge implements BackendWorkerBridge {
       throw new OpenPError('OpenCode resume requires a session id', EXIT_CODES.usage);
     }
     if (!isFirstTurn && request.sessionId && !isSafeSessionId(request.sessionId)) {
-      throw new OpenPError('unsafe OpenCode resume session id', EXIT_CODES.usage);
+      throw new OpenPError('invalid OpenCode resume session id', EXIT_CODES.usage);
     }
     return runOpenCodeTurn({
       message: request.message,

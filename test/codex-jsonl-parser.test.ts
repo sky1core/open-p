@@ -295,7 +295,7 @@ test('parseCodexOutput does not promote metadata-only JSON events to content', (
   assert.equal(parsed.sessionId, 'agent-session_01:opaque');
 });
 
-test('parseCodexOutput ignores unsafe turn.completed session ids', () => {
+test('parseCodexOutput ignores invalid turn.completed session ids', () => {
   const stdout = JSON.stringify({
     type: 'turn.completed',
     session_id: '../outside',

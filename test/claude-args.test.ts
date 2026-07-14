@@ -32,6 +32,7 @@ const OPTIONS: BackendRunOptions = {
 };
 
 const THINKING_SUMMARIES_SETTINGS = '{"showThinkingSummaries":true}';
+const CLAUDE_UNRESTRICTED_PERMISSION_MODE = 'bypassPermissions';
 
 test('builds Claude Code args without one-shot relay and with pass-through flags', () => {
   const args = buildClaudeCodeArgs(OPTIONS);
@@ -127,8 +128,8 @@ test('buildClaudeCodeArgs rejects raw Claude print and permission backend args',
     ['--output-format', 'stream-json'],
     ['--output-format=stream-json'],
     ['--include-partial-messages'],
-    ['--permission-mode', 'bypassPermissions'],
-    ['--permission-mode=bypassPermissions'],
+    ['--permission-mode', CLAUDE_UNRESTRICTED_PERMISSION_MODE],
+    [`--permission-mode=${CLAUDE_UNRESTRICTED_PERMISSION_MODE}`],
     ['--dangerously-skip-permissions'],
   ]) {
     assert.throws(
@@ -346,7 +347,7 @@ test('builds persistent Claude Code args from launch signature', () => {
     '--effort',
     'medium',
     '--permission-mode',
-    'bypassPermissions',
+    CLAUDE_UNRESTRICTED_PERMISSION_MODE,
     '--json-schema',
     schema,
     '--disallowedTools',
@@ -411,8 +412,8 @@ test('buildPersistentClaudeCodeArgs rejects raw Claude print and permission back
     ['--output-format', 'stream-json'],
     ['--output-format=stream-json'],
     ['--include-partial-messages'],
-    ['--permission-mode', 'bypassPermissions'],
-    ['--permission-mode=bypassPermissions'],
+    ['--permission-mode', CLAUDE_UNRESTRICTED_PERMISSION_MODE],
+    [`--permission-mode=${CLAUDE_UNRESTRICTED_PERMISSION_MODE}`],
     ['--dangerously-skip-permissions'],
   ]) {
     assert.throws(

@@ -6,11 +6,12 @@ import { EXIT_CODES, OpenPError } from '../src/core/errors.js';
 const BASE_OPTIONS = {
   outputLastMessagePath: '/tmp/last.txt',
 };
+const CODEX_UNRESTRICTED_MODE_FLAG = '--dangerously-bypass-approvals-and-sandbox';
 
-test('buildFirstTurnArgs does not add bypass sandbox args by default', () => {
+test('buildFirstTurnArgs does not add the unrestricted mode flag by default', () => {
   for (const executionMode of [undefined, 'default']) {
     const args = buildFirstTurnArgs('hello', { ...BASE_OPTIONS, executionMode });
-    assert.ok(!args.includes('--dangerously-bypass-approvals-and-sandbox'));
+    assert.ok(!args.includes(CODEX_UNRESTRICTED_MODE_FLAG));
     assert.ok(args.includes('exec'));
     assert.ok(args.includes('--skip-git-repo-check'));
     assert.ok(args.includes('--json'));
@@ -19,9 +20,9 @@ test('buildFirstTurnArgs does not add bypass sandbox args by default', () => {
   }
 });
 
-test('buildFirstTurnArgs maps danger-full-access to bypass sandbox args', () => {
+test('buildFirstTurnArgs maps danger-full-access to the unrestricted mode flag', () => {
   const args = buildFirstTurnArgs('hello', { ...BASE_OPTIONS, executionMode: 'danger-full-access' });
-  assert.ok(args.includes('--dangerously-bypass-approvals-and-sandbox'));
+  assert.ok(args.includes(CODEX_UNRESTRICTED_MODE_FLAG));
 });
 
 test('buildFirstTurnArgs includes model when specified', () => {
@@ -51,7 +52,7 @@ test('buildFirstTurnArgs uses sandbox mode for read-only', () => {
   assert.ok(args.includes('read-only'));
   assert.ok(args.includes('--ask-for-approval'));
   assert.ok(args.includes('never'));
-  assert.ok(!args.includes('--dangerously-bypass-approvals-and-sandbox'));
+  assert.ok(!args.includes(CODEX_UNRESTRICTED_MODE_FLAG));
 });
 
 test('buildFirstTurnArgs rejects unsupported execution modes instead of falling back to trusted tools', () => {
@@ -92,16 +93,16 @@ test('buildResumeTurnArgs uses config override for sandbox on resume', () => {
   assert.ok(approvalOverride, 'should have approval_policy config override');
 });
 
-test('buildResumeTurnArgs does not add bypass sandbox args by default', () => {
+test('buildResumeTurnArgs does not add the unrestricted mode flag by default', () => {
   const args = buildResumeTurnArgs('session-uuid', 'hello', { ...BASE_OPTIONS, executionMode: 'default' });
 
-  assert.ok(!args.includes('--dangerously-bypass-approvals-and-sandbox'));
+  assert.ok(!args.includes(CODEX_UNRESTRICTED_MODE_FLAG));
   assert.ok(args.includes('resume'));
 });
 
-test('buildResumeTurnArgs maps danger-full-access to bypass sandbox args', () => {
+test('buildResumeTurnArgs maps danger-full-access to the unrestricted mode flag', () => {
   const args = buildResumeTurnArgs('session-uuid', 'hello', { ...BASE_OPTIONS, executionMode: 'danger-full-access' });
-  assert.ok(args.includes('--dangerously-bypass-approvals-and-sandbox'));
+  assert.ok(args.includes(CODEX_UNRESTRICTED_MODE_FLAG));
 });
 
 test('buildResumeTurnArgs includes model when specified', () => {

@@ -19,17 +19,19 @@ import type { IntermediateTextSource } from '../src/core/types.js';
 import type { PtyProvider, PtySession, PtyStartOptions } from '../src/runners/types.js';
 
 const TEST_CWD = process.cwd();
-const RAW_BYPASS_WARNING_SCREEN = [
+const NATIVE_PERMISSION_MODE_LABEL = 'Bypass Permissions';
+const NATIVE_PERMISSION_FOOTER = '⏵⏵ bypass permissions on';
+const RAW_UNRESTRICTED_WARNING_SCREEN = [
   // Source: a live capture of the Claude Code permission-mode warning screen.
   '────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────',
-  '  WARNING: Claude Code running in Bypass Permissions mode',
+  `  WARNING: Claude Code running in ${NATIVE_PERMISSION_MODE_LABEL} mode`,
   '',
-  '  In Bypass Permissions mode, Claude Code will not ask for your approval before running potentially dangerous',
+  `  In ${NATIVE_PERMISSION_MODE_LABEL} mode, Claude Code will not ask for your approval before running potentially dangerous`,
   '  commands.',
   '  This mode should only be used in a sandboxed container/VM that has restricted internet access and can easily be',
   '  restored if damaged.',
   '',
-  '  By proceeding, you accept all responsibility for actions taken while running in Bypass Permissions mode.',
+  `  By proceeding, you accept all responsibility for actions taken while running in ${NATIVE_PERMISSION_MODE_LABEL} mode.`,
   '',
   '  https://code.claude.com/docs/en/security',
   '',
@@ -38,7 +40,7 @@ const RAW_BYPASS_WARNING_SCREEN = [
   '',
   '  Enter to confirm · Esc to cancel',
 ].join('\n');
-const RAW_BYPASS_MENU_CURSOR_LINE = '  ❯ 1. No, exit';
+const RAW_UNRESTRICTED_MENU_CURSOR_LINE = '  ❯ 1. No, exit';
 const RAW_READY_PLACEHOLDER_CURSOR_LINE = '❯\u00a0Try "edit output.test.ts to..."';
 
 class StartupFailureSession implements PtySession {
@@ -1054,7 +1056,7 @@ test('persistent Claude Code startup launch isolates ambient Anthropic env', asy
   assert.equal(capturedEnv?.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS, '1');
 });
 
-test('persistent Claude Code instance startup injects configured Claude config dir and unsets ambient config dir', async () => {
+test('persistent Claude Code instance startup supplies configured Claude config dir and unsets ambient config dir', async () => {
   const session = new StartupFailureSession(true, true);
   let capturedEnv: Readonly<Record<string, string>> | undefined;
   let capturedUnsetEnv: readonly string[] | undefined;
@@ -1167,7 +1169,7 @@ test('readiness uses the cursor line instead of Claude footer layout', async () 
         '────────────────────────────────',
         '❯',
         '────────────────────────────────',
-        '⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents',
+        `${NATIVE_PERMISSION_FOOTER} (shift+tab to cycle) · ← for agents`,
         'tmux focus-events off · add set -g focus-events on to ~/.tmux.conf and restart tmux',
         '                                                              82% context used',
       ].join('\n');
@@ -1223,7 +1225,7 @@ test('readiness rejects stale prompt text even when screen footer filtering woul
       return [
         '❯ previous prompt',
         '────────────────────────────────',
-        '⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents',
+        `${NATIVE_PERMISSION_FOOTER} (shift+tab to cycle) · ← for agents`,
         'tmux focus-events off · add set -g focus-events on to ~/.tmux.conf and restart tmux',
       ].join('\n');
     },
@@ -1256,10 +1258,10 @@ test('readiness fails closed on a persistent Claude Code selection menu without 
       return true;
     },
     async captureText() {
-      return RAW_BYPASS_WARNING_SCREEN;
+      return RAW_UNRESTRICTED_WARNING_SCREEN;
     },
     async captureCursorLine() {
-      return RAW_BYPASS_MENU_CURSOR_LINE;
+      return RAW_UNRESTRICTED_MENU_CURSOR_LINE;
     },
   };
 
@@ -1268,7 +1270,7 @@ test('readiness fails closed on a persistent Claude Code selection menu without 
     (error) => error instanceof OpenPError &&
       error.exitCode === EXIT_CODES.backendStartFailed &&
       /selection prompt/.test(error.message) &&
-      /WARNING: Claude Code running in Bypass Permissions mode/.test(error.message) &&
+      error.message.includes(`WARNING: Claude Code running in ${NATIVE_PERMISSION_MODE_LABEL} mode`) &&
       /❯ 1\. No, exit/.test(error.message) &&
       !/timed out waiting/.test(error.message),
   );
@@ -1295,11 +1297,11 @@ test('readiness tolerates a transient Claude Code selection menu frame', async (
       return true;
     },
     async captureText() {
-      return cursorCaptureCount === 0 ? RAW_BYPASS_WARNING_SCREEN : 'Claude Code v\n❯';
+      return cursorCaptureCount === 0 ? RAW_UNRESTRICTED_WARNING_SCREEN : 'Claude Code v\n❯';
     },
     async captureCursorLine() {
       cursorCaptureCount += 1;
-      return cursorCaptureCount === 1 ? RAW_BYPASS_MENU_CURSOR_LINE : '❯';
+      return cursorCaptureCount === 1 ? RAW_UNRESTRICTED_MENU_CURSOR_LINE : '❯';
     },
   };
 
@@ -1312,12 +1314,12 @@ test('readiness tolerates a transient Claude Code selection menu frame', async (
 test('input prompt line detection accepts only the cursor input prompt', () => {
   assert.equal(isClaudeCodeInputPromptLine('❯'), true);
   assert.equal(isClaudeCodeInputPromptLine('  ❯'), true);
-  assert.equal(isClaudeCodeInputPromptLine('⏵⏵ bypass permissions on'), false);
+  assert.equal(isClaudeCodeInputPromptLine(NATIVE_PERMISSION_FOOTER), false);
   assert.equal(isClaudeCodeInputPromptLine('82% context used'), false);
 });
 
 test('input prompt line detection rejects Claude Code startup selection menu lines', () => {
-  assert.equal(isClaudeCodeInputPromptLine(RAW_BYPASS_MENU_CURSOR_LINE), false);
+  assert.equal(isClaudeCodeInputPromptLine(RAW_UNRESTRICTED_MENU_CURSOR_LINE), false);
   assert.equal(isClaudeCodeInputPromptLine('\u001b[36m  ❯ 1. No, exit\u001b[0m'), false);
 });
 
@@ -1327,7 +1329,7 @@ test('input prompt line detection accepts ready placeholder and empty prompt lin
 });
 
 test('menu selection line detection distinguishes selection menus from prompts', () => {
-  assert.equal(isClaudeCodeMenuSelectionLine(RAW_BYPASS_MENU_CURSOR_LINE), true);
+  assert.equal(isClaudeCodeMenuSelectionLine(RAW_UNRESTRICTED_MENU_CURSOR_LINE), true);
   assert.equal(isClaudeCodeMenuSelectionLine('\u001b[36m  ❯ 2. Yes, I accept\u001b[0m'), true);
   assert.equal(isClaudeCodeMenuSelectionLine(RAW_READY_PLACEHOLDER_CURSOR_LINE), false);
   assert.equal(isClaudeCodeMenuSelectionLine('❯'), false);
@@ -1575,7 +1577,7 @@ test('persistent recovery does not submit Claude Code menu selection cursor line
   const logPath = join(dir, 'session.jsonl');
   await writeFile(logPath, '');
   const sessionId = randomUUID();
-  const session = new PreCallerLocalCommandThenTurnSession(logPath, RAW_BYPASS_MENU_CURSOR_LINE);
+  const session = new PreCallerLocalCommandThenTurnSession(logPath, RAW_UNRESTRICTED_MENU_CURSOR_LINE);
   const process = new PersistentClaudeCodeProcess(sessionId, signature(), dir, session, logPath, logPath, 0);
 
   try {
@@ -1801,7 +1803,7 @@ test('persistent recovery keeps session-log wait when the draft surface is ambig
   await writeFile(logPath, '');
   const sessionId = randomUUID();
   const session = new LostInitialSubmitStableDraftSession(logPath, '❯ prompt draft', {
-    currentLineAfterFirstSubmit: RAW_BYPASS_MENU_CURSOR_LINE,
+    currentLineAfterFirstSubmit: RAW_UNRESTRICTED_MENU_CURSOR_LINE,
   });
   const process = new PersistentClaudeCodeProcess(sessionId, signature(), dir, session, logPath, logPath, 0);
 
@@ -2124,7 +2126,7 @@ function readyScreenWith(lines: readonly string[]): string {
     '────────────────────────────────',
     '❯',
     '────────────────────────────────',
-    '⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents',
+    `${NATIVE_PERMISSION_FOOTER} (shift+tab to cycle) · ← for agents`,
     'tmux focus-events off · add set -g focus-events on to ~/.tmux.conf and restart tmux',
   ].join('\n');
 }

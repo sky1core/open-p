@@ -195,7 +195,7 @@ test('base Claude Code session log discovery ignores ambient Claude config dir',
   }
 });
 
-test('rejects unsafe session ids before building a session log path', () => {
+test('rejects invalid session ids before building a session log path', () => {
   assert.throws(
     () => resolveClaudeCodeSessionLogPath('../escape', '/tmp/open-p'),
     (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.sessionState,

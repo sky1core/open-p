@@ -257,7 +257,7 @@ test('single-turn backend launches Claude with background suppression (env + dis
   assert.equal(capturedArgs[disallowIndex + 1], 'Monitor,Workflow,AskUserQuestion');
 });
 
-test('single-turn instance backend injects configured Claude config dir at PTY launch', async () => {
+test('single-turn instance backend supplies configured Claude config dir at PTY launch', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'openp-claude-adapter-'));
   const fakeClaude = join(dir, 'claude');
   const stateRoot = join(dir, 'state');
