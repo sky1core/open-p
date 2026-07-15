@@ -1,5 +1,6 @@
 import { EXIT_CODES, OpenPError } from './errors.js';
 import { isSafeSessionId } from './session-id.js';
+import { isCanonicalUuidV4 } from './uuid.js';
 
 export interface SeedCliOptions {
   readonly backend: string;
@@ -9,6 +10,7 @@ export interface SeedCliOptions {
   readonly model: string | null;
   readonly reasoningEffort: string | null;
   readonly timeoutMs: number; // 0 = disabled (same meaning as the turn CLI)
+  readonly operationId?: string;
 }
 
 export type SeedCliSource =
@@ -26,6 +28,7 @@ const VALUE_FLAGS = new Set([
   '--model',
   '--effort',
   '--timeout',
+  '--operation-id',
 ]);
 
 export function parseSeedArgs(argv: readonly string[], knownBackends: ReadonlySet<string>): SeedCliOptions {
@@ -39,6 +42,7 @@ export function parseSeedArgs(argv: readonly string[], knownBackends: ReadonlySe
   let reasoningEffort: string | null = null;
   let timeoutMs = 0;
   let timeoutSeen = false;
+  let operationId: string | null = null;
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]!;
@@ -91,6 +95,15 @@ export function parseSeedArgs(argv: readonly string[], knownBackends: ReadonlySe
         timeoutMs = parseTimeoutMs(value);
         timeoutSeen = true;
         break;
+      case '--operation-id':
+        if (!isCanonicalUuidV4(value)) {
+          throw new OpenPError('invalid --operation-id: expected canonical UUIDv4', EXIT_CODES.usage);
+        }
+        if (operationId !== null) {
+          throw new OpenPError('duplicate --operation-id', EXIT_CODES.usage);
+        }
+        operationId = value;
+        break;
     }
   }
 
@@ -125,8 +138,20 @@ export function parseSeedArgs(argv: readonly string[], knownBackends: ReadonlySe
       EXIT_CODES.usage,
     );
   }
+  if (resume && operationId !== null) {
+    throw new OpenPError('--operation-id applies only when creating a session, not with --resume', EXIT_CODES.usage);
+  }
 
-  return { backend, source, resume, backendSessionId, model, reasoningEffort, timeoutMs };
+  return {
+    backend,
+    source,
+    resume,
+    backendSessionId,
+    model,
+    reasoningEffort,
+    timeoutMs,
+    ...(operationId !== null ? { operationId } : {}),
+  };
 }
 
 // Parity with parseTimeoutMs in cli-args.ts: seconds -> ceil(ms); 0 disables; reject non-finite or

@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { chmod, lstat, mkdir, open, readFile, readdir, rename, rmdir, unlink } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { chmod, lstat, mkdir, open, readFile, readdir, rename, rmdir, unlink, type FileHandle } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { EXIT_CODES, OpenPError } from './errors.js';
 import { ensureDurableDirectory, syncDirectory } from './fs-durability.js';
@@ -34,21 +35,34 @@ interface LockFile {
 
 export class SessionLockStore {
   private readonly stateRoot: string;
+  private readonly lockDirName: 'locks' | 'seed-operation-locks';
 
-  constructor(projectRoot: string, stateRoot: string = resolveOpenPStateRoot(projectRoot)) {
+  constructor(
+    projectRoot: string,
+    stateRoot: string = resolveOpenPStateRoot(projectRoot),
+    lockDirName: 'locks' | 'seed-operation-locks' = 'locks',
+  ) {
+    if (lockDirName !== 'locks' && lockDirName !== 'seed-operation-locks') {
+      throw new OpenPError(`invalid session lock namespace: ${String(lockDirName)}`, EXIT_CODES.sessionState);
+    }
     this.stateRoot = stateRoot;
+    this.lockDirName = lockDirName;
   }
 
   /** Permanent canonical gate. It remains non-empty after the active claim is released. */
   pathForSession(sessionId: string): string {
     assertValidSessionId(sessionId);
-    return join(this.stateRoot, 'locks', `${sessionId}.lock`);
+    return join(this.stateRoot, this.lockDirName, `${sessionId}.lock`);
   }
 
   async acquire(sessionId: string): Promise<SessionLock> {
     const gateDir = this.pathForSession(sessionId);
     const locksDir = dirname(gateDir);
-    await ensureDurableDirectory(locksDir);
+    if (this.lockDirName === 'seed-operation-locks') {
+      await ensurePrivateLockNamespace(locksDir);
+    } else {
+      await ensureDurableDirectory(locksDir);
+    }
 
     const lockFile: LockFile = {
       token: randomUUID(),
@@ -109,6 +123,67 @@ export class SessionLockStore {
         await releaseSessionLock(gateDir, ownerPath!, lockFile.token, sessionId);
       },
     };
+  }
+}
+
+async function ensurePrivateLockNamespace(path: string): Promise<void> {
+  let exists = false;
+  try {
+    const stat = await lstat(path);
+    exists = true;
+    if (!stat.isDirectory() || (stat.mode & 0o777) !== 0o700 || !ownedByCurrentUser(stat.uid)) {
+      throw new OpenPError(`invalid session lock namespace: ${path}`, EXIT_CODES.sessionState);
+    }
+  } catch (error) {
+    if (!isErrorCode(error, 'ENOENT')) {
+      if (error instanceof OpenPError) throw error;
+      throw new OpenPError(`failed to read session lock namespace: ${path}`, EXIT_CODES.sessionState);
+    }
+  }
+  if (!exists) {
+    try {
+      await ensureDurableDirectory(path, 0o700, false);
+    } catch {
+      throw new OpenPError(`failed to create session lock namespace: ${path}`, EXIT_CODES.sessionState);
+    }
+  }
+
+  let observed;
+  try {
+    observed = await lstat(path);
+  } catch {
+    throw new OpenPError(`failed to read session lock namespace: ${path}`, EXIT_CODES.sessionState);
+  }
+  if (!observed.isDirectory() || (observed.mode & 0o777) !== 0o700 || !ownedByCurrentUser(observed.uid)) {
+    throw new OpenPError(`invalid session lock namespace: ${path}`, EXIT_CODES.sessionState);
+  }
+  let handle: FileHandle;
+  try {
+    handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_DIRECTORY);
+  } catch {
+    throw new OpenPError(`invalid session lock namespace: ${path}`, EXIT_CODES.sessionState);
+  }
+  let primaryError: unknown = null;
+  try {
+    const actual = await handle.stat();
+    if (!actual.isDirectory() || actual.dev !== observed.dev || actual.ino !== observed.ino ||
+      (actual.mode & 0o777) !== 0o700 || !ownedByCurrentUser(actual.uid)) {
+      throw new OpenPError(`session lock namespace changed while being read: ${path}`, EXIT_CODES.sessionState);
+    }
+    await handle.sync();
+    await syncDirectory(dirname(path));
+  } catch (error) {
+    primaryError = error;
+    if (error instanceof OpenPError) throw error;
+    throw new OpenPError(`failed to sync session lock namespace: ${path}`, EXIT_CODES.sessionState);
+  } finally {
+    try {
+      await handle.close();
+    } catch {
+      if (primaryError === null) {
+        throw new OpenPError(`failed to close session lock namespace: ${path}`, EXIT_CODES.sessionState);
+      }
+    }
   }
 }
 

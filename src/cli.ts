@@ -43,8 +43,10 @@ import {
 import { SessionStateStore, validateSessionStateCompatibility } from './core/session-state.js';
 import { parseSeedArgs } from './core/seed-args.js';
 import { runSeed, settleProviderPending } from './core/seed.js';
+import { SeedOperationReceiptStore, formatSeedOperationStatus } from './core/seed-operation-receipt.js';
 import { runStreamJsonWorkerLines } from './core/stream-json-worker-runner.js';
 import type { AssistantEventSnapshot, TurnResult } from './core/types.js';
+import { isCanonicalUuidV4 } from './core/uuid.js';
 import { TmuxProvider } from './runners/tmux.js';
 import {
   registerBackend,
@@ -102,9 +104,13 @@ Streaming and diagnostics:
 
 Top-level commands:
   openp auth-status           Print Claude, Codex, and Kiro CLI login booleans as JSON
-  openp seed <target> --source-backend <source> --source-session <id> [--resume <id>]
-  openp seed <target> --input-ir <path>
+  openp seed <target> --source-backend <source> --source-session <id>
+             [--operation-id <uuid>]
+  openp seed <target> --resume <target-id> --source-backend <source> --source-session <id>
+  openp seed <target> --input-ir <path> [--operation-id <uuid>]
                               Convert completed native turns or strict IR into a target native session
+  openp seed-status <operation-id>
+                              Print durable seed create operation receipt status
   openp --version             Show version
   openp -h, openp --help      Show this help
 
@@ -134,6 +140,17 @@ async function main(argv: readonly string[]): Promise<number> {
   let eventLogGuardState: EventLogSignalGuardState | null = null;
   let disposeEventLogSignalGuard: (() => void) | null = null;
   try {
+    if (argv[0] === 'seed-status') {
+      if (argv.length !== 2 || !isCanonicalUuidV4(argv[1])) {
+        throw new OpenPError('seed-status requires one canonical UUIDv4 operation id', EXIT_CODES.usage);
+      }
+      const receipt = await new SeedOperationReceiptStore(cwd).load(argv[1]);
+      if (!receipt) {
+        throw new OpenPError(`seed operation not found: ${argv[1]}`, EXIT_CODES.sessionState);
+      }
+      process.stdout.write(formatSeedOperationStatus(receipt));
+      return EXIT_CODES.success;
+    }
     await registerConfiguredBackendInstances();
     if (argv[0] === 'auth-status') {
       if (argv.length !== 1) {

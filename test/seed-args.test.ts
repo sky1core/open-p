@@ -5,6 +5,7 @@ import { parseSeedArgs } from '../src/core/seed-args.js';
 
 const BACKENDS = new Set(['claude', 'codex', 'kiro', 'opencode']);
 const UUID = '11111111-1111-4111-8111-111111111111';
+const ALPHA_UUID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 
 function exitFor(argv: readonly string[]): number {
   try {
@@ -38,6 +39,40 @@ test('create mode parses external IR source', () => {
     reasoningEffort: null,
     timeoutMs: 0,
   });
+});
+
+test('create mode accepts a canonical caller operation id', () => {
+  assert.equal(parseSeedArgs([
+    'claude',
+    '--input-ir', '/tmp/ir.json',
+    '--operation-id', UUID,
+  ], BACKENDS).operationId, UUID);
+});
+
+test('operation id is create-only and must be a canonical UUID v4', () => {
+  assert.equal(exitFor([
+    'claude',
+    '--resume', UUID,
+    '--source-backend', 'codex',
+    '--source-session', UUID,
+    '--operation-id', UUID,
+  ]), 2);
+  assert.equal(exitFor([
+    'claude',
+    '--input-ir', '/tmp/ir.json',
+    '--operation-id', 'not-a-uuid',
+  ]), 2);
+  assert.equal(exitFor([
+    'claude',
+    '--input-ir', '/tmp/ir.json',
+    '--operation-id', ALPHA_UUID.toUpperCase(),
+  ]), 2);
+  assert.equal(exitFor([
+    'claude',
+    '--input-ir', '/tmp/ir.json',
+    '--operation-id', UUID,
+    '--operation-id', UUID,
+  ]), 2);
 });
 
 test('append mode parses resume session id', () => {

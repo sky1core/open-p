@@ -22,7 +22,7 @@ export interface CodexConfiguredBackendInstance {
 }
 
 const CONFIGURED_INSTANCE_BACKENDS = new Set<string>(['claude', 'codex']);
-const TOP_LEVEL_COMMANDS = new Set<string>(['auth-status', 'seed']);
+const TOP_LEVEL_COMMANDS = new Set<string>(['auth-status', 'seed', 'seed-status']);
 
 export function resolveConfiguredBackendInstancesPath(env: NodeJS.ProcessEnv = process.env): string {
   const base = resolveXdgConfigHome(env.XDG_CONFIG_HOME);

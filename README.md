@@ -242,6 +242,15 @@ Create a new target session from a native source:
 openp seed codex --source-backend claude --source-session <claude-session-id>
 ```
 
+Create with a caller operation id so stdout loss or a retry can recover the same result without a
+second target bootstrap:
+
+```bash
+openp seed codex --source-backend claude --source-session <claude-session-id> \
+  --operation-id 11111111-1111-4111-8111-111111111111
+openp seed-status 11111111-1111-4111-8111-111111111111
+```
+
 Append only the missing logical suffix to an existing target session:
 
 ```bash
@@ -284,6 +293,15 @@ Example success output:
 `status` is `created`, `updated`, or `noop`. If the source and target logical turn sequences have
 diverged, or a backend session contains compaction/rollback/revert state that cannot be converted
 safely, seeding fails closed without guessing a transcript.
+
+When `--operation-id` is present, the seed success stdout remains the same `{"seed": ...}` line.
+The operation id is a workspace-scoped permanent idempotency tombstone, not a secret. Replaying a
+succeeded native-source operation returns the durable result without reading the source backend.
+`seed-status` prints exactly one JSON line under `seedOperation`; unknown or corrupt receipts exit
+20 without stdout. If a previous owner stopped after `creating` was durably recorded but before a
+recoverable target id existed, the operation becomes `indeterminate` and exits 20 instead of making
+a second bootstrap. `seed-status` is a reserved top-level command and cannot be used as a configured
+backend instance id; rename an existing instance with that id before upgrading to 0.24.0.
 
 Before reporting success, `openp` re-reads the target through its native Reader and durably records
 the logical-to-native mapping. If an append is interrupted after the complete native suffix lands,

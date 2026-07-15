@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, realpath, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, realpath, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
@@ -13,6 +13,11 @@ import {
   SeedProvenanceStore,
 } from '../src/core/seed-provenance.js';
 import { SeedAppendJournalStore } from '../src/core/seed-append-journal.js';
+import {
+  SeedOperationLockStore,
+  SeedOperationReceiptStore,
+  createPreparedSeedOperationReceipt,
+} from '../src/core/seed-operation-receipt.js';
 import { extractClaudeNativeTurns } from '../src/backends/claude/native-reader.js';
 import { resolveClaudeCodeSessionLogPath } from '../src/backends/claude/session-log.js';
 import { extractCodexNativeTurns } from '../src/backends/codex/native-reader.js';
@@ -23,6 +28,9 @@ import {
   KIRO_SESSION_ID,
   collectChild,
   runCommand,
+  tsxLoaderArgs,
+  waitForFile,
+  withFakeCommandEnv,
 } from './helpers/cli-integration.js';
 
 const OPENCODE_SESSION_ID = 'ses_openpseedtest0000000000';
@@ -103,6 +111,12 @@ function seed(args: readonly string[], projectRoot: string, env: NodeJS.ProcessE
   const repoRoot = process.cwd();
   const tsxBin = join(repoRoot, 'node_modules', '.bin', 'tsx');
   return runCommand(tsxBin, [join(repoRoot, 'src/cli.ts'), 'seed', ...args], projectRoot, env);
+}
+
+function seedStatus(args: readonly string[], projectRoot: string, env: NodeJS.ProcessEnv) {
+  const repoRoot = process.cwd();
+  const tsxBin = join(repoRoot, 'node_modules', '.bin', 'tsx');
+  return runCommand(tsxBin, [join(repoRoot, 'src/cli.ts'), 'seed-status', ...args], projectRoot, env);
 }
 
 async function scratch(prefix: string): Promise<string> {
@@ -248,6 +262,194 @@ test('seed with an unsupported flag is exit 3', async () => {
   assert.equal(result.code, 3);
   assert.equal(result.stdout, '');
   assert.match(result.stderr, /unsupported option/);
+});
+
+test('seed-status prints one seedOperation JSON line and fails closed for unknown or corrupt receipts', async () => {
+  const projectRoot = await realpath(await scratch('openp-seed-status-'));
+  const stateRoot = await scratch('openp-seed-status-state-');
+  const operationId = randomUUID();
+  const workspaceStateRoot = resolveOpenPStateRoot(projectRoot, { XDG_STATE_HOME: stateRoot });
+  const receiptStore = new SeedOperationReceiptStore(projectRoot, workspaceStateRoot);
+  await receiptStore.create(createPreparedSeedOperationReceipt({
+    operationId,
+    request: {
+      targetBackend: 'codex',
+      source: { kind: 'external-ir', documentDigest: 'd'.repeat(64) },
+      model: null,
+      reasoningEffort: null,
+      timeoutMs: 0,
+      cwd: projectRoot,
+    },
+    source: {
+      output: { kind: 'external-ir', documentDigest: 'd'.repeat(64) },
+      turnCount: 1,
+      turnDigest: 'a'.repeat(64),
+    },
+  }));
+
+  const found = await seedStatus([operationId], projectRoot, { XDG_STATE_HOME: stateRoot });
+  assert.equal(found.code, 0, found.stderr);
+  assert.equal(found.stderr, '');
+  const lines = found.stdout.trimEnd().split('\n').filter(Boolean);
+  assert.equal(lines.length, 1);
+  const parsed = JSON.parse(lines[0]!);
+  assert.deepEqual(Object.keys(parsed), ['seedOperation']);
+  assert.equal(parsed.seedOperation.operationId, operationId);
+  assert.equal(parsed.seedOperation.phase, 'prepared');
+
+  const configHome = await scratch('openp-seed-status-config-');
+  await mkdir(join(configHome, 'open-p'), { recursive: true });
+  await writeFile(join(configHome, 'open-p', 'instances.yaml'), 'instances: [malformed');
+  const independentOfBackendConfig = await seedStatus([operationId], projectRoot, {
+    XDG_STATE_HOME: stateRoot,
+    XDG_CONFIG_HOME: configHome,
+  });
+  assert.equal(independentOfBackendConfig.code, 0, independentOfBackendConfig.stderr);
+  assert.equal(independentOfBackendConfig.stderr, '');
+  assert.equal(independentOfBackendConfig.stdout, found.stdout);
+
+  const unknown = await seedStatus([randomUUID()], projectRoot, { XDG_STATE_HOME: stateRoot });
+  assert.equal(unknown.code, 20);
+  assert.equal(unknown.stdout, '');
+  assert.match(unknown.stderr, /seed operation not found/);
+
+  await writeFile(receiptStore.pathForOperation(operationId), '{broken', { mode: 0o600 });
+  const corrupt = await seedStatus([operationId], projectRoot, { XDG_STATE_HOME: stateRoot });
+  assert.equal(corrupt.code, 20);
+  assert.equal(corrupt.stdout, '');
+  assert.match(corrupt.stderr, /invalid seed operation receipt/);
+
+  const invalid = await seedStatus(['not-a-uuid'], projectRoot, { XDG_STATE_HOME: stateRoot });
+  assert.equal(invalid.code, 2);
+  assert.equal(invalid.stdout, '');
+});
+
+test('seed operation create replay returns identical CLI stdout without launching a second target', async () => {
+  const repoRoot = process.cwd();
+  const projectRoot = await realpath(await scratch('openp-seed-operation-cli-'));
+  const stateRoot = await scratch('openp-seed-operation-cli-state-');
+  const codexHome = await scratch('openp-seed-operation-cli-codex-home-');
+  const irPath = await writeExternalIr(projectRoot);
+  const operationId = randomUUID();
+  const argsLog = join(stateRoot, 'codex-args.log');
+  const env = await withFakeCommandEnv(
+    'codex',
+    join(repoRoot, 'test', 'fixtures', 'seed', 'fake-codex-seed-bootstrap.mjs'),
+    {
+      XDG_STATE_HOME: stateRoot,
+      CODEX_HOME: codexHome,
+      OPENP_FAKE_CODEX_ARGS_LOG: argsLog,
+    },
+  );
+  const args = ['codex', '--input-ir', irPath, '--operation-id', operationId];
+
+  const first = await seed(args, projectRoot, env);
+  assert.equal(first.code, 0, first.stderr);
+  assert.equal(first.stderr, '');
+  const firstResult = parseSeedLine(first.stdout);
+  assert.equal(firstResult.target.sessionId, CODEX_SESSION_ID);
+  assert.equal(firstResult.mode, 'create');
+  assert.equal(firstResult.status, 'created');
+  const targetPath = join(codexHome, 'sessions', '2026', '05', '23', `rollout-${CODEX_SESSION_ID}.jsonl`);
+  const targetAfterFirst = await readFile(targetPath);
+
+  const replay = await seed(args, projectRoot, env);
+  assert.equal(replay.code, 0, replay.stderr);
+  assert.equal(replay.stderr, '');
+  assert.equal(replay.stdout, first.stdout);
+  assert.deepEqual(await readFile(targetPath), targetAfterFirst);
+  assert.equal((await readFile(argsLog, 'utf8')).trimEnd().split('\n').length, 1);
+
+  const status = await seedStatus([operationId], projectRoot, env);
+  assert.equal(status.code, 0, status.stderr);
+  assert.equal(status.stderr, '');
+  const operation = JSON.parse(status.stdout).seedOperation;
+  assert.equal(operation.phase, 'succeeded');
+  assert.deepEqual(operation.seed, firstResult);
+});
+
+test('seed operation recovers a SIGKILL-stale creating lock as indeterminate without another target launch', {
+  skip: process.platform === 'win32' ? 'requires POSIX process-group signals' : false,
+  timeout: 15_000,
+}, async () => {
+  const repoRoot = process.cwd();
+  const projectRoot = await realpath(await scratch('openp-seed-operation-kill-'));
+  const stateRoot = await scratch('openp-seed-operation-kill-state-');
+  const irPath = await writeExternalIr(projectRoot);
+  const operationId = randomUUID();
+  const argsLog = join(stateRoot, 'codex-args.log');
+  const readyFile = join(stateRoot, 'codex-ready.json');
+  const env = await withFakeCommandEnv(
+    'codex',
+    join(repoRoot, 'test', 'fixtures', 'seed', 'fake-codex-seed-hang.mjs'),
+    {
+      XDG_STATE_HOME: stateRoot,
+      OPENP_FAKE_CODEX_ARGS_LOG: argsLog,
+      OPENP_FAKE_CODEX_READY_FILE: readyFile,
+    },
+  );
+  const args = ['codex', '--input-ir', irPath, '--operation-id', operationId];
+  const child = spawn(process.execPath, tsxLoaderArgs(repoRoot, [
+    join(repoRoot, 'src/cli.ts'),
+    'seed',
+    ...args,
+  ]), {
+    cwd: projectRoot,
+    env: { ...process.env, ...env },
+    detached: true,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const childResult = collectChild(child);
+  const childPid = child.pid;
+  assert.notEqual(childPid, undefined);
+
+  try {
+    await waitForFile(readyFile, 10_000);
+    const workspaceStateRoot = resolveOpenPStateRoot(projectRoot, { XDG_STATE_HOME: stateRoot });
+    const receiptStore = new SeedOperationReceiptStore(projectRoot, workspaceStateRoot);
+    assert.equal((await receiptStore.load(operationId))?.phase, 'creating');
+    const operationLock = new SeedOperationLockStore(projectRoot, workspaceStateRoot);
+    const activeDir = join(operationLock.pathForOperation(operationId), 'active');
+    const ownerNames = await readdir(activeDir);
+    assert.equal(ownerNames.length, 1);
+    const ownerPath = join(activeDir, ownerNames[0]!);
+    assert.equal(JSON.parse(await readFile(ownerPath, 'utf8')).pid, childPid);
+
+    process.kill(-childPid!, 'SIGKILL');
+    const killed = await childResult;
+    assert.equal(killed.code, null);
+    assert.equal(killed.stdout, '');
+    assert.equal(child.signalCode, 'SIGKILL');
+    assert.equal((await receiptStore.load(operationId))?.phase, 'creating');
+    assert.equal(JSON.parse(await readFile(ownerPath, 'utf8')).pid, childPid);
+
+    const replay = await seed(args, projectRoot, env);
+    assert.equal(replay.code, 20);
+    assert.equal(replay.stdout, '');
+    assert.match(replay.stderr, /indeterminate/);
+    assert.equal((await readFile(argsLog, 'utf8')).trimEnd().split('\n').length, 1);
+
+    const status = await seedStatus([operationId], projectRoot, env);
+    assert.equal(status.code, 0, status.stderr);
+    const operation = JSON.parse(status.stdout).seedOperation;
+    assert.equal(operation.phase, 'indeterminate');
+    assert.equal(operation.indeterminateReason, 'creating-owner-ended-before-target-id');
+    assert.equal(operation.target, undefined);
+    assert.equal(operation.seed, undefined);
+    await assert.rejects(
+      () => readdir(activeDir),
+      (error) => typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT',
+    );
+  } finally {
+    if (childPid !== undefined && child.exitCode === null && child.signalCode === null) {
+      try {
+        process.kill(-childPid, 'SIGKILL');
+      } catch {
+        // The test-owned process group may already have exited.
+      }
+    }
+    await childResult.catch(() => undefined);
+  }
 });
 
 test('seed --history is no longer supported', async () => {

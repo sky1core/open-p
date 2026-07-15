@@ -258,7 +258,7 @@ instances:
 });
 
 test('rejects instance ids that collide with top-level commands', async () => {
-  for (const instanceId of ['seed', 'auth-status']) {
+  for (const instanceId of ['seed', 'seed-status', 'auth-status']) {
     const { env } = await writeInstancesYaml(`
 instances:
   ${JSON.stringify(instanceId)}:

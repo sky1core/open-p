@@ -353,8 +353,8 @@ export async function waitForOutput(predicate: () => boolean): Promise<void> {
   throw new Error('timed out waiting for output');
 }
 
-export async function waitForFile(path: string): Promise<void> {
-  const deadline = Date.now() + 3000;
+export async function waitForFile(path: string, timeoutMs = 3000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
       await stat(path);

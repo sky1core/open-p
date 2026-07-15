@@ -77,6 +77,8 @@ test('help exposes public streaming and reasoning effort options', async () => {
   assert.match(result.stdout, /Configured backend instances from \$\{XDG_CONFIG_HOME:-~\/\.config\}\/open-p\/instances\.yaml are selectable like built-in backends/);
   assert.match(result.stdout, /Top-level commands/);
   assert.match(result.stdout, /openp auth-status/);
+  assert.match(result.stdout, /--operation-id <uuid>/);
+  assert.match(result.stdout, /openp seed-status <operation-id>/);
   assert.match(result.stdout, /Only the options listed above are public openp options/);
   assert.equal(result.stderr, '');
   await assert.rejects(

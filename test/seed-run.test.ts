@@ -26,8 +26,13 @@ import { resolveOpenPStateRoot } from '../src/core/state-root.js';
 import { runSeed, settleProviderPending } from '../src/core/seed.js';
 import { SeedAppendJournalStore } from '../src/core/seed-append-journal.js';
 import { SeedProvenanceStore, createInitialProvenanceState, nativeSourceRefs, withAppendedProvenanceEntries } from '../src/core/seed-provenance.js';
-import { logicalTurnsFromNative } from '../src/core/seed-ir.js';
+import { contentDigest, logicalTurnsFromNative } from '../src/core/seed-ir.js';
 import { digestNativeState } from '../src/core/native-state-digest.js';
+import {
+  SeedOperationLockStore,
+  SeedOperationReceiptStore,
+  formatSeedOperationStatus,
+} from '../src/core/seed-operation-receipt.js';
 
 function nativeIds(prefix: string): NativeTurnIds {
   return {
@@ -76,10 +81,12 @@ class FakeBackend implements Backend {
     private readonly sessionId: string,
     private readonly reads: Map<string, NativeSessionReadResult>,
     private readonly runCalls: RunTurnCall[],
+    private readonly beforeRun: (() => Promise<void>) | undefined,
     private readonly afterRun: (() => Promise<void>) | undefined,
   ) {}
 
   async runTurn(request: TurnRequest, options: BackendRunOptions): Promise<TurnResult> {
+    await this.beforeRun?.();
     this.runCalls.push({ request, options });
     this.reads.set(this.sessionId, {
       backend: this.backendId,
@@ -96,6 +103,7 @@ class FakeProvider implements BackendProvider {
   readonly appended: NativeWrittenTurn[] = [];
   readonly runCalls: RunTurnCall[] = [];
   readonly readCalls: string[] = [];
+  readonly readInputs: ReadNativeSessionInput[] = [];
   preparedCount = 0;
   commitCount = 0;
   cleanupCount = 0;
@@ -108,6 +116,7 @@ class FakeProvider implements BackendProvider {
     private readonly corruptWrittenTurn = false,
     private readonly hooks: {
       readonly afterRun?: () => Promise<void>;
+      readonly beforeRun?: () => Promise<void>;
       readonly failAppend?: OpenPError;
       readonly afterAppend?: () => Promise<void>;
       readonly beforeNativeMutation?: () => Promise<void>;
@@ -120,19 +129,21 @@ class FakeProvider implements BackendProvider {
         input: ReadNativeSessionInput,
       ) => NativeSessionReadResult;
       readonly hasCleanupCapability?: boolean;
+      readonly beforeCleanup?: () => Promise<void>;
       readonly preparedCleanupToken?: string | null;
     } = {},
   ) {
     this.descriptor = { ...CODEX_DESCRIPTOR, id, label: id };
     if (hooks.postWriteCleanupFailure || hooks.hasCleanupCapability) {
       this.cleanupPreparedSessionHistoryAppend = async () => {
+        await hooks.beforeCleanup?.();
         this.cleanupCount += 1;
       };
     }
   }
 
   createBackend(): Backend {
-    return new FakeBackend(this.id, this.createSessionId, this.reads, this.runCalls, this.hooks.afterRun);
+    return new FakeBackend(this.id, this.createSessionId, this.reads, this.runCalls, this.hooks.beforeRun, this.hooks.afterRun);
   }
 
   createWorkerBridge(): BackendWorkerBridge {
@@ -145,6 +156,7 @@ class FakeProvider implements BackendProvider {
 
   async readNativeSession(input: ReadNativeSessionInput): Promise<NativeSessionReadResult> {
     this.readCalls.push(input.sessionId);
+    this.readInputs.push(input);
     if (input.mode === 'settlement' && this.hooks.settlementReadFailure) {
       throw this.hooks.settlementReadFailure;
     }
@@ -1850,5 +1862,641 @@ test('create mode final provenance failure is exactly settled on the next access
     assert.equal(reads.get('created-session')?.turns.length, 2);
     assert.equal((await provenanceStore.load('target', 'created-session'))?.entries.length, 1);
     assert.equal(await journalStore.load('target', 'created-session'), null);
+  });
+});
+
+test('operation create records creating before bootstrap and target-created before native mutation', async () => {
+  await withStateRoot(async (projectRoot, stateRoot) => {
+    const sensitiveExternalId = 'raw external id REDMOON';
+    const sensitiveUser = 'codename REDMOON user text';
+    const sensitiveAssistant = 'codename REDMOON assistant text';
+    const operationId = randomUUID();
+    const reads = new Map<string, NativeSessionReadResult>();
+    const receiptStore = new SeedOperationReceiptStore(projectRoot, stateRoot);
+    let sawCreatingBeforeBootstrap = false;
+    let sawTargetCreatedBeforeMutation = false;
+    const provider = new FakeProvider('target', reads, 'created-session', false, {
+      beforeRun: async () => {
+        const receipt = await receiptStore.load(operationId);
+        assert.equal(receipt?.phase, 'creating');
+        assert.equal(receipt.source.turnCount, 1);
+        assert.equal(receipt.target, undefined);
+        assert.equal(reads.has('created-session'), false);
+        sawCreatingBeforeBootstrap = true;
+      },
+      beforeNativeMutation: async () => {
+        const receipt = await receiptStore.load(operationId);
+        const pending = await new SeedAppendJournalStore(projectRoot, stateRoot).load('target', 'created-session');
+        assert.equal(receipt?.phase, 'target-created');
+        assert.equal(receipt.target?.sessionId, 'created-session');
+        assert.equal(receipt.target?.bootstrap[0]?.contentDigest, contentDigest('Reply with only: OK', 'OK'));
+        assert.equal(receipt.target?.nativeStateDigest, fakeNativeStateDigest([nativeTurn('bootstrap', 'Reply with only: OK', 'OK')]));
+        assert.notEqual(pending?.operationId, operationId, 'caller operation id must not be reused as append journal operationId');
+        sawTargetCreatedBeforeMutation = true;
+      },
+    });
+    const irPath = join(projectRoot, 'secret-input-ir-path.json');
+    await writeFile(irPath, JSON.stringify({
+      schemaVersion: 1,
+      turns: [{
+        id: sensitiveExternalId,
+        user: { text: sensitiveUser },
+        assistant: { text: sensitiveAssistant },
+      }],
+    }));
+
+    const seed = await runSeed({
+      options: {
+        backend: 'target',
+        source: { kind: 'external-ir', path: irPath },
+        resume: false,
+        backendSessionId: null,
+        model: 'bootstrap-model',
+        reasoningEffort: 'high',
+        timeoutMs: 5000,
+        operationId,
+      },
+      provider,
+      sourceProvider: null,
+      createBackend: () => provider.createBackend(),
+      cwd: projectRoot,
+      debugLog: null,
+      signal: new AbortController().signal,
+      forceSignal: new AbortController().signal,
+      killSignal: new AbortController().signal,
+    });
+
+    assert.equal(sawCreatingBeforeBootstrap, true);
+    assert.equal(sawTargetCreatedBeforeMutation, true);
+    assert.equal(seed.status, 'created');
+    const receipt = await receiptStore.load(operationId);
+    assert.equal(receipt?.phase, 'succeeded');
+    assert.deepEqual(receipt?.result, seed);
+    assert.equal(provider.readInputs.some((input) => input.sessionId === 'created-session' && input.mode === 'settlement'), true);
+    const persisted = await readFile(receiptStore.pathForOperation(operationId), 'utf8');
+    const status = formatSeedOperationStatus(receipt!);
+    for (const forbidden of [sensitiveExternalId, sensitiveUser, sensitiveAssistant, irPath]) {
+      assert.equal(persisted.includes(forbidden), false, `receipt leaked ${forbidden}`);
+      assert.equal(status.includes(forbidden), false, `status leaked ${forbidden}`);
+    }
+  });
+});
+
+test('succeeded operation replay returns the durable result without source read or bootstrap', async () => {
+  await withStateRoot(async (projectRoot) => {
+    const operationId = randomUUID();
+    const sourceRead: NativeSessionReadResult = {
+      backend: 'source',
+      sessionId: 'source-session',
+      turns: [nativeTurn('source-1')],
+    };
+    const reads = new Map<string, NativeSessionReadResult>([['source-session', sourceRead]]);
+    const firstTarget = new FakeProvider('target', reads, 'created-session');
+    const firstSource = new FakeProvider('source', reads);
+    const first = await runSeed({
+      options: {
+        backend: 'target',
+        source: { kind: 'native', backend: 'source', sessionId: 'source-session' },
+        resume: false,
+        backendSessionId: null,
+        model: null,
+        reasoningEffort: null,
+        timeoutMs: 0,
+        operationId,
+      },
+      provider: firstTarget,
+      sourceProvider: firstSource,
+      createBackend: () => firstTarget.createBackend(),
+      cwd: projectRoot,
+      debugLog: null,
+      signal: new AbortController().signal,
+      forceSignal: new AbortController().signal,
+      killSignal: new AbortController().signal,
+    });
+
+    const replaySource = new FakeProvider('source', new Map());
+    const replayTarget = new FakeProvider('target', reads, 'unused-created-session');
+    const replayed = await runSeed({
+      options: {
+        backend: 'target',
+        source: { kind: 'native', backend: 'source', sessionId: 'source-session' },
+        resume: false,
+        backendSessionId: null,
+        model: null,
+        reasoningEffort: null,
+        timeoutMs: 0,
+        operationId,
+      },
+      provider: replayTarget,
+      sourceProvider: replaySource,
+      createBackend: () => replayTarget.createBackend(),
+      cwd: projectRoot,
+      debugLog: null,
+      signal: new AbortController().signal,
+      forceSignal: new AbortController().signal,
+      killSignal: new AbortController().signal,
+    });
+
+    assert.deepEqual(replayed, first);
+    assert.deepEqual(replaySource.readCalls, []);
+    assert.deepEqual(replayTarget.runCalls, []);
+    assert.equal(replayTarget.commitCount, 0);
+  });
+});
+
+test('target-created operation replay ignores a later source suffix and appends only the recorded prefix', async () => {
+  await withStateRoot(async (projectRoot, stateRoot) => {
+    const operationId = randomUUID();
+    const sourceRead: NativeSessionReadResult = {
+      backend: 'source',
+      sessionId: 'source-session',
+      turns: [nativeTurn('source-1')],
+    };
+    const reads = new Map<string, NativeSessionReadResult>([['source-session', sourceRead]]);
+    const failingTarget = new FakeProvider('target', reads, 'created-session', false, {
+      failAppend: new OpenPError('stop after target-created receipt', EXIT_CODES.sessionState),
+    });
+    const sourceProvider = new FakeProvider('source', reads);
+
+    await assert.rejects(() => runSeed({
+      options: {
+        backend: 'target',
+        source: { kind: 'native', backend: 'source', sessionId: 'source-session' },
+        resume: false,
+        backendSessionId: null,
+        model: null,
+        reasoningEffort: null,
+        timeoutMs: 0,
+        operationId,
+      },
+      provider: failingTarget,
+      sourceProvider,
+      createBackend: () => failingTarget.createBackend(),
+      cwd: projectRoot,
+      debugLog: null,
+      signal: new AbortController().signal,
+      forceSignal: new AbortController().signal,
+      killSignal: new AbortController().signal,
+    }));
+    assert.equal((await new SeedOperationReceiptStore(projectRoot, stateRoot).load(operationId))?.phase, 'target-created');
+    reads.set('source-session', {
+      ...sourceRead,
+      turns: [...sourceRead.turns, nativeTurn('source-2')],
+    });
+
+    const replayTarget = new FakeProvider('target', reads, 'unused-created-session');
+    const replayed = await runSeed({
+      options: {
+        backend: 'target',
+        source: { kind: 'native', backend: 'source', sessionId: 'source-session' },
+        resume: false,
+        backendSessionId: null,
+        model: null,
+        reasoningEffort: null,
+        timeoutMs: 0,
+        operationId,
+      },
+      provider: replayTarget,
+      sourceProvider: new FakeProvider('source', reads),
+      createBackend: () => replayTarget.createBackend(),
+      cwd: projectRoot,
+      debugLog: null,
+      signal: new AbortController().signal,
+      forceSignal: new AbortController().signal,
+      killSignal: new AbortController().signal,
+    });
+
+    assert.equal(replayed.status, 'created');
+    assert.equal(replayed.appendedTurns, 1);
+    assert.equal(replayed.target.sessionId, 'created-session');
+    assert.equal(replayTarget.commitCount, 1);
+    assert.deepEqual(replayTarget.appended.map((turn) => turn.logicalId), [logicalTurnsFromNative(sourceRead)[0]!.logicalId]);
+    assert.equal(reads.get('created-session')?.turns.length, 2);
+    assert.deepEqual(replayTarget.runCalls, []);
+  });
+});
+
+test('operation replay fails closed when the recorded source prefix drifts', async () => {
+  await withStateRoot(async (projectRoot) => {
+    const operationId = randomUUID();
+    const sourceRead: NativeSessionReadResult = {
+      backend: 'source',
+      sessionId: 'source-session',
+      turns: [nativeTurn('source-1')],
+    };
+    const reads = new Map<string, NativeSessionReadResult>([['source-session', sourceRead]]);
+    const failingTarget = new FakeProvider('target', reads, 'created-session', false, {
+      failAppend: new OpenPError('stop after target-created receipt', EXIT_CODES.sessionState),
+    });
+    const sourceProvider = new FakeProvider('source', reads);
+    await assert.rejects(() => runSeed({
+      options: {
+        backend: 'target',
+        source: { kind: 'native', backend: 'source', sessionId: 'source-session' },
+        resume: false,
+        backendSessionId: null,
+        model: null,
+        reasoningEffort: null,
+        timeoutMs: 0,
+        operationId,
+      },
+      provider: failingTarget,
+      sourceProvider,
+      createBackend: () => failingTarget.createBackend(),
+      cwd: projectRoot,
+      debugLog: null,
+      signal: new AbortController().signal,
+      forceSignal: new AbortController().signal,
+      killSignal: new AbortController().signal,
+    }));
+    reads.set('source-session', {
+      ...sourceRead,
+      turns: [nativeTurn('source-1', 'changed user', 'changed assistant')],
+    });
+    const replayTarget = new FakeProvider('target', reads, 'unused-created-session');
+
+    await assert.rejects(
+      () => runSeed({
+        options: {
+          backend: 'target',
+          source: { kind: 'native', backend: 'source', sessionId: 'source-session' },
+          resume: false,
+          backendSessionId: null,
+          model: null,
+          reasoningEffort: null,
+          timeoutMs: 0,
+          operationId,
+        },
+        provider: replayTarget,
+        sourceProvider: new FakeProvider('source', reads),
+        createBackend: () => replayTarget.createBackend(),
+        cwd: projectRoot,
+        debugLog: null,
+        signal: new AbortController().signal,
+        forceSignal: new AbortController().signal,
+        killSignal: new AbortController().signal,
+      }),
+      (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.sessionState &&
+        error.details?.conflict === true,
+    );
+    assert.deepEqual(replayTarget.runCalls, []);
+    assert.equal(replayTarget.commitCount, 0);
+  });
+});
+
+test('target-created operation replay rejects bootstrap native-state drift before append', async () => {
+  await withStateRoot(async (projectRoot) => {
+    const operationId = randomUUID();
+    const reads = new Map<string, NativeSessionReadResult>();
+    const failingTarget = new FakeProvider('target', reads, 'created-session', false, {
+      failAppend: new OpenPError('stop after target-created receipt', EXIT_CODES.sessionState),
+    });
+    const irPath = join(projectRoot, 'ir.json');
+    await writeFile(irPath, JSON.stringify({
+      schemaVersion: 1,
+      turns: [{ id: 'one', user: { text: 'remember one' }, assistant: { text: 'noted one' } }],
+    }));
+    const options = {
+      backend: 'target',
+      source: { kind: 'external-ir' as const, path: irPath },
+      resume: false,
+      backendSessionId: null,
+      model: null,
+      reasoningEffort: null,
+      timeoutMs: 0,
+      operationId,
+    };
+
+    await assert.rejects(() => runSeed({
+      options,
+      provider: failingTarget,
+      sourceProvider: null,
+      createBackend: () => failingTarget.createBackend(),
+      cwd: projectRoot,
+      debugLog: null,
+      signal: new AbortController().signal,
+      forceSignal: new AbortController().signal,
+      killSignal: new AbortController().signal,
+    }));
+
+    const replayTarget = new FakeProvider('target', reads, 'unused-created-session', false, {
+      transformNativeRead: (read, input) => input.sessionId === 'created-session'
+        ? { ...read, nativeStateDigest: 'f'.repeat(64) }
+        : read,
+    });
+    await assert.rejects(
+      () => runSeed({
+        options,
+        provider: replayTarget,
+        sourceProvider: null,
+        createBackend: () => replayTarget.createBackend(),
+        cwd: projectRoot,
+        debugLog: null,
+        signal: new AbortController().signal,
+        forceSignal: new AbortController().signal,
+        killSignal: new AbortController().signal,
+      }),
+      (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.protocolViolation &&
+        /bootstrap native state differs/.test(error.message),
+    );
+    assert.deepEqual(replayTarget.runCalls, []);
+    assert.equal(replayTarget.commitCount, 0);
+  });
+});
+
+test('creating operation replay becomes indeterminate without a second bootstrap', async () => {
+  await withStateRoot(async (projectRoot, stateRoot) => {
+    const operationId = randomUUID();
+    const reads = new Map<string, NativeSessionReadResult>();
+    const provider = new FakeProvider('target', reads, 'created-session', false, {
+      beforeRun: async () => {
+        throw new OpenPError('simulated crash before bootstrap', EXIT_CODES.sessionState);
+      },
+    });
+    const irPath = join(projectRoot, 'ir.json');
+    await writeFile(irPath, JSON.stringify({
+      schemaVersion: 1,
+      turns: [{ id: 'one', user: { text: 'remember one' }, assistant: { text: 'noted one' } }],
+    }));
+
+    await assert.rejects(() => runSeed({
+      options: {
+        backend: 'target',
+        source: { kind: 'external-ir', path: irPath },
+        resume: false,
+        backendSessionId: null,
+        model: null,
+        reasoningEffort: null,
+        timeoutMs: 0,
+        operationId,
+      },
+      provider,
+      sourceProvider: null,
+      createBackend: () => provider.createBackend(),
+      cwd: projectRoot,
+      debugLog: null,
+      signal: new AbortController().signal,
+      forceSignal: new AbortController().signal,
+      killSignal: new AbortController().signal,
+    }));
+    assert.equal((await new SeedOperationReceiptStore(projectRoot, stateRoot).load(operationId))?.phase, 'creating');
+    await writeFile(irPath, '{invalidated source');
+
+    const replayTarget = new FakeProvider('target', reads, 'should-not-bootstrap');
+    let createCalls = 0;
+    await assert.rejects(
+      () => runSeed({
+        options: {
+          backend: 'target',
+          source: { kind: 'external-ir', path: irPath },
+          resume: false,
+          backendSessionId: null,
+          model: null,
+          reasoningEffort: null,
+          timeoutMs: 0,
+          operationId,
+        },
+        provider: replayTarget,
+        sourceProvider: null,
+        createBackend: () => {
+          createCalls += 1;
+          return replayTarget.createBackend();
+        },
+        cwd: projectRoot,
+        debugLog: null,
+        signal: new AbortController().signal,
+        forceSignal: new AbortController().signal,
+        killSignal: new AbortController().signal,
+      }),
+      (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.sessionState,
+    );
+
+    assert.equal(createCalls, 0);
+    assert.deepEqual(replayTarget.runCalls, []);
+    assert.equal((await new SeedOperationReceiptStore(projectRoot, stateRoot).load(operationId))?.phase, 'indeterminate');
+    assert.equal(reads.has('should-not-bootstrap'), false);
+  });
+});
+
+test('operation and target locks remain held through pre-terminal settlement', async () => {
+  await withStateRoot(async (projectRoot, stateRoot) => {
+    const operationId = randomUUID();
+    const reads = new Map<string, NativeSessionReadResult>();
+    let enteredCleanup!: () => void;
+    let releaseCleanup!: () => void;
+    const cleanupEntered = new Promise<void>((resolve) => {
+      enteredCleanup = resolve;
+    });
+    const cleanupRelease = new Promise<void>((resolve) => {
+      releaseCleanup = resolve;
+    });
+    let shouldBlock = true;
+    const provider = new FakeProvider('target', reads, 'created-session', false, {
+      hasCleanupCapability: true,
+      beforeCleanup: async () => {
+        if (!shouldBlock) return;
+        shouldBlock = false;
+        enteredCleanup();
+        await cleanupRelease;
+      },
+    });
+    const irPath = join(projectRoot, 'ir.json');
+    await writeFile(irPath, JSON.stringify({
+      schemaVersion: 1,
+      turns: [{ id: 'one', user: { text: 'remember one' }, assistant: { text: 'noted one' } }],
+    }));
+    const run = () => runSeed({
+      options: {
+        backend: 'target',
+        source: { kind: 'external-ir' as const, path: irPath },
+        resume: false,
+        backendSessionId: null,
+        model: null,
+        reasoningEffort: null,
+        timeoutMs: 0,
+        operationId,
+      },
+      provider,
+      sourceProvider: null,
+      createBackend: () => provider.createBackend(),
+      cwd: projectRoot,
+      debugLog: null,
+      signal: new AbortController().signal,
+      forceSignal: new AbortController().signal,
+      killSignal: new AbortController().signal,
+    });
+
+    const firstPromise = run();
+    await cleanupEntered;
+    try {
+      await assert.rejects(
+        run,
+        (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.sessionBusy,
+      );
+      await assert.rejects(
+        () => new SessionLockStore(projectRoot, stateRoot).acquire('created-session'),
+        (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.sessionBusy,
+      );
+      await assert.rejects(
+        () => new SeedOperationLockStore(projectRoot, stateRoot).acquire(operationId),
+        (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.sessionBusy,
+      );
+      assert.equal(provider.runCalls.length, 1);
+      assert.equal(provider.commitCount, 1);
+      assert.equal((await new SeedOperationReceiptStore(projectRoot, stateRoot).load(operationId))?.phase, 'target-created');
+      assert.notEqual(await new SeedAppendJournalStore(projectRoot, stateRoot).load('target', 'created-session'), null);
+    } finally {
+      releaseCleanup();
+    }
+    const first = await firstPromise;
+    const replayed = await run();
+    assert.deepEqual(replayed, first);
+    assert.equal(first.target.sessionId, 'created-session');
+    assert.equal(provider.runCalls.length, 1);
+    assert.equal(provider.commitCount, 1);
+    assert.equal(provider.cleanupCount, 1);
+    assert.equal((await new SeedOperationReceiptStore(projectRoot, stateRoot).load(operationId))?.phase, 'succeeded');
+  });
+});
+
+test('target-created operation replay settles a pending committed suffix and returns original create result', async () => {
+  await withStateRoot(async (projectRoot, stateRoot) => {
+    const operationId = randomUUID();
+    const sourceRead: NativeSessionReadResult = {
+      backend: 'source',
+      sessionId: 'source-session',
+      turns: [nativeTurn('source-1')],
+    };
+    const reads = new Map<string, NativeSessionReadResult>([['source-session', sourceRead]]);
+    const firstTarget = new FakeProvider('target', reads, 'created-session', false, {
+      afterAppend: async () => {
+        throw new OpenPError('simulated crash after native commit', EXIT_CODES.sessionState);
+      },
+    });
+    const sourceProvider = new FakeProvider('source', reads);
+    await assert.rejects(() => runSeed({
+      options: {
+        backend: 'target',
+        source: { kind: 'native', backend: 'source', sessionId: 'source-session' },
+        resume: false,
+        backendSessionId: null,
+        model: null,
+        reasoningEffort: null,
+        timeoutMs: 0,
+        operationId,
+      },
+      provider: firstTarget,
+      sourceProvider,
+      createBackend: () => firstTarget.createBackend(),
+      cwd: projectRoot,
+      debugLog: null,
+      signal: new AbortController().signal,
+      forceSignal: new AbortController().signal,
+      killSignal: new AbortController().signal,
+    }));
+    assert.equal(firstTarget.commitCount, 1);
+    assert.equal((await new SeedOperationReceiptStore(projectRoot, stateRoot).load(operationId))?.phase, 'target-created');
+    assert.notEqual(await new SeedAppendJournalStore(projectRoot, stateRoot).load('target', 'created-session'), null);
+
+    const replayTarget = new FakeProvider('target', reads, 'unused-created-session');
+    const replayed = await runSeed({
+      options: {
+        backend: 'target',
+        source: { kind: 'native', backend: 'source', sessionId: 'source-session' },
+        resume: false,
+        backendSessionId: null,
+        model: null,
+        reasoningEffort: null,
+        timeoutMs: 0,
+        operationId,
+      },
+      provider: replayTarget,
+      sourceProvider: new FakeProvider('source', reads),
+      createBackend: () => replayTarget.createBackend(),
+      cwd: projectRoot,
+      debugLog: null,
+      signal: new AbortController().signal,
+      forceSignal: new AbortController().signal,
+      killSignal: new AbortController().signal,
+    });
+
+    assert.equal(replayed.status, 'created');
+    assert.equal(replayed.appendedTurns, 1);
+    assert.equal(replayed.target.sessionId, 'created-session');
+    assert.deepEqual(replayTarget.runCalls, []);
+    assert.equal(replayTarget.commitCount, 0);
+    assert.equal(reads.get('created-session')?.turns.length, 2);
+    assert.equal(await new SeedAppendJournalStore(projectRoot, stateRoot).load('target', 'created-session'), null);
+    assert.equal((await new SeedOperationReceiptStore(projectRoot, stateRoot).load(operationId))?.phase, 'succeeded');
+  });
+});
+
+test('target-created replay recovers a completed operation after later ordinary target turns', async () => {
+  await withStateRoot(async (projectRoot, stateRoot) => {
+    const operationId = randomUUID();
+    const reads = new Map<string, NativeSessionReadResult>();
+    const firstTarget = new FakeProvider('target', reads, 'created-session', false, {
+      afterAppend: async () => {
+        throw new OpenPError('simulated crash after native commit', EXIT_CODES.sessionState);
+      },
+    });
+    const irPath = join(projectRoot, 'ir.json');
+    await writeFile(irPath, JSON.stringify({
+      schemaVersion: 1,
+      turns: [{ id: 'one', user: { text: 'remember one' }, assistant: { text: 'noted one' } }],
+    }));
+    const options = {
+      backend: 'target',
+      source: { kind: 'external-ir' as const, path: irPath },
+      resume: false,
+      backendSessionId: null,
+      model: null,
+      reasoningEffort: null,
+      timeoutMs: 0,
+      operationId,
+    };
+
+    await assert.rejects(() => runSeed({
+      options,
+      provider: firstTarget,
+      sourceProvider: null,
+      createBackend: () => firstTarget.createBackend(),
+      cwd: projectRoot,
+      debugLog: null,
+      signal: new AbortController().signal,
+      forceSignal: new AbortController().signal,
+      killSignal: new AbortController().signal,
+    }));
+    assert.equal((await new SeedOperationReceiptStore(projectRoot, stateRoot).load(operationId))?.phase, 'target-created');
+
+    await settleProviderPending(firstTarget, 'created-session', projectRoot, new AbortController().signal);
+    assert.equal(await new SeedAppendJournalStore(projectRoot, stateRoot).load('target', 'created-session'), null);
+    const settled = reads.get('created-session');
+    assert.ok(settled);
+    reads.set('created-session', {
+      ...settled,
+      turns: [...settled.turns, nativeTurn('later-ordinary')],
+    });
+
+    const replayTarget = new FakeProvider('target', reads, 'must-not-bootstrap');
+    const replayed = await runSeed({
+      options,
+      provider: replayTarget,
+      sourceProvider: null,
+      createBackend: () => replayTarget.createBackend(),
+      cwd: projectRoot,
+      debugLog: null,
+      signal: new AbortController().signal,
+      forceSignal: new AbortController().signal,
+      killSignal: new AbortController().signal,
+    });
+
+    assert.equal(replayed.status, 'created');
+    assert.equal(replayed.target.sessionId, 'created-session');
+    assert.equal(replayed.appendedTurns, 1);
+    assert.deepEqual(replayTarget.runCalls, []);
+    assert.equal(replayTarget.commitCount, 0);
+    assert.equal(reads.get('created-session')?.turns.length, 3);
+    assert.equal((await new SeedOperationReceiptStore(projectRoot, stateRoot).load(operationId))?.phase, 'succeeded');
   });
 });

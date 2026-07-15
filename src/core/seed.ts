@@ -19,9 +19,11 @@ import { isCanonicalUuidV4 } from './uuid.js';
 import {
   SeedAppendJournalStore,
   createSeedAppendJournal,
+  provenanceStructureDigest,
   settlePendingSeedAppend,
 } from './seed-append-journal.js';
-import { loadExternalSeedIrFile, logicalTurnsFromExternalIr, toSeedWriteTurns, type LogicalSeedTurn } from './seed-ir.js';
+import { canonicalJson } from './seed-append-journal-schema.js';
+import { contentDigest, loadExternalSeedIrFile, logicalTurnsFromExternalIr, toSeedWriteTurns, type LogicalSeedTurn } from './seed-ir.js';
 import {
   SeedProvenanceStore,
   createInitialProvenanceState,
@@ -33,6 +35,19 @@ import {
   type SeedProvenanceSource,
   type SeedProvenanceState,
 } from './seed-provenance.js';
+import {
+  SeedOperationLockStore,
+  SeedOperationReceiptStore,
+  assertSeedOperationRequest,
+  assertSeedOperationSourcePrefix,
+  createPreparedSeedOperationReceipt,
+  createSeedOperationSourceSnapshot,
+  createSeedOperationTargetEvidence,
+  nextSeedOperationPhase,
+  seedOperationRequestFromSource,
+  seedOperationRequestMatchesOptions,
+  type SeedOperationReceipt,
+} from './seed-operation-receipt.js';
 import type { SeedCliOptions } from './seed-args.js';
 import { SessionLockStore } from './session-lock.js';
 import { SessionStateStore, type PendingSeedAppendSessionState } from './session-state.js';
@@ -69,7 +84,7 @@ export type SeedResultSource =
 
 type AppendSessionHistory = (input: AppendSessionHistoryInput) => Promise<AppendSessionHistoryResult>;
 
-interface ResolvedSeedSource {
+export interface ResolvedSeedSource {
   readonly output: SeedResultSource;
   readonly turns: readonly LogicalSeedTurn[];
   readonly refs: readonly SeedProvenanceSource[];
@@ -86,11 +101,108 @@ export async function runSeed(input: SeedRunInput): Promise<SeedResult> {
   if (isSameNativeAppend(input)) {
     return runSameNativeNoopSeed(input);
   }
+  if (input.options.operationId !== undefined) {
+    if (input.options.resume) {
+      throw new OpenPError('--operation-id applies only when creating a session, not with --resume', EXIT_CODES.usage);
+    }
+    return runCreateSeedWithOperation(input, appendSessionHistory);
+  }
   const source = await resolveSeedSource(input);
   assertSeedSourceHasPortableTurns(source.turns);
   return input.options.resume
     ? runAppendSeed(input, appendSessionHistory, source)
     : runCreateSeed(input, appendSessionHistory, source);
+}
+
+async function runCreateSeedWithOperation(
+  input: SeedRunInput,
+  appendSessionHistory: AppendSessionHistory,
+): Promise<SeedResult> {
+  const operationId = input.options.operationId;
+  if (!operationId) {
+    throw new OpenPError('seed operation id is required', EXIT_CODES.usage);
+  }
+  const operationLock = await new SeedOperationLockStore(input.cwd).acquire(operationId);
+  let primaryError: unknown = null;
+  try {
+    const store = new SeedOperationReceiptStore(input.cwd);
+    const existing = await store.load(operationId);
+    if (existing && !seedOperationRequestMatchesOptions(existing.request, input.options, input.cwd)) {
+      throw new OpenPError('seed operation id conflicts with a different semantic request', EXIT_CODES.sessionState, {
+        details: { conflict: true },
+      });
+    }
+    if (existing?.phase === 'succeeded' &&
+      existing.request.source.kind === 'native') {
+      return await recoverSucceededSeedOperation(input, existing);
+    }
+    if (existing?.phase === 'creating') {
+      const indeterminate = nextSeedOperationPhase(existing, 'indeterminate', {
+        indeterminateReason: 'creating-owner-ended-before-target-id',
+      });
+      await store.update(existing, indeterminate);
+      throw indeterminateSeedOperationError();
+    }
+    if (existing?.phase === 'indeterminate') {
+      throw indeterminateSeedOperationError();
+    }
+    const resolvedSource = await resolveSeedSource(input);
+    assertSeedSourceHasPortableTurns(resolvedSource.turns);
+    const request = seedOperationRequestFromSource(input.options, input.cwd, resolvedSource);
+    const sourceSnapshot = createSeedOperationSourceSnapshot(resolvedSource);
+    let receipt: SeedOperationReceipt;
+    let source = resolvedSource;
+    if (!existing) {
+      receipt = createPreparedSeedOperationReceipt({ operationId, request, source: sourceSnapshot });
+      await store.create(receipt);
+    } else {
+      assertSeedOperationRequest(existing, request);
+      source = assertSeedOperationSourcePrefix(existing, resolvedSource);
+      receipt = existing;
+    }
+
+    switch (receipt.phase) {
+      case 'prepared':
+        return await createSeedFromPreparedOperation(input, appendSessionHistory, source, store, receipt);
+      case 'target-created':
+        return await recoverTargetCreatedSeedOperation(input, appendSessionHistory, source, store, receipt);
+      case 'succeeded':
+        return await recoverSucceededSeedOperation(input, receipt);
+      case 'creating':
+      case 'indeterminate':
+        throw indeterminateSeedOperationError();
+    }
+    throw new OpenPError('seed operation receipt has an unsupported phase', EXIT_CODES.sessionState);
+  } catch (error) {
+    primaryError = error;
+    throw error;
+  } finally {
+    try {
+      await operationLock.release();
+    } catch (releaseError) {
+      if (primaryError === null) {
+        throw releaseError;
+      }
+    }
+  }
+}
+
+async function recoverSucceededSeedOperation(
+  _input: SeedRunInput,
+  receipt: SeedOperationReceipt,
+): Promise<SeedResult> {
+  const result = receipt.result;
+  if (!receipt.target || !result) {
+    throw new OpenPError('succeeded seed operation receipt is incomplete', EXIT_CODES.sessionState);
+  }
+  return result;
+}
+
+function indeterminateSeedOperationError(): OpenPError {
+  return new OpenPError(
+    'seed operation is indeterminate after a prior creating phase; target session id cannot be recovered',
+    EXIT_CODES.sessionState,
+  );
 }
 
 async function runSameNativeNoopSeed(input: SeedRunInput): Promise<SeedResult> {
@@ -133,6 +245,150 @@ async function runCreateSeed(
   appendSessionHistory: AppendSessionHistory,
   source: ResolvedSeedSource,
 ): Promise<SeedResult> {
+  const sessionId = await bootstrapSeedTarget(input);
+  const provenanceStore = new SeedProvenanceStore(input.cwd);
+  try {
+    await withSessionLock(input, sessionId, async () => {
+      const { bootstrapRead, bootstrapIds, initialProvenance } =
+        await saveInitialTargetProvenance(input, sessionId, provenanceStore);
+      await appendTurns({
+        input,
+        sessionId,
+        appendSessionHistory,
+        turns: source.turns,
+        sourceRefs: source.refs,
+        before: bootstrapRead,
+        provenance: initialProvenance,
+        bootstrap: bootstrapIds,
+      });
+    });
+  } catch (error) {
+    throw augmentCreateAppendFailure(error, input, sessionId);
+  }
+  return {
+    source: source.output,
+    target: { backend: input.provider.id, sessionId },
+    appendedTurns: source.turns.length,
+    mode: 'create',
+    status: 'created',
+  };
+}
+
+async function createSeedFromPreparedOperation(
+  input: SeedRunInput,
+  appendSessionHistory: AppendSessionHistory,
+  source: ResolvedSeedSource,
+  operationStore: SeedOperationReceiptStore,
+  preparedReceipt: SeedOperationReceipt,
+): Promise<SeedResult> {
+  const creatingReceipt = nextSeedOperationPhase(preparedReceipt, 'creating');
+  await operationStore.update(preparedReceipt, creatingReceipt);
+  const sessionId = await bootstrapSeedTarget(input);
+  return finishOperationCreateOnTarget({
+    input,
+    appendSessionHistory,
+    source,
+    operationStore,
+    receipt: creatingReceipt,
+    sessionId,
+  });
+}
+
+async function recoverTargetCreatedSeedOperation(
+  input: SeedRunInput,
+  appendSessionHistory: AppendSessionHistory,
+  source: ResolvedSeedSource,
+  operationStore: SeedOperationReceiptStore,
+  receipt: SeedOperationReceipt,
+): Promise<SeedResult> {
+  const target = receipt.target;
+  if (!target) {
+    throw new OpenPError('seed operation target receipt is missing', EXIT_CODES.sessionState);
+  }
+  return finishOperationCreateOnTarget({
+    input,
+    appendSessionHistory,
+    source,
+    operationStore,
+    receipt,
+    sessionId: target.sessionId,
+  });
+}
+
+async function finishOperationCreateOnTarget(input: {
+  readonly input: SeedRunInput;
+  readonly appendSessionHistory: AppendSessionHistory;
+  readonly source: ResolvedSeedSource;
+  readonly operationStore: SeedOperationReceiptStore;
+  readonly receipt: SeedOperationReceipt;
+  readonly sessionId: string;
+}): Promise<SeedResult> {
+  const { operationStore, source, appendSessionHistory, sessionId } = input;
+  const seedInput = input.input;
+  const provenanceStore = new SeedProvenanceStore(seedInput.cwd);
+  let receipt = input.receipt;
+  const result: SeedResult = {
+    source: receipt.source.output,
+    target: { backend: seedInput.provider.id, sessionId },
+    appendedTurns: receipt.source.turnCount,
+    mode: 'create',
+    status: 'created',
+  };
+  try {
+    await withSessionLock(seedInput, sessionId, async () => {
+      await settleProviderPending(seedInput.provider, sessionId, seedInput.cwd, seedInput.signal);
+      await new SessionStateStore(seedInput.cwd).requireCompatible({
+        backend: seedInput.provider.id,
+        backendSessionId: sessionId,
+        cwd: seedInput.cwd,
+      });
+      let targetRead = await readNative(seedInput.provider, sessionId, seedInput.cwd, seedInput.signal, 'settlement');
+      let targetProvenance = await provenanceStore.load(seedInput.provider.id, sessionId);
+      if (receipt.phase === 'creating') {
+        const initial = await saveInitialTargetProvenance(seedInput, sessionId, provenanceStore, targetRead);
+        const targetEvidence = createSeedOperationTargetEvidence({
+          backend: seedInput.provider.id,
+          sessionId,
+          bootstrapRead: initial.bootstrapRead,
+          provenanceDigest: provenanceStructureDigest(initial.initialProvenance, seedInput.provider.id, sessionId),
+        });
+        const targetCreated = nextSeedOperationPhase(receipt, 'target-created', { target: targetEvidence });
+        await operationStore.update(receipt, targetCreated);
+        receipt = targetCreated;
+        targetRead = initial.bootstrapRead;
+        targetProvenance = initial.initialProvenance;
+      } else if (receipt.phase !== 'target-created') {
+        throw new OpenPError('seed operation receipt is not recoverable as target-created', EXIT_CODES.sessionState);
+      } else {
+        assertTargetCreatedReceiptMatches(receipt, targetRead, targetProvenance);
+      }
+
+      assertSeedOperationProvenancePrefix(source, targetProvenance);
+      const targetTurns = normalizeNativeReadWithProvenance(targetRead, targetProvenance);
+      const plan = planSeedOperationCreate(source.turns, targetTurns);
+      if (plan.status === 'append') {
+        const offset = targetTurns.length;
+        await appendTurns({
+          input: seedInput,
+          sessionId,
+          appendSessionHistory,
+          turns: plan.missing,
+          sourceRefs: source.refs.slice(offset),
+          before: targetRead,
+          provenance: targetProvenance,
+        });
+      }
+      const succeeded = nextSeedOperationPhase(receipt, 'succeeded', { result });
+      await operationStore.update(receipt, succeeded);
+      receipt = succeeded;
+    });
+  } catch (error) {
+    throw augmentCreateAppendFailure(error, seedInput, sessionId);
+  }
+  return result;
+}
+
+async function bootstrapSeedTarget(input: SeedRunInput): Promise<string> {
   const backend = input.createBackend();
   const turnId = randomUUID();
   const provisionalSessionId = randomUUID();
@@ -182,38 +438,31 @@ async function runCreateSeed(
     lastTurnId: result.turnId,
   });
 
-  const provenanceStore = new SeedProvenanceStore(input.cwd);
-  try {
-    await withSessionLock(input, sessionId, async () => {
-      const bootstrapRead = await readBootstrapNativeSession(input, sessionId);
-      const bootstrapIds = bootstrapRead.turns.map((turn) => turn.nativeIds);
-      const initialProvenance = createInitialProvenanceState({
-        backend: input.provider.id,
-        sessionId,
-        bootstrap: bootstrapIds,
-      });
-      await provenanceStore.save(initialProvenance);
-      await appendTurns({
-        input,
-        sessionId,
-        appendSessionHistory,
-        turns: source.turns,
-        sourceRefs: source.refs,
-        before: bootstrapRead,
-        provenance: initialProvenance,
-        bootstrap: bootstrapIds,
-      });
-    });
-  } catch (error) {
-    throw augmentCreateAppendFailure(error, input, sessionId);
+  return sessionId;
+}
+
+async function saveInitialTargetProvenance(
+  input: SeedRunInput,
+  sessionId: string,
+  provenanceStore: SeedProvenanceStore,
+  existingBootstrapRead?: NativeSessionReadResult,
+): Promise<{
+  readonly bootstrapRead: NativeSessionReadResult;
+  readonly bootstrapIds: readonly NativeTurnIds[];
+  readonly initialProvenance: SeedProvenanceState;
+}> {
+  const bootstrapRead = existingBootstrapRead ?? await readBootstrapNativeSession(input, sessionId);
+  if (bootstrapRead.turns.length !== 1) {
+    throw new OpenPError('seed bootstrap did not produce exactly one readable native target turn', EXIT_CODES.protocolViolation);
   }
-  return {
-    source: source.output,
-    target: { backend: input.provider.id, sessionId },
-    appendedTurns: source.turns.length,
-    mode: 'create',
-    status: 'created',
-  };
+  const bootstrapIds = bootstrapRead.turns.map((turn) => turn.nativeIds);
+  const initialProvenance = createInitialProvenanceState({
+    backend: input.provider.id,
+    sessionId,
+    bootstrap: bootstrapIds,
+  });
+  await provenanceStore.save(initialProvenance);
+  return { bootstrapRead, bootstrapIds, initialProvenance };
 }
 
 async function runAppendSeed(
@@ -654,6 +903,83 @@ async function readBootstrapNativeSession(input: SeedRunInput, sessionId: string
     throw new OpenPError('seed bootstrap did not produce exactly one readable native target turn', EXIT_CODES.protocolViolation);
   }
   return read;
+}
+
+function assertSeedOperationProvenancePrefix(
+  source: ResolvedSeedSource,
+  provenance: SeedProvenanceState | null,
+): void {
+  if (!provenance) {
+    throw new OpenPError('seed operation target provenance is missing', EXIT_CODES.sessionState);
+  }
+  const prefixCount = Math.min(source.turns.length, provenance.entries.length);
+  for (let index = 0; index < prefixCount; index += 1) {
+    const expectedTurn = source.turns[index]!;
+    const expectedSource = source.refs[index]!;
+    const entry = provenance.entries[index]!;
+    if (entry.logicalId !== expectedTurn.logicalId || entry.contentDigest !== expectedTurn.contentDigest ||
+      canonicalJson(entry.source) !== canonicalJson(expectedSource)) {
+      throw new OpenPError('seed operation target provenance differs from the recorded source', EXIT_CODES.protocolViolation);
+    }
+  }
+}
+
+function planSeedOperationCreate(
+  sourceTurns: readonly LogicalSeedTurn[],
+  targetTurns: readonly LogicalSeedTurn[],
+): { readonly status: 'noop'; readonly missing: readonly LogicalSeedTurn[] }
+  | { readonly status: 'append'; readonly missing: readonly LogicalSeedTurn[] } {
+  const sharedCount = Math.min(sourceTurns.length, targetTurns.length);
+  for (let index = 0; index < sharedCount; index += 1) {
+    if (sourceTurns[index]!.logicalId !== targetTurns[index]!.logicalId ||
+      sourceTurns[index]!.contentDigest !== targetTurns[index]!.contentDigest) {
+      throw new OpenPError('seed target diverges from source logical turn sequence', EXIT_CODES.protocolViolation);
+    }
+  }
+  if (targetTurns.length >= sourceTurns.length) {
+    return { status: 'noop', missing: [] };
+  }
+  return { status: 'append', missing: sourceTurns.slice(targetTurns.length) };
+}
+
+function assertTargetCreatedReceiptMatches(
+  receipt: SeedOperationReceipt,
+  read: NativeSessionReadResult,
+  provenance: SeedProvenanceState | null,
+): void {
+  const target = receipt.target;
+  if (!target) {
+    throw new OpenPError('seed operation target receipt is missing', EXIT_CODES.sessionState);
+  }
+  if (target.backend !== read.backend || target.sessionId !== read.sessionId) {
+    throw new OpenPError('seed operation target receipt belongs to a different session', EXIT_CODES.sessionState);
+  }
+  if (!provenance) {
+    throw new OpenPError('seed operation target provenance is missing', EXIT_CODES.sessionState);
+  }
+  if (provenance.backend !== target.backend || provenance.sessionId !== target.sessionId ||
+    provenance.bootstrap.length !== target.bootstrap.length ||
+    provenance.bootstrap.some((ids, index) => !sameNativeIds(ids, target.bootstrap[index]!.nativeIds))) {
+    throw new OpenPError('seed operation target provenance differs from receipt', EXIT_CODES.sessionState);
+  }
+  const initialDigest = provenanceStructureDigest({ ...provenance, entries: [] }, target.backend, target.sessionId);
+  if (initialDigest !== target.provenanceDigest) {
+    throw new OpenPError('seed operation target initial provenance digest differs from receipt', EXIT_CODES.sessionState);
+  }
+  const bootstrap = read.turns.find((turn) => sameNativeIds(turn.nativeIds, target.bootstrap[0]!.nativeIds));
+  if (!bootstrap) {
+    throw new OpenPError('seed operation target bootstrap is missing', EXIT_CODES.protocolViolation);
+  }
+  if (contentDigest(bootstrap.userText, bootstrap.assistantText) !== target.bootstrap[0]!.contentDigest) {
+    throw new OpenPError('seed operation target bootstrap content differs from receipt', EXIT_CODES.protocolViolation);
+  }
+  if (provenance.entries.length === 0 && read.nativeStateDigest !== target.nativeStateDigest) {
+    throw new OpenPError('seed operation target bootstrap native state differs from receipt', EXIT_CODES.protocolViolation);
+  }
+  if (provenance.entries.length < receipt.source.turnCount &&
+    read.turns.length !== provenance.bootstrap.length + provenance.entries.length) {
+    throw new OpenPError('seed operation target contains unowned native turns', EXIT_CODES.protocolViolation);
+  }
 }
 
 // Callers must already hold the canonical session lock. Backends and the stream-json runner reuse
