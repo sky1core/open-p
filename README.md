@@ -295,13 +295,24 @@ diverged, or a backend session contains compaction/rollback/revert state that ca
 safely, seeding fails closed without guessing a transcript.
 
 When `--operation-id` is present, the seed success stdout remains the same `{"seed": ...}` line.
-The operation id is a workspace-scoped permanent idempotency tombstone, not a secret. Replaying a
-succeeded native-source operation returns the durable result without reading the source backend.
-`seed-status` prints exactly one JSON line under `seedOperation`; unknown or corrupt receipts exit
-20 without stdout. If a previous owner stopped after `creating` was durably recorded but before a
-recoverable target id existed, the operation becomes `indeterminate` and exits 20 instead of making
-a second bootstrap. `seed-status` is a reserved top-level command and cannot be used as a configured
-backend instance id; rename an existing instance with that id before upgrading to 0.24.0.
+The operation id is a permanent idempotency tombstone within the exact canonical-workspace and
+resolved-state-root domain, not a secret. A retry for the same intent must therefore reuse the same
+cwd and state-root selection (`XDG_STATE_HOME`, or its default); different state roots are isolated
+operation domains. Receipt schema v2 binds replay to that domain and to opaque source/target native
+storage-locator identities. Remapping a configured Claude/Codex instance id to another
+`configDir`/`homeDir`, changing a built-in backend's effective native home, or moving a receipt to a
+different state root fails with exit 20 before backend I/O. Raw storage paths and identity digests
+are not printed by `seed-status`.
+
+Replaying a succeeded native-source operation returns the durable result without reading the source
+backend only after that identity evidence matches. `seed-status` prints exactly one JSON line under
+`seedOperation`, including `schemaVersion` and `identityEvidence`; unknown or corrupt receipts exit
+20 without stdout. Existing schema-v1 receipts remain status-readable as `legacy-unbound` permanent
+tombstones but are not automatically rebound or replayed. If a previous owner stopped after
+`creating` was durably recorded but before a recoverable target id existed, the operation becomes
+`indeterminate` and exits 20 instead of making a second bootstrap. `seed-status` is a reserved
+top-level command and cannot be used as a configured backend instance id; rename an existing
+instance with that id before upgrading to 0.24.0.
 
 Before reporting success, `openp` re-reads the target through its native Reader and durably records
 the logical-to-native mapping. If an append is interrupted after the complete native suffix lands,

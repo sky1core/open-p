@@ -272,6 +272,12 @@ test('seed-status prints one seedOperation JSON line and fails closed for unknow
   const receiptStore = new SeedOperationReceiptStore(projectRoot, workspaceStateRoot);
   await receiptStore.create(createPreparedSeedOperationReceipt({
     operationId,
+    binding: {
+      schemaVersion: 1,
+      operationDomainDigest: 'f'.repeat(64),
+      source: { kind: 'external-ir' },
+      target: { storageIdentityDigest: 'e'.repeat(64) },
+    },
     request: {
       targetBackend: 'codex',
       source: { kind: 'external-ir', documentDigest: 'd'.repeat(64) },
@@ -296,6 +302,8 @@ test('seed-status prints one seedOperation JSON line and fails closed for unknow
   assert.deepEqual(Object.keys(parsed), ['seedOperation']);
   assert.equal(parsed.seedOperation.operationId, operationId);
   assert.equal(parsed.seedOperation.phase, 'prepared');
+  assert.equal(parsed.seedOperation.schemaVersion, 2);
+  assert.equal(parsed.seedOperation.identityEvidence, 'recorded');
 
   const configHome = await scratch('openp-seed-status-config-');
   await mkdir(join(configHome, 'open-p'), { recursive: true });
@@ -307,6 +315,30 @@ test('seed-status prints one seedOperation JSON line and fails closed for unknow
   assert.equal(independentOfBackendConfig.code, 0, independentOfBackendConfig.stderr);
   assert.equal(independentOfBackendConfig.stderr, '');
   assert.equal(independentOfBackendConfig.stdout, found.stdout);
+
+  const legacyOperationId = randomUUID();
+  const legacyReceipt = JSON.parse(
+    await readFile(receiptStore.pathForOperation(operationId), 'utf8'),
+  ) as Record<string, unknown>;
+  delete legacyReceipt.binding;
+  legacyReceipt.schemaVersion = 1;
+  legacyReceipt.operationId = legacyOperationId;
+  await writeFile(
+    receiptStore.pathForOperation(legacyOperationId),
+    JSON.stringify(legacyReceipt),
+    { mode: 0o600 },
+  );
+  const legacyStatus = await seedStatus([legacyOperationId], projectRoot, {
+    XDG_STATE_HOME: stateRoot,
+  });
+  assert.equal(legacyStatus.code, 0, legacyStatus.stderr);
+  assert.equal(legacyStatus.stderr, '');
+  const legacyOperation = JSON.parse(legacyStatus.stdout).seedOperation;
+  assert.equal(legacyOperation.schemaVersion, 1);
+  assert.equal(legacyOperation.identityEvidence, 'legacy-unbound');
+  assert.equal(legacyStatus.stdout.includes('binding'), false);
+  assert.equal(legacyStatus.stdout.includes('storageIdentityDigest'), false);
+  assert.equal(legacyStatus.stdout.includes('operationDomainDigest'), false);
 
   const unknown = await seedStatus([randomUUID()], projectRoot, { XDG_STATE_HOME: stateRoot });
   assert.equal(unknown.code, 20);
@@ -366,6 +398,57 @@ test('seed operation create replay returns identical CLI stdout without launchin
   const operation = JSON.parse(status.stdout).seedOperation;
   assert.equal(operation.phase, 'succeeded');
   assert.deepEqual(operation.seed, firstResult);
+});
+
+test('seed operation replay rejects a configured Codex alias remapped to another home before launch', async () => {
+  const repoRoot = process.cwd();
+  const projectRoot = await realpath(await scratch('openp-seed-operation-configured-'));
+  const stateRoot = await scratch('openp-seed-operation-configured-state-');
+  const configHome = await scratch('openp-seed-operation-configured-config-');
+  const claudeConfigDir = await scratch('openp-seed-operation-configured-claude-');
+  const firstCodexHome = await scratch('openp-seed-operation-configured-codex-a-');
+  const secondCodexHome = await scratch('openp-seed-operation-configured-codex-b-');
+  const irPath = await writeExternalIr(projectRoot);
+  const operationId = randomUUID();
+  const argsLog = join(stateRoot, 'codex-args.log');
+  await installConfiguredInstances(configHome, claudeConfigDir, firstCodexHome);
+  const env = await withFakeCommandEnv(
+    'codex',
+    join(repoRoot, 'test', 'fixtures', 'seed', 'fake-codex-seed-bootstrap.mjs'),
+    {
+      XDG_STATE_HOME: stateRoot,
+      XDG_CONFIG_HOME: configHome,
+      OPENP_FAKE_CODEX_ARGS_LOG: argsLog,
+    },
+  );
+  const args = ['codex-seed-alt', '--input-ir', irPath, '--operation-id', operationId];
+
+  const first = await seed(args, projectRoot, env);
+  assert.equal(first.code, 0, first.stderr);
+  assert.equal(first.stderr, '');
+  assert.equal(parseSeedLine(first.stdout).target.sessionId, CODEX_SESSION_ID);
+  const workspaceStateRoot = resolveOpenPStateRoot(projectRoot, { XDG_STATE_HOME: stateRoot });
+  const receiptStore = new SeedOperationReceiptStore(projectRoot, workspaceStateRoot);
+  const receiptText = await readFile(receiptStore.pathForOperation(operationId), 'utf8');
+  assert.equal(receiptText.includes(firstCodexHome), false);
+  assert.equal(receiptText.includes(configHome), false);
+  const statusBeforeRemap = await seedStatus([operationId], projectRoot, env);
+  assert.equal(statusBeforeRemap.code, 0, statusBeforeRemap.stderr);
+  assert.equal(statusBeforeRemap.stdout.includes(firstCodexHome), false);
+  assert.equal(statusBeforeRemap.stdout.includes('storageIdentityDigest'), false);
+  assert.equal(statusBeforeRemap.stdout.includes('operationDomainDigest'), false);
+  await installConfiguredInstances(configHome, claudeConfigDir, secondCodexHome);
+  await writeFile(irPath, '{source must not be read');
+
+  const replay = await seed(args, projectRoot, env);
+  assert.equal(replay.code, 20);
+  assert.equal(replay.stdout, '');
+  assert.match(replay.stderr, /conflicts with a different execution identity/);
+  assert.equal((await readFile(argsLog, 'utf8')).trimEnd().split('\n').length, 1);
+  await assert.rejects(
+    () => readFile(join(secondCodexHome, 'sessions', '2026', '05', '23', `rollout-${CODEX_SESSION_ID}.jsonl`)),
+    (error) => typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT',
+  );
 });
 
 test('seed operation recovers a SIGKILL-stale creating lock as indeterminate without another target launch', {

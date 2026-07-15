@@ -38,6 +38,7 @@ import {
 import {
   SeedOperationLockStore,
   SeedOperationReceiptStore,
+  assertSeedOperationBinding,
   assertSeedOperationRequest,
   assertSeedOperationSourcePrefix,
   createPreparedSeedOperationReceipt,
@@ -46,11 +47,15 @@ import {
   nextSeedOperationPhase,
   seedOperationRequestFromSource,
   seedOperationRequestMatchesOptions,
+  type SeedOperationBinding,
   type SeedOperationReceipt,
+  type SeedOperationReceiptV2,
 } from './seed-operation-receipt.js';
 import type { SeedCliOptions } from './seed-args.js';
+import { SEED_STORAGE_IDENTITY_SCHEME } from './seed-storage-identity.js';
 import { SessionLockStore } from './session-lock.js';
 import { SessionStateStore, type PendingSeedAppendSessionState } from './session-state.js';
+import { createSeedOperationDomainDigest, resolveOpenPStateRoot } from './state-root.js';
 
 // The bootstrap prompt is part of the approved Session Seeding Contract.
 export const SEED_BOOTSTRAP_PROMPT = 'Reply with only: OK';
@@ -122,15 +127,30 @@ async function runCreateSeedWithOperation(
   if (!operationId) {
     throw new OpenPError('seed operation id is required', EXIT_CODES.usage);
   }
-  const operationLock = await new SeedOperationLockStore(input.cwd).acquire(operationId);
+  const operationStateRoot = resolveOpenPStateRoot(input.cwd);
+  const operationLock = await new SeedOperationLockStore(input.cwd, operationStateRoot).acquire(operationId);
   let primaryError: unknown = null;
   try {
-    const store = new SeedOperationReceiptStore(input.cwd);
+    const store = new SeedOperationReceiptStore(input.cwd, operationStateRoot);
     const existing = await store.load(operationId);
     if (existing && !seedOperationRequestMatchesOptions(existing.request, input.options, input.cwd)) {
       throw new OpenPError('seed operation id conflicts with a different semantic request', EXIT_CODES.sessionState, {
         details: { conflict: true },
       });
+    }
+    if (existing?.schemaVersion === 1) {
+      if (existing.phase === 'creating') {
+        const indeterminate = nextSeedOperationPhase(existing, 'indeterminate', {
+          indeterminateReason: 'creating-owner-ended-before-target-id',
+        });
+        await store.update(existing, indeterminate);
+        throw indeterminateSeedOperationError();
+      }
+      throw legacySeedOperationError();
+    }
+    const binding = await resolveSeedOperationBinding(input, operationStateRoot);
+    if (existing) {
+      assertSeedOperationBinding(existing, binding);
     }
     if (existing?.phase === 'succeeded' &&
       existing.request.source.kind === 'native') {
@@ -150,10 +170,10 @@ async function runCreateSeedWithOperation(
     assertSeedSourceHasPortableTurns(resolvedSource.turns);
     const request = seedOperationRequestFromSource(input.options, input.cwd, resolvedSource);
     const sourceSnapshot = createSeedOperationSourceSnapshot(resolvedSource);
-    let receipt: SeedOperationReceipt;
+    let receipt: SeedOperationReceiptV2;
     let source = resolvedSource;
     if (!existing) {
-      receipt = createPreparedSeedOperationReceipt({ operationId, request, source: sourceSnapshot });
+      receipt = createPreparedSeedOperationReceipt({ operationId, request, source: sourceSnapshot, binding });
       await store.create(receipt);
     } else {
       assertSeedOperationRequest(existing, request);
@@ -187,6 +207,53 @@ async function runCreateSeedWithOperation(
   }
 }
 
+async function resolveSeedOperationBinding(
+  input: SeedRunInput,
+  operationStateRoot: string,
+): Promise<SeedOperationBinding> {
+  const targetDigest = await resolveProviderSeedStorageIdentity(input.provider, input.cwd);
+  let source: SeedOperationBinding['source'];
+  if (input.options.source.kind === 'native') {
+    const sourceProvider = input.sourceProvider;
+    if (!sourceProvider || sourceProvider.id !== input.options.source.backend) {
+      throw new OpenPError(
+        `source backend ${input.options.source.backend} cannot bind operation storage identity`,
+        EXIT_CODES.usage,
+      );
+    }
+    source = {
+      kind: 'native',
+      storageIdentityDigest: await resolveProviderSeedStorageIdentity(sourceProvider, input.cwd),
+    };
+  } else {
+    source = { kind: 'external-ir' };
+  }
+  return {
+    schemaVersion: 1,
+    operationDomainDigest: createSeedOperationDomainDigest(input.cwd, operationStateRoot),
+    source,
+    target: { storageIdentityDigest: targetDigest },
+  };
+}
+
+async function resolveProviderSeedStorageIdentity(provider: BackendProvider, cwd: string): Promise<string> {
+  const resolveIdentity = provider.resolveSeedStorageIdentity?.bind(provider);
+  if (!resolveIdentity) {
+    throw new OpenPError(
+      `backend ${provider.id} does not support operation identity binding`,
+      EXIT_CODES.usage,
+    );
+  }
+  const identity = await resolveIdentity({ cwd });
+  if (identity.scheme !== SEED_STORAGE_IDENTITY_SCHEME || !isNativeStateDigest(identity.digest)) {
+    throw new OpenPError(
+      `backend ${provider.id} returned an invalid operation storage identity`,
+      EXIT_CODES.protocolViolation,
+    );
+  }
+  return identity.digest;
+}
+
 async function recoverSucceededSeedOperation(
   _input: SeedRunInput,
   receipt: SeedOperationReceipt,
@@ -202,6 +269,14 @@ function indeterminateSeedOperationError(): OpenPError {
   return new OpenPError(
     'seed operation is indeterminate after a prior creating phase; target session id cannot be recovered',
     EXIT_CODES.sessionState,
+  );
+}
+
+function legacySeedOperationError(): OpenPError {
+  return new OpenPError(
+    'legacy seed operation receipt lacks execution identity evidence; refusing automatic replay',
+    EXIT_CODES.sessionState,
+    { details: { conflict: true, identityEvidence: 'legacy-unbound' } },
   );
 }
 
@@ -279,7 +354,7 @@ async function createSeedFromPreparedOperation(
   appendSessionHistory: AppendSessionHistory,
   source: ResolvedSeedSource,
   operationStore: SeedOperationReceiptStore,
-  preparedReceipt: SeedOperationReceipt,
+  preparedReceipt: SeedOperationReceiptV2,
 ): Promise<SeedResult> {
   const creatingReceipt = nextSeedOperationPhase(preparedReceipt, 'creating');
   await operationStore.update(preparedReceipt, creatingReceipt);
@@ -299,7 +374,7 @@ async function recoverTargetCreatedSeedOperation(
   appendSessionHistory: AppendSessionHistory,
   source: ResolvedSeedSource,
   operationStore: SeedOperationReceiptStore,
-  receipt: SeedOperationReceipt,
+  receipt: SeedOperationReceiptV2,
 ): Promise<SeedResult> {
   const target = receipt.target;
   if (!target) {
@@ -320,7 +395,7 @@ async function finishOperationCreateOnTarget(input: {
   readonly appendSessionHistory: AppendSessionHistory;
   readonly source: ResolvedSeedSource;
   readonly operationStore: SeedOperationReceiptStore;
-  readonly receipt: SeedOperationReceipt;
+  readonly receipt: SeedOperationReceiptV2;
   readonly sessionId: string;
 }): Promise<SeedResult> {
   const { operationStore, source, appendSessionHistory, sessionId } = input;

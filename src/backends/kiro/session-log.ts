@@ -25,8 +25,12 @@ export function resolveKiroSessionLogPath(
   if (!isSafeSessionId(sessionId)) {
     return null;
   }
+  return join(resolveKiroHome(env), 'sessions', 'cli', `${sessionId}.jsonl`);
+}
+
+export function resolveKiroHome(env: NodeJS.ProcessEnv = process.env): string {
   const home = typeof env.HOME === 'string' && env.HOME.trim() ? env.HOME.trim() : homedir();
-  return join(home, '.kiro', 'sessions', 'cli', `${sessionId}.jsonl`);
+  return join(home, '.kiro');
 }
 
 export async function readKiroSessionLogOffset(

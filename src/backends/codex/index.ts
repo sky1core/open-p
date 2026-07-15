@@ -4,10 +4,11 @@ import type {
   BackendProvider,
   BackendWorkerBridge,
 } from '../../core/backend.js';
+import { createSeedStorageIdentity } from '../../core/seed-storage-identity.js';
 import type { PtyProvider } from '../../runners/types.js';
 import { CODEX_DESCRIPTOR } from './descriptor.js';
 import { CodexWorkerBridge } from './worker-bridge.js';
-import { findCodexSessionLogPath } from './session-log.js';
+import { findCodexSessionLogPath, resolveCodexHome } from './session-log.js';
 import { appendCodexSessionHistory } from './history-writer.js';
 import { CodexBackend } from './backend.js';
 import { probeCodexLogin } from './login.js';
@@ -50,6 +51,15 @@ export function createCodexBackendProvider(options: CodexBackendProviderOptions 
 
     async resolveSessionLogPath(sessionId: string, _cwd: string): Promise<string | null> {
       return findCodexSessionLogPath(sessionId, homeDir);
+    },
+
+    async resolveSeedStorageIdentity(input) {
+      return createSeedStorageIdentity({
+        backendFamily: 'codex',
+        providerId: id,
+        cwd: input.cwd,
+        storageRoot: resolveCodexHome(homeDir),
+      });
     },
 
     async readNativeSession(input) {

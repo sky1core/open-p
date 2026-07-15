@@ -1,9 +1,12 @@
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import type {
   AppendSessionHistoryInput,
   Backend,
   BackendProvider,
   BackendWorkerBridge,
 } from '../../core/backend.js';
+import { createSeedStorageIdentity } from '../../core/seed-storage-identity.js';
 import type { PtyProvider } from '../../runners/types.js';
 import { CLAUDE_CODE_DESCRIPTOR } from './descriptor.js';
 import { ClaudeCodeBackend } from './adapter.js';
@@ -56,6 +59,15 @@ export function createClaudeBackendProvider(options: ClaudeBackendProviderOption
 
     async resolveSessionLogPath(sessionId: string, cwd: string): Promise<string | null> {
       return findClaudeCodeSessionLog(sessionId, cwd, configDir);
+    },
+
+    async resolveSeedStorageIdentity(input) {
+      return createSeedStorageIdentity({
+        backendFamily: 'claude',
+        providerId: id,
+        cwd: input.cwd,
+        storageRoot: configDir ?? join(homedir(), '.claude'),
+      });
     },
 
     async readNativeSession(input) {

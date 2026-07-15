@@ -1,9 +1,12 @@
+import { join } from 'node:path';
 import type {
   AppendSessionHistoryInput,
   Backend,
   BackendProvider,
   BackendWorkerBridge,
 } from '../../core/backend.js';
+import { createSeedStorageIdentity } from '../../core/seed-storage-identity.js';
+import { resolveOpenPStateRoot } from '../../core/state-root.js';
 import type { PtyProvider } from '../../runners/types.js';
 import { OPENCODE_DESCRIPTOR } from './descriptor.js';
 import { OpenCodeBackend } from './backend.js';
@@ -28,6 +31,15 @@ export const opencodeBackendProvider: BackendProvider = {
 
   async resolveSessionLogPath(_sessionId: string, _cwd: string): Promise<string | null> {
     return null;
+  },
+
+  async resolveSeedStorageIdentity(input) {
+    return createSeedStorageIdentity({
+      backendFamily: 'opencode',
+      providerId: 'opencode',
+      cwd: input.cwd,
+      storageRoot: join(resolveOpenPStateRoot(input.cwd), 'opencode'),
+    });
   },
 
   async readNativeSession(input) {

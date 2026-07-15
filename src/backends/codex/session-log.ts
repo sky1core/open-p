@@ -46,11 +46,11 @@ export interface CodexSessionLogOptions {
   readonly homeDir?: string | null;
 }
 
-function getCodexHome(homeDir?: string | null): string {
+export function resolveCodexHome(homeDir?: string | null, env: NodeJS.ProcessEnv = process.env): string {
   if (homeDir) {
     return homeDir;
   }
-  const envHome = process.env.CODEX_HOME?.trim();
+  const envHome = env.CODEX_HOME?.trim();
   return envHome || join(homedir(), '.codex');
 }
 
@@ -61,7 +61,7 @@ export async function findCodexSessionLogPath(
   const normalizedId = sessionId.trim();
   if (!normalizedId) return null;
 
-  const sessionsRoot = join(getCodexHome(homeDir), 'sessions');
+  const sessionsRoot = join(resolveCodexHome(homeDir), 'sessions');
   return findMatchingLog(sessionsRoot, normalizedId);
 }
 

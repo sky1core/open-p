@@ -4,11 +4,12 @@ import type {
   BackendProvider,
   BackendWorkerBridge,
 } from '../../core/backend.js';
+import { createSeedStorageIdentity } from '../../core/seed-storage-identity.js';
 import type { PtyProvider } from '../../runners/types.js';
 import { KIRO_DESCRIPTOR } from './descriptor.js';
 import { KiroBackend } from './backend.js';
 import { KiroWorkerBridge } from './worker-bridge.js';
-import { resolveKiroSessionLogPath } from './session-log.js';
+import { resolveKiroHome, resolveKiroSessionLogPath } from './session-log.js';
 import {
   appendKiroSessionHistory,
   cleanupKiroPreparedSessionHistoryAppend,
@@ -37,6 +38,15 @@ export const kiroBackendProvider: BackendProvider = {
 
   async resolveSessionLogPath(sessionId: string, _cwd: string): Promise<string | null> {
     return resolveKiroSessionLogPath(sessionId);
+  },
+
+  async resolveSeedStorageIdentity(input) {
+    return createSeedStorageIdentity({
+      backendFamily: 'kiro',
+      providerId: 'kiro',
+      cwd: input.cwd,
+      storageRoot: resolveKiroHome(),
+    });
   },
 
   async readNativeSession(input) {

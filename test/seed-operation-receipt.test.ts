@@ -12,6 +12,7 @@ import {
   formatSeedOperationStatus,
   nextSeedOperationPhase,
   type SeedOperationReceipt,
+  type SeedOperationReceiptV2,
   type SeedOperationTargetEvidence,
 } from '../src/core/seed-operation-receipt.js';
 
@@ -22,10 +23,18 @@ const SOURCE_TURN_DIGEST = 'a'.repeat(64);
 const BOOTSTRAP_DIGEST = 'b'.repeat(64);
 const NATIVE_STATE_DIGEST = 'c'.repeat(64);
 const PROVENANCE_DIGEST = 'e'.repeat(64);
+const OPERATION_DOMAIN_DIGEST = 'f'.repeat(64);
+const TARGET_STORAGE_DIGEST = '1'.repeat(64);
 
-function prepared(operationId = OPERATION_ID): SeedOperationReceipt {
+function prepared(operationId = OPERATION_ID): SeedOperationReceiptV2 {
   return createPreparedSeedOperationReceipt({
     operationId,
+    binding: {
+      schemaVersion: 1,
+      operationDomainDigest: OPERATION_DOMAIN_DIGEST,
+      source: { kind: 'external-ir' },
+      target: { storageIdentityDigest: TARGET_STORAGE_DIGEST },
+    },
     request: {
       targetBackend: 'target',
       source: { kind: 'external-ir', documentDigest: DOCUMENT_DIGEST },
@@ -59,7 +68,7 @@ function targetEvidence(): SeedOperationTargetEvidence {
   };
 }
 
-function succeeded(receipt: SeedOperationReceipt): SeedOperationReceipt {
+function succeeded(receipt: SeedOperationReceiptV2): SeedOperationReceiptV2 {
   return nextSeedOperationPhase(receipt, 'succeeded', {
     result: {
       source: receipt.source.output,
@@ -103,6 +112,11 @@ test('seed operation receipt is private, strict, status-formatted, and transcrip
   assert.deepEqual(Object.keys(parsed), ['seedOperation']);
   assert.equal(parsed.seedOperation.operationId, OPERATION_ID);
   assert.equal(parsed.seedOperation.phase, 'succeeded');
+  assert.equal(parsed.seedOperation.schemaVersion, 2);
+  assert.equal(parsed.seedOperation.identityEvidence, 'recorded');
+  assert.equal(parsed.seedOperation.binding, undefined);
+  assert.equal(line.includes(OPERATION_DOMAIN_DIGEST), false);
+  assert.equal(line.includes(TARGET_STORAGE_DIGEST), false);
   assert.equal(parsed.seedOperation.seed.status, 'created');
 });
 
@@ -156,6 +170,42 @@ test('seed operation receipt rejects unknown keys, invalid UTF-8, loose permissi
         await writeFile(path, JSON.stringify({
           ...value,
           request: { ...value.request, model: '' },
+        }), { mode: 0o600 });
+      },
+    },
+    {
+      name: 'unknown binding key',
+      mutate: async (path, value) => {
+        assert.equal(value.schemaVersion, 2);
+        if (value.schemaVersion !== 2) throw new Error('expected v2 receipt');
+        await writeFile(path, JSON.stringify({
+          ...value,
+          binding: { ...value.binding, unexpected: true },
+        }), { mode: 0o600 });
+      },
+    },
+    {
+      name: 'invalid operation domain digest',
+      mutate: async (path, value) => {
+        assert.equal(value.schemaVersion, 2);
+        if (value.schemaVersion !== 2) throw new Error('expected v2 receipt');
+        await writeFile(path, JSON.stringify({
+          ...value,
+          binding: { ...value.binding, operationDomainDigest: 'not-a-digest' },
+        }), { mode: 0o600 });
+      },
+    },
+    {
+      name: 'binding source kind mismatch',
+      mutate: async (path, value) => {
+        assert.equal(value.schemaVersion, 2);
+        if (value.schemaVersion !== 2) throw new Error('expected v2 receipt');
+        await writeFile(path, JSON.stringify({
+          ...value,
+          binding: {
+            ...value.binding,
+            source: { kind: 'native', storageIdentityDigest: '2'.repeat(64) },
+          },
         }), { mode: 0o600 });
       },
     },
@@ -247,6 +297,16 @@ test('seed operation receipt enforces phase invariants and legal transitions', a
   );
 
   const creating = nextSeedOperationPhase(first, 'creating');
+  await assert.rejects(
+    () => store.update(first, {
+      ...creating,
+      binding: {
+        ...creating.binding,
+        target: { storageIdentityDigest: '2'.repeat(64) },
+      },
+    }),
+    (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.sessionState,
+  );
   await assert.rejects(
     () => store.update(first, {
       ...creating,

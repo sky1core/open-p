@@ -10,6 +10,16 @@ export function resolveOpenPStateRoot(projectRoot: string, env: NodeJS.ProcessEn
   return join(base, 'open-p', 'workspaces', workspaceKey);
 }
 
+export function createSeedOperationDomainDigest(projectRoot: string, stateRoot: string): string {
+  return createHash('sha256')
+    .update('openp.seed.operation-domain.v1')
+    .update('\0')
+    .update(resolveWorkspacePath(projectRoot))
+    .update('\0')
+    .update(resolve(stateRoot).normalize('NFC'))
+    .digest('hex');
+}
+
 function normalizeEnvPath(value: string | undefined): string | null {
   const trimmed = typeof value === 'string' ? value.trim() : '';
   if (!trimmed) {

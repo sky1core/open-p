@@ -1,6 +1,7 @@
 import type { BackendDescriptor, WorkerTurnRequest, WorkerTurnResult } from './worker-types.js';
 import type { TurnRequest, TurnResult, BackendRunOptions } from './types.js';
 import type { PtyProvider } from '../runners/types.js';
+import type { SeedStorageIdentity } from './seed-storage-identity.js';
 
 export interface Backend {
   runTurn(request: TurnRequest, options: BackendRunOptions): Promise<TurnResult>;
@@ -19,6 +20,9 @@ export interface BackendProvider {
   createBackend(provider: PtyProvider): Backend;
   createWorkerBridge(): BackendWorkerBridge;
   resolveSessionLogPath(sessionId: string, cwd: string): Promise<string | null>;
+  // Operation receipts use this backend-owned, transcript-free identity to bind replay to the
+  // same effective native storage locator without exposing backend paths to core.
+  resolveSeedStorageIdentity?(input: { readonly cwd: string }): Promise<SeedStorageIdentity>;
   // Optional native history capabilities. Providers own backend-specific artifact lookup and
   // schema interpretation so the core seed orchestrator stays backend-neutral.
   readNativeSession?(input: ReadNativeSessionInput): Promise<NativeSessionReadResult>;

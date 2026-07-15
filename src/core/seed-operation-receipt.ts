@@ -55,8 +55,16 @@ export interface SeedOperationTargetEvidence {
   readonly provenanceDigest: string;
 }
 
-export interface SeedOperationReceipt {
+export interface SeedOperationBinding {
   readonly schemaVersion: 1;
+  readonly operationDomainDigest: string;
+  readonly source:
+    | { readonly kind: 'native'; readonly storageIdentityDigest: string }
+    | { readonly kind: 'external-ir' };
+  readonly target: { readonly storageIdentityDigest: string };
+}
+
+interface SeedOperationReceiptBase {
   readonly operationId: string;
   readonly phase: SeedOperationPhase;
   readonly createdAt: string;
@@ -67,6 +75,17 @@ export interface SeedOperationReceipt {
   readonly result?: SeedResult;
   readonly indeterminateReason?: 'creating-owner-ended-before-target-id';
 }
+
+export interface SeedOperationReceiptV1 extends SeedOperationReceiptBase {
+  readonly schemaVersion: 1;
+}
+
+export interface SeedOperationReceiptV2 extends SeedOperationReceiptBase {
+  readonly schemaVersion: 2;
+  readonly binding: SeedOperationBinding;
+}
+
+export type SeedOperationReceipt = SeedOperationReceiptV1 | SeedOperationReceiptV2;
 
 interface JsonObject {
   readonly [key: string]: unknown;
@@ -187,8 +206,11 @@ export class SeedOperationReceiptStore {
     }
   }
 
-  async create(receipt: SeedOperationReceipt): Promise<void> {
+  async create(receipt: SeedOperationReceiptV2): Promise<void> {
     const checked = parseSeedOperationReceipt(receipt, 'seed operation receipt input');
+    if (checked.schemaVersion !== 2) {
+      throw stateError('new seed operation receipt must use schema version 2');
+    }
     const serialized = serializeReceipt(checked, 'seed operation receipt input');
     const path = this.pathForOperation(checked.operationId);
     const directory = dirname(path);
@@ -215,12 +237,15 @@ export class SeedOperationReceiptStore {
     const checkedExpected = parseSeedOperationReceipt(expected, 'seed operation receipt expected input');
     const checkedNext = parseSeedOperationReceipt(next, 'seed operation receipt update input');
     const serialized = serializeReceipt(checkedNext, 'seed operation receipt update input');
-    if (checkedExpected.operationId !== checkedNext.operationId ||
+    if (checkedExpected.schemaVersion !== checkedNext.schemaVersion ||
+      checkedExpected.operationId !== checkedNext.operationId ||
       checkedExpected.createdAt !== checkedNext.createdAt) {
       throw stateError('seed operation receipt update changes immutable identity');
     }
     if (canonicalJson(checkedExpected.request) !== canonicalJson(checkedNext.request) ||
       canonicalJson(checkedExpected.source) !== canonicalJson(checkedNext.source) ||
+      (checkedExpected.schemaVersion === 2 && checkedNext.schemaVersion === 2 &&
+        canonicalJson(checkedExpected.binding) !== canonicalJson(checkedNext.binding)) ||
       (checkedExpected.target !== undefined &&
         canonicalJson(checkedExpected.target) !== canonicalJson(checkedNext.target))) {
       throw stateError('seed operation receipt update changes immutable evidence');
@@ -255,19 +280,43 @@ export function createPreparedSeedOperationReceipt(input: {
   readonly operationId: string;
   readonly request: SeedOperationRequest;
   readonly source: SeedOperationSourceSnapshot;
-}): SeedOperationReceipt {
+  readonly binding: SeedOperationBinding;
+}): SeedOperationReceiptV2 {
   const now = new Date().toISOString();
-  return parseSeedOperationReceipt({
-    schemaVersion: 1,
+  const receipt = parseSeedOperationReceipt({
+    schemaVersion: 2,
     operationId: input.operationId,
     phase: 'prepared',
     createdAt: now,
     updatedAt: now,
+    binding: input.binding,
     request: input.request,
     source: input.source,
   }, 'seed operation receipt input');
+  if (receipt.schemaVersion !== 2) {
+    throw stateError('new seed operation receipt must use schema version 2');
+  }
+  return receipt;
 }
 
+export function nextSeedOperationPhase(
+  receipt: SeedOperationReceiptV2,
+  phase: Exclude<SeedOperationPhase, 'prepared'>,
+  extra?: {
+    readonly target?: SeedOperationTargetEvidence;
+    readonly result?: SeedResult;
+    readonly indeterminateReason?: 'creating-owner-ended-before-target-id';
+  },
+): SeedOperationReceiptV2;
+export function nextSeedOperationPhase(
+  receipt: SeedOperationReceiptV1,
+  phase: Exclude<SeedOperationPhase, 'prepared'>,
+  extra?: {
+    readonly target?: SeedOperationTargetEvidence;
+    readonly result?: SeedResult;
+    readonly indeterminateReason?: 'creating-owner-ended-before-target-id';
+  },
+): SeedOperationReceiptV1;
 export function nextSeedOperationPhase(
   receipt: SeedOperationReceipt,
   phase: Exclude<SeedOperationPhase, 'prepared'>,
@@ -277,18 +326,23 @@ export function nextSeedOperationPhase(
     readonly indeterminateReason?: 'creating-owner-ended-before-target-id';
   } = {},
 ): SeedOperationReceipt {
-  return parseSeedOperationReceipt({
-    schemaVersion: 1,
+  const next = parseSeedOperationReceipt({
+    schemaVersion: receipt.schemaVersion,
     operationId: receipt.operationId,
     phase,
     createdAt: receipt.createdAt,
     updatedAt: new Date().toISOString(),
+    ...(receipt.schemaVersion === 2 ? { binding: receipt.binding } : {}),
     request: receipt.request,
     source: receipt.source,
     ...(extra.target ? { target: extra.target } : receipt.target ? { target: receipt.target } : {}),
     ...(extra.result ? { result: extra.result } : {}),
     ...(extra.indeterminateReason ? { indeterminateReason: extra.indeterminateReason } : {}),
   }, 'seed operation receipt update input');
+  if (next.schemaVersion !== receipt.schemaVersion) {
+    throw stateError('seed operation receipt update changes schema version');
+  }
+  return next;
 }
 
 export function seedOperationRequestFromSource(
@@ -332,6 +386,15 @@ export function assertSeedOperationRequest(
 ): void {
   if (canonicalJson(receipt.request) !== canonicalJson(request)) {
     throw conflictError('seed operation id conflicts with a different semantic request');
+  }
+}
+
+export function assertSeedOperationBinding(
+  receipt: SeedOperationReceiptV2,
+  binding: SeedOperationBinding,
+): void {
+  if (canonicalJson(receipt.binding) !== canonicalJson(binding)) {
+    throw conflictError('seed operation id conflicts with a different execution identity');
   }
 }
 
@@ -392,6 +455,8 @@ export function formatSeedOperationStatus(receipt: SeedOperationReceipt): string
 
 export function toPublicSeedOperation(receipt: SeedOperationReceipt): Record<string, unknown> {
   return {
+    schemaVersion: receipt.schemaVersion,
+    identityEvidence: receipt.schemaVersion === 2 ? 'recorded' : 'legacy-unbound',
     operationId: receipt.operationId,
     phase: receipt.phase,
     createdAt: receipt.createdAt,
@@ -405,6 +470,10 @@ export function toPublicSeedOperation(receipt: SeedOperationReceipt): Record<str
 }
 
 function parseSeedOperationReceipt(value: unknown, path: string): SeedOperationReceipt {
+  const version = asObject(value)?.schemaVersion;
+  if (version !== 1 && version !== 2) {
+    throw stateError(`invalid seed operation receipt: ${path}`);
+  }
   const object = exactObject(value, [
     'schemaVersion',
     'operationId',
@@ -413,15 +482,15 @@ function parseSeedOperationReceipt(value: unknown, path: string): SeedOperationR
     'updatedAt',
     'request',
     'source',
+    ...(version === 2 ? ['binding'] : []),
     ...optionalKeys(value, ['target', 'result', 'indeterminateReason']),
   ]);
-  if (!object || object.schemaVersion !== 1 || !isCanonicalUuidV4(object.operationId) ||
+  if (!object || object.schemaVersion !== version || !isCanonicalUuidV4(object.operationId) ||
     !isSeedOperationPhase(object.phase) || !validDate(object.createdAt) ||
     !validDate(object.updatedAt)) {
     throw stateError(`invalid seed operation receipt: ${path}`);
   }
-  const receipt: SeedOperationReceipt = {
-    schemaVersion: 1,
+  const common = {
     operationId: object.operationId,
     phase: object.phase,
     createdAt: object.createdAt,
@@ -434,8 +503,35 @@ function parseSeedOperationReceipt(value: unknown, path: string): SeedOperationR
       ? { indeterminateReason: parseIndeterminateReason(object.indeterminateReason, path) }
       : {}),
   };
+  const receipt: SeedOperationReceipt = version === 1
+    ? { schemaVersion: 1, ...common }
+    : { schemaVersion: 2, binding: parseBinding(object.binding, path), ...common };
   assertPhaseInvariant(receipt, path);
   return receipt;
+}
+
+function parseBinding(value: unknown, path: string): SeedOperationBinding {
+  const object = exactObject(value, ['schemaVersion', 'operationDomainDigest', 'source', 'target']);
+  const sourceObject = asObject(object?.source);
+  const source = sourceObject?.kind === 'native'
+    ? exactObject(object?.source, ['kind', 'storageIdentityDigest'])
+    : sourceObject?.kind === 'external-ir'
+      ? exactObject(object?.source, ['kind'])
+      : null;
+  const target = exactObject(object?.target, ['storageIdentityDigest']);
+  if (!object || object.schemaVersion !== 1 || !isSha256(object.operationDomainDigest) ||
+    !source || !target || !isSha256(target.storageIdentityDigest) ||
+    (source.kind === 'native' && !isSha256(source.storageIdentityDigest))) {
+    throw stateError(`invalid seed operation receipt: ${path}`);
+  }
+  return {
+    schemaVersion: 1,
+    operationDomainDigest: object.operationDomainDigest as string,
+    source: source.kind === 'native'
+      ? { kind: 'native', storageIdentityDigest: source.storageIdentityDigest as string }
+      : { kind: 'external-ir' },
+    target: { storageIdentityDigest: target.storageIdentityDigest as string },
+  };
 }
 
 function parseRequest(value: unknown, path: string): SeedOperationRequest {
@@ -611,6 +707,9 @@ function assertPhaseInvariant(receipt: SeedOperationReceipt, path: string): void
     throw stateError(`invalid seed operation receipt: ${path}`);
   }
   if (!requestSourceMatchesSnapshot(receipt.request.source, receipt.source.output)) {
+    throw stateError(`invalid seed operation receipt: ${path}`);
+  }
+  if (receipt.schemaVersion === 2 && receipt.binding.source.kind !== receipt.request.source.kind) {
     throw stateError(`invalid seed operation receipt: ${path}`);
   }
   if (receipt.target && receipt.target.backend !== receipt.request.targetBackend) {
