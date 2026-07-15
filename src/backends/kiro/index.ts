@@ -11,6 +11,7 @@ import { KiroWorkerBridge } from './worker-bridge.js';
 import { resolveKiroSessionLogPath } from './session-log.js';
 import { appendKiroSessionHistory } from './history-writer.js';
 import { probeKiroLogin } from './login.js';
+import { readKiroNativeSession } from './native-reader.js';
 
 export const kiroBackendProvider: BackendProvider = {
   id: 'kiro',
@@ -35,8 +36,15 @@ export const kiroBackendProvider: BackendProvider = {
     return resolveKiroSessionLogPath(sessionId);
   },
 
-  async appendSessionHistory(input: AppendSessionHistoryInput): Promise<void> {
-    await appendKiroSessionHistory({
+  async readNativeSession(input) {
+    return readKiroNativeSession({
+      backend: 'kiro',
+      sessionId: input.sessionId,
+    });
+  },
+
+  async appendSessionHistory(input: AppendSessionHistoryInput) {
+    return appendKiroSessionHistory({
       sessionId: input.sessionId,
       cwd: input.cwd,
       turns: input.turns,

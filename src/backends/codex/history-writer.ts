@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
-import type { SessionHistoryTurn } from '../../core/backend.js';
+import type { AppendSessionHistoryResult, NativeWrittenTurn, SeedWriteTurn } from '../../core/backend.js';
 import { EXIT_CODES, OpenPError } from '../../core/errors.js';
 import { appendJsonlLines } from '../../core/jsonl-append.js';
 import { findCodexSessionLogPath } from './session-log.js';
@@ -11,16 +11,16 @@ interface JsonObject {
 }
 
 // Resolves the Codex rollout log (honoring instance homeDir), then appends the caller's turns as
-// native `response_item` messages cloned from the log's own last user/assistant message items
-// (runtime golden). session_meta, instructions, world_state, and event_msg records are neither
-// touched nor synthesized — Codex re-injects any missing instruction head on the next resume.
+// native task lifecycle events and `response_item` messages cloned from the log's own last
+// task/user/assistant/completion entries (runtime golden). Existing session_meta, instructions,
+// world_state, and event_msg records are never rewritten.
 export async function appendCodexSessionHistory(input: {
   readonly sessionId: string;
   readonly cwd: string;
-  readonly turns: readonly SessionHistoryTurn[];
+  readonly turns: readonly SeedWriteTurn[];
   readonly homeDir?: string | null;
   readonly signal?: AbortSignal;
-}): Promise<void> {
+}): Promise<AppendSessionHistoryResult> {
   const logPath = await findCodexSessionLogPath(input.sessionId, input.homeDir ?? null);
   if (!logPath) {
     throw new OpenPError(`codex session log not found for ${input.sessionId}`, EXIT_CODES.sessionLogNotFound);
@@ -34,22 +34,24 @@ export async function appendCodexSessionHistory(input: {
     }
     throw error;
   }
-  const lines = buildCodexHistoryEntries(logText, input.turns);
-  await appendJsonlLines(logPath, lines, input.signal);
+  const built = buildCodexHistoryEntries(logText, input.turns);
+  await appendJsonlLines(logPath, built.lines, input.signal);
+  return { turns: built.written };
 }
 
-// Pure transform (unit-test surface): existing log text -> JSON lines to append. The last single
-// `input_text` user message and the last single `output_text` assistant message are the clone
-// templates; a missing template is a protocol violation. Unparseable lines are skipped, never
-// rewritten. turn_id pairing mirrors a real rollout: a user turn opens a fresh UUIDv7 turn id and a
-// following assistant turn inherits it; a batch that leads with an assistant gets its own fresh id.
+// Pure transform (unit-test surface): existing log text -> JSON lines to append. The last
+// task_started/task_complete events and single `input_text` user / `output_text` assistant messages
+// are clone templates; missing templates are a protocol violation. Unparseable lines are skipped,
+// never rewritten.
 export function buildCodexHistoryEntries(
   logText: string,
-  turns: readonly SessionHistoryTurn[],
+  turns: readonly SeedWriteTurn[],
   nowMs: number = Date.now(),
-): string[] {
+): { readonly lines: readonly string[]; readonly written: readonly NativeWrittenTurn[] } {
   let userTemplate: string | null = null;
   let assistantTemplate: string | null = null;
+  let taskStartedTemplate: string | null = null;
+  let taskCompleteTemplate: string | null = null;
 
   for (const rawLine of logText.split('\n')) {
     const line = rawLine.trim();
@@ -71,30 +73,55 @@ export function buildCodexHistoryEntries(
     if (isCodexAssistantTemplate(entry)) {
       assistantTemplate = line;
     }
+    if (isCodexTaskEventTemplate(entry, 'task_started')) {
+      taskStartedTemplate = line;
+    }
+    if (isCodexTaskEventTemplate(entry, 'task_complete')) {
+      taskCompleteTemplate = line;
+    }
   }
 
-  if (!userTemplate || !assistantTemplate) {
+  if (!userTemplate || !assistantTemplate || !taskStartedTemplate || !taskCompleteTemplate) {
     throw new OpenPError(
-      'codex session log has no user/assistant message item to clone',
+      'codex session log has no task/user/assistant template item to clone',
       EXIT_CODES.protocolViolation,
     );
   }
 
   const lines: string[] = [];
-  let currentTurnId: string | null = null;
+  const written: NativeWrittenTurn[] = [];
   turns.forEach((turn, index) => {
-    const timestamp = new Date(nowMs + index).toISOString();
-    if (turn.role === 'user') {
-      currentTurnId = uuidv7(nowMs + index);
-      lines.push(JSON.stringify(buildCodexUserEntry(userTemplate!, turn.text, timestamp, currentTurnId)));
-    } else {
-      if (currentTurnId === null) {
-        currentTurnId = uuidv7(nowMs + index);
-      }
-      lines.push(JSON.stringify(buildCodexAssistantEntry(assistantTemplate!, turn.text, timestamp, currentTurnId)));
-    }
+    const turnId = uuidv7(nowMs + index * 2);
+    const userTimestamp = new Date(nowMs + index * 2).toISOString();
+    const assistantTimestamp = new Date(nowMs + index * 2 + 1).toISOString();
+    const userEntry = buildCodexUserEntry(userTemplate!, turn.userText, userTimestamp, turnId);
+    const assistantEntry = buildCodexAssistantEntry(assistantTemplate!, turn.assistantText, assistantTimestamp, turnId);
+    const startedEntry = buildCodexTaskStartedEntry(taskStartedTemplate!, userTimestamp, turnId);
+    const completedEntry = buildCodexTaskCompleteEntry(taskCompleteTemplate!, assistantTimestamp, turnId, turn.assistantText);
+    const assistantId = ((assistantEntry.payload as JsonObject).id as string);
+    lines.push(JSON.stringify(startedEntry));
+    lines.push(JSON.stringify(userEntry));
+    lines.push(JSON.stringify(assistantEntry));
+    lines.push(JSON.stringify(completedEntry));
+    written.push({
+      logicalId: turn.logicalId,
+      contentDigest: turn.contentDigest,
+      nativeIds: {
+        userId: `user:${turnId}`,
+        assistantIds: [assistantId],
+        completionId: turnId,
+      },
+    });
   });
-  return lines;
+  return { lines, written };
+}
+
+function isCodexTaskEventTemplate(entry: JsonObject, type: 'task_started' | 'task_complete'): boolean {
+  if (entry.type !== 'event_msg') {
+    return false;
+  }
+  const payload = entry.payload;
+  return isJsonObject(payload) && payload.type === type && typeof payload.turn_id === 'string';
 }
 
 function isCodexUserTemplate(entry: JsonObject): boolean {
@@ -139,6 +166,7 @@ function buildCodexUserEntry(
   const entry = JSON.parse(templateLine) as JsonObject;
   entry.timestamp = timestamp;
   const payload = entry.payload as JsonObject;
+  delete payload.id;
   (payload.content as JsonObject[])[0]!.text = text;
   setTurnId(payload, turnId);
   return entry;
@@ -156,6 +184,27 @@ function buildCodexAssistantEntry(
   (payload.content as JsonObject[])[0]!.text = text;
   payload.id = `msg_${randomHex(32)}`;
   setTurnId(payload, turnId);
+  return entry;
+}
+
+function buildCodexTaskStartedEntry(templateLine: string, timestamp: string, turnId: string): JsonObject {
+  const entry = JSON.parse(templateLine) as JsonObject;
+  entry.timestamp = timestamp;
+  const payload = entry.payload as JsonObject;
+  payload.turn_id = turnId;
+  payload.started_at = Math.floor(Date.parse(timestamp) / 1000);
+  return entry;
+}
+
+function buildCodexTaskCompleteEntry(templateLine: string, timestamp: string, turnId: string, assistantText: string): JsonObject {
+  const entry = JSON.parse(templateLine) as JsonObject;
+  entry.timestamp = timestamp;
+  const payload = entry.payload as JsonObject;
+  payload.turn_id = turnId;
+  payload.last_agent_message = assistantText;
+  payload.completed_at = Math.floor(Date.parse(timestamp) / 1000);
+  payload.duration_ms = 0;
+  payload.time_to_first_token_ms = 0;
   return entry;
 }
 

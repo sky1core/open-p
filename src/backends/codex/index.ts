@@ -11,6 +11,7 @@ import { findCodexSessionLogPath } from './session-log.js';
 import { appendCodexSessionHistory } from './history-writer.js';
 import { CodexBackend } from './backend.js';
 import { probeCodexLogin } from './login.js';
+import { readCodexNativeSession } from './native-reader.js';
 
 export interface CodexBackendProviderOptions {
   readonly id?: string;
@@ -51,8 +52,16 @@ export function createCodexBackendProvider(options: CodexBackendProviderOptions 
       return findCodexSessionLogPath(sessionId, homeDir);
     },
 
-    async appendSessionHistory(input: AppendSessionHistoryInput): Promise<void> {
-      await appendCodexSessionHistory({
+    async readNativeSession(input) {
+      return readCodexNativeSession({
+        backend: id,
+        sessionId: input.sessionId,
+        homeDir,
+      });
+    },
+
+    async appendSessionHistory(input: AppendSessionHistoryInput) {
+      return appendCodexSessionHistory({
         sessionId: input.sessionId,
         cwd: input.cwd,
         turns: input.turns,

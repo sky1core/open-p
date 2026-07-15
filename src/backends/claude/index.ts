@@ -11,6 +11,7 @@ import { ClaudeCodeWorkerBridge } from './worker-bridge.js';
 import { appendClaudeCodeSessionHistory } from './history-writer.js';
 import { findClaudeCodeSessionLog } from './session-log.js';
 import { probeClaudeCodeLogin } from './login.js';
+import { readClaudeCodeNativeSession } from './native-reader.js';
 
 export interface ClaudeBackendProviderOptions {
   readonly id?: string;
@@ -57,8 +58,17 @@ export function createClaudeBackendProvider(options: ClaudeBackendProviderOption
       return findClaudeCodeSessionLog(sessionId, cwd, configDir);
     },
 
-    async appendSessionHistory(input: AppendSessionHistoryInput): Promise<void> {
-      await appendClaudeCodeSessionHistory({
+    async readNativeSession(input) {
+      return readClaudeCodeNativeSession({
+        backend: id,
+        sessionId: input.sessionId,
+        cwd: input.cwd,
+        configDir,
+      });
+    },
+
+    async appendSessionHistory(input: AppendSessionHistoryInput) {
+      return appendClaudeCodeSessionHistory({
         sessionId: input.sessionId,
         cwd: input.cwd,
         turns: input.turns,

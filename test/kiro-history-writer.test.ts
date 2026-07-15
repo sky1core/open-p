@@ -4,12 +4,14 @@ import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
-import type { SessionHistoryTurn } from '../src/core/backend.js';
+import type { SeedWriteTurn } from '../src/core/backend.js';
 import { isAbortError } from '../src/core/abort.js';
 import { OpenPError } from '../src/core/errors.js';
 import {
   appendKiroSessionHistory,
+  buildKiroCompanionWithAppendedTurns,
   buildKiroHistoryEntries,
+  commitKiroHistoryAppend,
 } from '../src/backends/kiro/history-writer.js';
 import { resolveKiroSessionLogPath } from '../src/backends/kiro/session-log.js';
 
@@ -17,12 +19,14 @@ const GOLDEN = join(process.cwd(), 'test/fixtures/seed/redacted-kiro-golden.json
 const COMPANION = join(process.cwd(), 'test/fixtures/seed/redacted-kiro-golden.json');
 const FIXTURE_CWD = '/redacted/workspace';
 const NOW_SEC = Math.floor(Date.UTC(2026, 6, 14, 12, 0, 0) / 1000);
-const TURNS: readonly SessionHistoryTurn[] = [
-  { role: 'user', text: 'U-one' },
-  { role: 'assistant', text: 'A-one' },
-  { role: 'user', text: 'U-two' },
-  { role: 'assistant', text: 'A-two' },
+const TURNS: readonly SeedWriteTurn[] = [
+  { logicalId: 'turn-1', userText: 'U-one', assistantText: 'A-one', contentDigest: 'digest-1', sourceNativeIds: null },
+  { logicalId: 'turn-2', userText: 'U-two', assistantText: 'A-two', contentDigest: 'digest-2', sourceNativeIds: null },
 ];
+const EXPECTED_ENTRIES = TURNS.flatMap((turn) => [
+  { role: 'user', text: turn.userText },
+  { role: 'assistant', text: turn.assistantText },
+]);
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 type Entry = Record<string, any>;
@@ -68,12 +72,14 @@ test('buildKiroHistoryEntries clones templates, freshens ids, and scopes meta to
   const logText = await readFile(GOLDEN, 'utf8');
   const fixtureMessageIds = new Set(fixtureEntries(logText).map((e) => e.data?.message_id));
 
-  const lines = buildKiroHistoryEntries(logText, TURNS, NOW_SEC);
-  assert.equal(lines.length, TURNS.length);
+  const built = buildKiroHistoryEntries(logText, TURNS, NOW_SEC);
+  const lines = built.lines;
+  assert.equal(lines.length, EXPECTED_ENTRIES.length);
+  assert.equal(built.written.length, TURNS.length);
   const appended = lines.map((l) => JSON.parse(l) as Entry);
 
   appended.forEach((entry, index) => {
-    const turn = TURNS[index]!;
+    const turn = EXPECTED_ENTRIES[index]!;
     assert.equal(entry.version, 'v1');
     assert.equal(entry.kind, turn.role === 'user' ? 'Prompt' : 'AssistantMessage');
     assert.equal(entry.data.content.length, 1);
@@ -105,10 +111,11 @@ test('buildKiroHistoryEntries clones templates, freshens ids, and scopes meta to
   }
 
   // Round-trip: re-extracted texts equal the input turns.
-  assert.deepEqual(appended.map(kiroText), TURNS.map((t) => t.text));
+  assert.deepEqual(appended.map(kiroText), EXPECTED_ENTRIES.map((t) => t.text));
+  assert.deepEqual(built.written.map((turn) => turn.logicalId), TURNS.map((turn) => turn.logicalId));
 });
 
-test('appendKiroSessionHistory appends to the jsonl and leaves the .json companion byte-identical', async () => {
+test('appendKiroSessionHistory appends to the jsonl and updates the .json companion completions', async () => {
   const home = await mkdtemp(join(tmpdir(), 'openp-kiro-home-'));
   await withHome(home, async () => {
     const sessionId = randomUUID();
@@ -120,19 +127,46 @@ test('appendKiroSessionHistory appends to the jsonl and leaves the .json compani
     await writeFile(logPath, original);
     await writeFile(companionPath, companionOriginal);
     const beforeSha = sha256(original);
-    const companionSha = sha256(companionOriginal);
+    const beforeCompanion = JSON.parse(companionOriginal.toString('utf8'));
+    const beforeMetadataCount = beforeCompanion.session_state.conversation_metadata.user_turn_metadatas.length;
 
-    await appendKiroSessionHistory({ sessionId, cwd: FIXTURE_CWD, turns: TURNS });
+    const result = await appendKiroSessionHistory({ sessionId, cwd: FIXTURE_CWD, turns: TURNS });
 
     const after = await readFile(logPath);
     assert.equal(sha256(after.subarray(0, original.length)), beforeSha, 'existing jsonl bytes must be immutable');
-    assert.equal(sha256(await readFile(companionPath)), companionSha, '.json companion must be untouched');
     const originalLines = original.toString('utf8').trimEnd().split('\n');
     const afterLines = after.toString('utf8').trimEnd().split('\n');
-    assert.equal(afterLines.length, originalLines.length + TURNS.length);
+    assert.equal(afterLines.length, originalLines.length + EXPECTED_ENTRIES.length);
     const appended = afterLines.slice(originalLines.length).map((l) => JSON.parse(l) as Entry);
-    assert.deepEqual(appended.map(kiroText), TURNS.map((t) => t.text));
+    assert.deepEqual(appended.map(kiroText), EXPECTED_ENTRIES.map((t) => t.text));
+    assert.equal(result.turns.length, TURNS.length);
+    const afterCompanion = JSON.parse(await readFile(companionPath, 'utf8'));
+    const metadatas = afterCompanion.session_state.conversation_metadata.user_turn_metadatas;
+    assert.equal(metadatas.length, beforeMetadataCount + TURNS.length);
+    const appendedMetadata = metadatas.slice(beforeMetadataCount);
+    assert.deepEqual(appendedMetadata.map((m: any) => m.message_ids), result.turns.map((turn) => [
+      turn.nativeIds.userId,
+      ...turn.nativeIds.assistantIds,
+    ]));
+    assert.deepEqual(appendedMetadata.map((m: any) => m.result.Ok.content[0].data), TURNS.map((turn) => turn.assistantText));
   });
+});
+
+test('companion publish failure rolls the JSONL append back to its exact prior bytes', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-kiro-transaction-'));
+  const logPath = join(dir, 'session.jsonl');
+  const companionPath = join(dir, 'companion.json');
+  const original = Buffer.from('{"existing":true}\n');
+  await writeFile(logPath, original);
+  await mkdir(companionPath);
+
+  await assert.rejects(() => commitKiroHistoryAppend({
+    logPath,
+    companionPath,
+    lines: ['{"new":true}'],
+    companion: '{"updated":true}\n',
+  }));
+  assert.deepEqual(await readFile(logPath), original);
 });
 
 test('missing Prompt or AssistantMessage template is a protocol violation', () => {
@@ -145,6 +179,16 @@ test('missing Prompt or AssistantMessage template is a protocol violation', () =
     version: 'v1', kind: 'Prompt', data: { message_id: randomUUID(), content: [{ kind: 'text', data: 'hi' }], meta: { timestamp: NOW_SEC } },
   });
   assertExitCode(() => buildKiroHistoryEntries(noAssistant, TURNS, NOW_SEC), 40);
+});
+
+test('malformed companion JSON is a protocol violation', () => {
+  assertExitCode(() => buildKiroCompanionWithAppendedTurns('{not-json', TURNS, []), 40);
+});
+
+test('companion version drift is a protocol violation', async () => {
+  const companion = JSON.parse(await readFile(COMPANION, 'utf8'));
+  companion.session_state.version = 'v2';
+  assertExitCode(() => buildKiroCompanionWithAppendedTurns(JSON.stringify(companion), TURNS, []), 40);
 });
 
 test('appendKiroSessionHistory rejects an unsafe session id as sessionLogNotFound', async () => {

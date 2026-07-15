@@ -19,10 +19,10 @@ export interface BackendProvider {
   createBackend(provider: PtyProvider): Backend;
   createWorkerBridge(): BackendWorkerBridge;
   resolveSessionLogPath(sessionId: string, cwd: string): Promise<string | null>;
-  // Optional seeding capability. Absence means the backend does not support `openp seed`
-  // (opencode). The provider owns instance-config resolution (configDir/homeDir) so the
-  // core seed orchestrator stays backend-neutral and holds no session-log schema knowledge.
-  appendSessionHistory?(input: AppendSessionHistoryInput): Promise<void>;
+  // Optional native history capabilities. Providers own backend-specific artifact lookup and
+  // schema interpretation so the core seed orchestrator stays backend-neutral.
+  readNativeSession?(input: ReadNativeSessionInput): Promise<NativeSessionReadResult>;
+  appendSessionHistory?(input: AppendSessionHistoryInput): Promise<AppendSessionHistoryResult>;
 }
 
 export interface BackendLoginStatus {
@@ -30,18 +30,53 @@ export interface BackendLoginStatus {
   readonly loggedIn: boolean;
 }
 
-// A single prior conversation turn to record into a native backend session. open-p does not own
-// the conversation ledger; the caller supplies these text turns and open-p appends them.
-export interface SessionHistoryTurn {
-  readonly role: 'user' | 'assistant';
-  readonly text: string;
+export interface NativeTurnIds {
+  readonly userId: string;
+  readonly assistantIds: readonly string[];
+  readonly completionId: string;
+}
+
+export interface NativeSessionTurn {
+  readonly userText: string;
+  readonly assistantText: string;
+  readonly nativeIds: NativeTurnIds;
+}
+
+export interface NativeSessionReadResult {
+  readonly backend: string;
+  readonly sessionId: string;
+  readonly turns: readonly NativeSessionTurn[];
+}
+
+export interface ReadNativeSessionInput {
+  readonly sessionId: string;
+  readonly cwd: string;
+  readonly signal?: AbortSignal;
+}
+
+export interface SeedWriteTurn {
+  readonly logicalId: string;
+  readonly userText: string;
+  readonly assistantText: string;
+  readonly contentDigest: string;
+  readonly sourceNativeIds: NativeTurnIds | null;
+}
+
+export interface NativeWrittenTurn {
+  readonly logicalId: string;
+  readonly contentDigest: string;
+  readonly nativeIds: NativeTurnIds;
 }
 
 export interface AppendSessionHistoryInput {
   readonly sessionId: string;
   readonly cwd: string;
-  readonly turns: readonly SessionHistoryTurn[];
+  readonly turns: readonly SeedWriteTurn[];
   // Writers must re-check this immediately before the log write so an interrupt received while
   // reading/building never lands a post-abort append.
   readonly signal?: AbortSignal;
+}
+
+export interface AppendSessionHistoryResult {
+  readonly turns: readonly NativeWrittenTurn[];
 }

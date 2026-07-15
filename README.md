@@ -212,6 +212,62 @@ openp codex --resume <session-id> "follow-up"
 
 Text output does not include session ids.
 
+## Session Seeding
+
+`openp seed` translates completed user/assistant turns from one native backend session into another
+backend's native session format. Each source backend Reader converts its native completion evidence
+into a backend-neutral logical-turn IR; each target backend Writer converts that IR into target-native
+records. Backend-native logs are never parsed by another backend. The normal turn output envelope is
+not used; success is exactly one JSON line under `seed`.
+
+Create a new target session from a native source:
+
+```bash
+openp seed codex --source-backend claude --source-session <claude-session-id>
+```
+
+Append only the missing logical suffix to an existing target session:
+
+```bash
+openp seed kiro --resume <kiro-session-id> \
+  --source-backend codex --source-session <codex-session-id>
+```
+
+Import a strict external IR document into a new target session:
+
+```bash
+openp seed claude --input-ir ./turns.ir.json
+```
+
+External IR v1:
+
+```json
+{
+  "schemaVersion": 1,
+  "turns": [
+    {
+      "id": "caller-stable-id",
+      "user": {"text": "Remember the project codename is BLUEFIN."},
+      "assistant": {"text": "Noted."}
+    }
+  ]
+}
+```
+
+`--input-ir` is create-only and cannot be combined with `--resume`. `--history` is not supported.
+In create mode, `--model`, `--effort`, and `--timeout` apply to the target bootstrap turn. In append
+mode, those options are rejected.
+
+Example success output:
+
+```json
+{"seed":{"source":{"kind":"native","backend":"claude","sessionId":"..."},"target":{"backend":"codex","sessionId":"..."},"appendedTurns":2,"mode":"create","status":"created"}}
+```
+
+`status` is `created`, `updated`, or `noop`. If the source and target logical turn sequences have
+diverged, or a backend session contains compaction/rollback/revert state that cannot be converted
+safely, seeding fails closed without guessing a transcript.
+
 ## Timeout and Interrupt
 
 No default timeout. Set one explicitly:

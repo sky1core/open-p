@@ -1,5 +1,6 @@
-import { open, stat } from 'node:fs/promises';
+import { open, stat, truncate } from 'node:fs/promises';
 import { throwIfAborted } from './abort.js';
+import { EXIT_CODES, OpenPError } from './errors.js';
 
 // Append-only JSONL writer. Knows file mechanics only; it holds no session-log schema knowledge.
 // Existing bytes are never rewritten: the pre-existing content is read solely to decide whether a
@@ -14,29 +15,59 @@ export async function appendJsonlLines(
   if (lines.length === 0) {
     return;
   }
-  const leading = (await fileEndsWithNewline(path)) ? '' : '\n';
+  const file = await inspectFileEnd(path);
+  const leading = file.endsWithNewline ? '' : '\n';
   const payload = `${leading}${lines.join('\n')}\n`;
   throwIfAborted(signal);
   const handle = await open(path, 'a');
+  await commitAppendTransaction({
+    write: () => handle.writeFile(payload, 'utf8'),
+    close: () => handle.close(),
+    rollback: () => truncate(path, file.size),
+  });
+}
+
+export async function commitAppendTransaction(input: {
+  readonly write: () => Promise<void>;
+  readonly close: () => Promise<void>;
+  readonly rollback: () => Promise<void>;
+}): Promise<void> {
+  let failure: unknown = null;
   try {
-    await handle.writeFile(payload, 'utf8');
-  } finally {
-    await handle.close();
+    await input.write();
+  } catch (error) {
+    failure = error;
   }
+  try {
+    await input.close();
+  } catch (error) {
+    if (failure === null) {
+      failure = error;
+    }
+  }
+  if (failure === null) {
+    return;
+  }
+  try {
+    await input.rollback();
+  } catch {
+    throw new OpenPError('JSONL append failed and its partial write could not be rolled back', EXIT_CODES.protocolViolation);
+  }
+  throw failure;
 }
 
 // An empty file needs no separator. A non-empty file needs a leading newline only when its last
 // byte is not already a line feed. ENOENT propagates to the caller (mapped to sessionLogNotFound).
-async function fileEndsWithNewline(path: string): Promise<boolean> {
+async function inspectFileEnd(path: string): Promise<{ readonly size: number; readonly endsWithNewline: boolean }> {
   const stats = await stat(path);
   if (stats.size === 0) {
-    return true;
+    return { size: 0, endsWithNewline: true };
   }
   const handle = await open(path, 'r');
   try {
     const buffer = Buffer.alloc(1);
     await handle.read(buffer, 0, 1, stats.size - 1);
-    return buffer[0] === 0x0a;
+    return { size: stats.size, endsWithNewline: buffer[0] === 0x0a };
   } finally {
     await handle.close();
   }

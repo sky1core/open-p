@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { appendFile, mkdtemp, readFile, truncate, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { isAbortError } from '../src/core/abort.js';
-import { appendJsonlLines } from '../src/core/jsonl-append.js';
+import { appendJsonlLines, commitAppendTransaction } from '../src/core/jsonl-append.js';
 
 function sha256(buffer: Buffer): string {
   return createHash('sha256').update(buffer).digest('hex');
@@ -78,4 +78,25 @@ test('an aborted signal rejects after the newline probe and before the write', a
   );
 
   assert.equal(sha256(await readFile(path)), sha256(original), 'file must be untouched after an aborted append');
+});
+
+test('a partial append failure truncates the file back to its exact original bytes', async () => {
+  const path = await scratchFile('log.jsonl');
+  const original = Buffer.from('{"a":1}\n', 'utf8');
+  await writeFile(path, original);
+  const injected = new Error('injected partial write failure');
+
+  await assert.rejects(
+    () => commitAppendTransaction({
+      write: async () => {
+        await appendFile(path, '{"partial"');
+        throw injected;
+      },
+      close: async () => undefined,
+      rollback: () => truncate(path, original.length),
+    }),
+    (error) => error === injected,
+  );
+
+  assert.equal(sha256(await readFile(path)), sha256(original));
 });

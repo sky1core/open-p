@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
-import type { SessionHistoryTurn } from '../src/core/backend.js';
+import type { SeedWriteTurn } from '../src/core/backend.js';
 import { isAbortError } from '../src/core/abort.js';
 import { OpenPError } from '../src/core/errors.js';
 import {
@@ -17,12 +17,14 @@ const GOLDEN = join(process.cwd(), 'test/fixtures/seed/redacted-codex-golden.jso
 const BOOTSTRAP = join(process.cwd(), 'test/fixtures/seed/redacted-codex-bootstrap.jsonl');
 const FIXTURE_CWD = '/redacted/workspace';
 const NOW = Date.UTC(2026, 6, 14, 12, 0, 0);
-const TURNS: readonly SessionHistoryTurn[] = [
-  { role: 'user', text: 'U-one' },
-  { role: 'assistant', text: 'A-one' },
-  { role: 'user', text: 'U-two' },
-  { role: 'assistant', text: 'A-two' },
+const TURNS: readonly SeedWriteTurn[] = [
+  { logicalId: 'turn-1', userText: 'U-one', assistantText: 'A-one', contentDigest: 'digest-1', sourceNativeIds: null },
+  { logicalId: 'turn-2', userText: 'U-two', assistantText: 'A-two', contentDigest: 'digest-2', sourceNativeIds: null },
 ];
+const EXPECTED_TEXT_ENTRIES = TURNS.flatMap((turn) => [
+  { role: 'user', text: turn.userText },
+  { role: 'assistant', text: turn.assistantText },
+]);
 const UUIDV7_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const MSG_ID_RE = /^msg_[0-9a-f]{32}$/;
 
@@ -50,12 +52,20 @@ function turnIdOf(entry: Entry): string {
   return entry.payload.internal_chat_message_metadata_passthrough.turn_id;
 }
 
+function eventTurnIdOf(entry: Entry): string {
+  return entry.payload.turn_id;
+}
+
 function uuidv7Ms(id: string): number {
   return parseInt(id.replace(/-/g, '').slice(0, 12), 16);
 }
 
 function codexText(entry: Entry): string {
   return entry.payload.content[0].text;
+}
+
+function responseItems(entries: readonly Entry[]): Entry[] {
+  return entries.filter((entry) => entry.type === 'response_item');
 }
 
 function sha256(buffer: Buffer): string {
@@ -90,33 +100,57 @@ for (const [label, path] of [['golden', GOLDEN], ['bootstrap', BOOTSTRAP]] as co
     const userTemplate = lastCodexUserTemplate(entries);
     const assistantTemplate = lastCodexAssistantTemplate(entries);
 
-    const lines = buildCodexHistoryEntries(logText, TURNS, NOW);
-    assert.equal(lines.length, TURNS.length);
+    const built = buildCodexHistoryEntries(logText, TURNS, NOW);
+    const lines = built.lines;
+    assert.equal(lines.length, TURNS.length * 4);
+    assert.equal(built.written.length, TURNS.length);
     const appended = lines.map((l) => JSON.parse(l) as Entry);
 
-    // Roles and content reconstruction (single text block replaced in place).
-    appended.forEach((entry, index) => {
-      const turn = TURNS[index]!;
-      assert.equal(entry.type, 'response_item');
-      assert.equal(entry.payload.role, turn.role);
-      assert.equal(entry.payload.type, 'message');
-      assert.equal(entry.payload.content.length, 1);
-      assert.equal(codexText(entry), turn.text);
+    // Native sequence and content reconstruction: task_started, user, assistant, task_complete per turn.
+    TURNS.forEach((turn, turnIndex) => {
+      const base = turnIndex * 4;
+      const startedEntry = appended[base]!;
+      const userEntry = appended[base + 1]!;
+      const assistantEntry = appended[base + 2]!;
+      const completedEntry = appended[base + 3]!;
+      assert.equal(startedEntry.type, 'event_msg');
+      assert.equal(startedEntry.payload.type, 'task_started');
+      assert.equal(userEntry.type, 'response_item');
+      assert.equal(userEntry.payload.role, 'user');
+      assert.equal(userEntry.payload.type, 'message');
+      assert.equal(userEntry.payload.content.length, 1);
+      assert.equal(codexText(userEntry), turn.userText);
+      assert.equal(assistantEntry.type, 'response_item');
+      assert.equal(assistantEntry.payload.role, 'assistant');
+      assert.equal(assistantEntry.payload.type, 'message');
+      assert.equal(assistantEntry.payload.content.length, 1);
+      assert.equal(codexText(assistantEntry), turn.assistantText);
+      assert.equal(completedEntry.type, 'event_msg');
+      assert.equal(completedEntry.payload.type, 'task_complete');
+      assert.equal(completedEntry.payload.last_agent_message, turn.assistantText);
+      assert.equal(completedEntry.payload.duration_ms, 0);
+      assert.equal(completedEntry.payload.time_to_first_token_ms, 0);
+
+      const turnId = turnIdOf(userEntry);
+      assert.equal(eventTurnIdOf(startedEntry), turnId);
+      assert.equal(turnIdOf(assistantEntry), turnId);
+      assert.equal(eventTurnIdOf(completedEntry), turnId);
+      assert.equal(built.written[turnIndex]!.nativeIds.userId, `user:${turnId}`);
+      assert.deepEqual(built.written[turnIndex]!.nativeIds.assistantIds, [assistantEntry.payload.id]);
+      assert.equal(built.written[turnIndex]!.nativeIds.completionId, turnId);
     });
 
-    // turn_id pairing: user opens a fresh UUIDv7, the following assistant inherits it.
-    const ids = appended.map(turnIdOf);
-    assert.equal(ids[0], ids[1]);
-    assert.equal(ids[2], ids[3]);
-    assert.notEqual(ids[0], ids[2]);
+    // turn_id pairing: each native pair has one fresh UUIDv7 shared by task/user/assistant/completion.
+    const ids = responseItems(appended).filter((entry) => entry.payload.role === 'user').map(turnIdOf);
+    assert.notEqual(ids[0], ids[1]);
     for (const id of ids) {
       assert.match(id, UUIDV7_RE);
     }
     // Turn ids are time-ordered (embedded ms is non-decreasing).
-    assert.ok(uuidv7Ms(ids[0]!) <= uuidv7Ms(ids[2]!));
+    assert.ok(uuidv7Ms(ids[0]!) <= uuidv7Ms(ids[1]!));
 
     // Assistant identity: fresh, unique msg_ ids; input_text content type preserved for user.
-    const assistantEntries = appended.filter((e) => e.payload.role === 'assistant');
+    const assistantEntries = responseItems(appended).filter((e) => e.payload.role === 'assistant');
     const msgIds = assistantEntries.map((e) => e.payload.id);
     assert.equal(new Set(msgIds).size, msgIds.length);
     for (const entry of assistantEntries) {
@@ -125,34 +159,54 @@ for (const [label, path] of [['golden', GOLDEN], ['bootstrap', BOOTSTRAP]] as co
       // phase and other bookkeeping preserved from template.
       assert.equal(entry.payload.phase, assistantTemplate.payload.phase);
     }
-    for (const entry of appended.filter((e) => e.payload.role === 'user')) {
+    for (const entry of responseItems(appended).filter((e) => e.payload.role === 'user')) {
       assert.equal(entry.payload.content[0].type, 'input_text');
-      // User items carry no payload.id (none is synthesized).
-      assert.equal(Object.prototype.hasOwnProperty.call(entry.payload, 'id'), userTemplate.payload.id !== undefined);
+      // User items carry no payload.id; inherited template ids would collide across seeded turns.
+      assert.equal(Object.prototype.hasOwnProperty.call(entry.payload, 'id'), false);
     }
 
-    // Monotonic top-level timestamps, +1ms per entry from the injected clock.
-    appended.forEach((entry, index) => {
-      assert.equal(entry.timestamp, new Date(NOW + index).toISOString());
+    // Timestamps follow Codex turn boundaries: start/user share the start, assistant/complete share completion.
+    TURNS.forEach((_turn, turnIndex) => {
+      const base = turnIndex * 4;
+      assert.equal(appended[base]!.timestamp, new Date(NOW + turnIndex * 2).toISOString());
+      assert.equal(appended[base + 1]!.timestamp, new Date(NOW + turnIndex * 2).toISOString());
+      assert.equal(appended[base + 2]!.timestamp, new Date(NOW + turnIndex * 2 + 1).toISOString());
+      assert.equal(appended[base + 3]!.timestamp, new Date(NOW + turnIndex * 2 + 1).toISOString());
     });
 
     // Round-trip: re-extracted texts equal the input turns.
-    assert.deepEqual(appended.map(codexText), TURNS.map((t) => t.text));
+    assert.deepEqual(responseItems(appended).map(codexText), EXPECTED_TEXT_ENTRIES.map((t) => t.text));
+    assert.deepEqual(built.written.map((turn) => turn.logicalId), TURNS.map((turn) => turn.logicalId));
   });
 }
 
-test('a batch that leads with an assistant gets its own fresh turn id', async () => {
+test('each pair gets a fresh turn id shared by user and assistant', async () => {
   const logText = await readFile(GOLDEN, 'utf8');
-  const leadTurns: readonly SessionHistoryTurn[] = [
-    { role: 'assistant', text: 'A0' },
-    { role: 'user', text: 'U1' },
-    { role: 'assistant', text: 'A2' },
-  ];
-  const appended = buildCodexHistoryEntries(logText, leadTurns, NOW).map((l) => JSON.parse(l) as Entry);
-  const ids = appended.map(turnIdOf);
-  assert.match(ids[0]!, UUIDV7_RE); // leading assistant opened a fresh id
-  assert.equal(ids[1], ids[2]); // user opened a new id, following assistant inherited it
-  assert.notEqual(ids[0], ids[1]);
+  const appended = buildCodexHistoryEntries(logText, TURNS, NOW).lines.map((l) => JSON.parse(l) as Entry);
+  for (let turnIndex = 0; turnIndex < TURNS.length; turnIndex += 1) {
+    const base = turnIndex * 4;
+    const turnId = eventTurnIdOf(appended[base]!);
+    assert.equal(turnIdOf(appended[base + 1]!), turnId);
+    assert.equal(turnIdOf(appended[base + 2]!), turnId);
+    assert.equal(eventTurnIdOf(appended[base + 3]!), turnId);
+    assert.match(turnId, UUIDV7_RE);
+  }
+  assert.notEqual(eventTurnIdOf(appended[0]!), eventTurnIdOf(appended[4]!));
+});
+
+test('user template payload ids are removed instead of being cloned into seeded turns', async () => {
+  const logText = await readFile(GOLDEN, 'utf8');
+  const template = structuredClone(lastCodexUserTemplate(fixtureEntries(logText)));
+  template.payload.id = 'template-user-id';
+  const built = buildCodexHistoryEntries(`${logText.trimEnd()}\n${JSON.stringify(template)}\n`, TURNS, NOW);
+  const users = responseItems(built.lines.map((line) => JSON.parse(line) as Entry))
+    .filter((entry) => entry.payload.role === 'user');
+  assert.equal(users.length, TURNS.length);
+  assert.ok(users.every((entry) => !Object.prototype.hasOwnProperty.call(entry.payload, 'id')));
+  assert.deepEqual(
+    built.written.map((turn, index) => turn.nativeIds.userId === `user:${turnIdOf(users[index]!)}`),
+    TURNS.map(() => true),
+  );
 });
 
 test('appendCodexSessionHistory appends to the resolved log without rewriting the prefix', async () => {
@@ -170,9 +224,9 @@ test('appendCodexSessionHistory appends to the resolved log without rewriting th
   assert.equal(sha256(after.subarray(0, original.length)), beforeSha, 'existing bytes (instructions head included) must be immutable');
   const originalLines = original.toString('utf8').trimEnd().split('\n');
   const afterLines = after.toString('utf8').trimEnd().split('\n');
-  assert.equal(afterLines.length, originalLines.length + TURNS.length);
+  assert.equal(afterLines.length, originalLines.length + TURNS.length * 4);
   const appended = afterLines.slice(originalLines.length).map((l) => JSON.parse(l) as Entry);
-  assert.deepEqual(appended.map(codexText), TURNS.map((t) => t.text));
+  assert.deepEqual(responseItems(appended).map(codexText), EXPECTED_TEXT_ENTRIES.map((t) => t.text));
 });
 
 test('missing user or assistant template is a protocol violation', () => {
@@ -191,9 +245,10 @@ test('missing user or assistant template is a protocol violation', () => {
 
 test('unparseable lines are skipped, not rewritten or fatal', async () => {
   const logText = `not json\n${await readFile(GOLDEN, 'utf8')}\n{unterminated`;
-  const lines = buildCodexHistoryEntries(logText, TURNS, NOW);
-  assert.equal(lines.length, TURNS.length);
-  assert.deepEqual(lines.map((l) => codexText(JSON.parse(l))), TURNS.map((t) => t.text));
+  const built = buildCodexHistoryEntries(logText, TURNS, NOW);
+  assert.equal(built.lines.length, TURNS.length * 4);
+  const appended = built.lines.map((l) => JSON.parse(l) as Entry);
+  assert.deepEqual(responseItems(appended).map(codexText), EXPECTED_TEXT_ENTRIES.map((t) => t.text));
 });
 
 test('appendCodexSessionHistory reports a missing log as sessionLogNotFound', async () => {

@@ -1,9 +1,13 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
-import type { SessionHistoryTurn } from '../../core/backend.js';
+import type { AppendSessionHistoryResult, NativeWrittenTurn, SeedWriteTurn } from '../../core/backend.js';
 import { EXIT_CODES, OpenPError } from '../../core/errors.js';
 import { appendJsonlLines } from '../../core/jsonl-append.js';
 import { findClaudeCodeSessionLog } from './session-log.js';
+import {
+  isCallerUserTurn,
+  rememberLocalCommandTranscriptPromptId,
+} from './turn-boundary-predicates.js';
 
 interface JsonObject {
   [key: string]: unknown;
@@ -14,10 +18,10 @@ interface JsonObject {
 export async function appendClaudeCodeSessionHistory(input: {
   readonly sessionId: string;
   readonly cwd: string;
-  readonly turns: readonly SessionHistoryTurn[];
+  readonly turns: readonly SeedWriteTurn[];
   readonly configDir?: string | null;
   readonly signal?: AbortSignal;
-}): Promise<void> {
+}): Promise<AppendSessionHistoryResult> {
   const logPath = await findClaudeCodeSessionLog(input.sessionId, input.cwd, input.configDir ?? null);
   if (!logPath) {
     throw new OpenPError(`claude session log not found for ${input.sessionId}`, EXIT_CODES.sessionLogNotFound);
@@ -31,22 +35,26 @@ export async function appendClaudeCodeSessionHistory(input: {
     }
     throw error;
   }
-  const lines = buildClaudeCodeHistoryEntries(logText, input.turns);
-  await appendJsonlLines(logPath, lines, input.signal);
+  const built = buildClaudeCodeHistoryEntries(logText, input.turns);
+  await appendJsonlLines(logPath, built.lines, input.signal);
+  return { turns: built.written };
 }
 
 // Pure transform (unit-test surface): existing log text -> JSON lines to append.
 // The last user entry (string content) and last assistant entry (with a text block) are the clone
-// templates; the parent chain starts from the last uuid-bearing entry. Missing templates or chain
-// start is a protocol violation. Unparseable lines are skipped, never rewritten.
+// templates; the last turn_duration entry is the completion template. The parent chain starts from
+// the last uuid-bearing entry. Missing templates or chain start is a protocol violation.
+// Unparseable lines are skipped, never rewritten.
 export function buildClaudeCodeHistoryEntries(
   logText: string,
-  turns: readonly SessionHistoryTurn[],
+  turns: readonly SeedWriteTurn[],
   nowMs: number = Date.now(),
-): string[] {
+): { readonly lines: readonly string[]; readonly written: readonly NativeWrittenTurn[] } {
   let userTemplate: string | null = null;
   let assistantTemplate: string | null = null;
+  let completionTemplate: string | null = null;
   let chainStartUuid: string | null = null;
+  const localCommandTranscriptPromptIds = new Set<string>();
 
   for (const rawLine of logText.split('\n')) {
     const line = rawLine.trim();
@@ -62,20 +70,24 @@ export function buildClaudeCodeHistoryEntries(
     if (!isJsonObject(entry)) {
       continue;
     }
-    if (isUserTemplateEntry(entry)) {
+    rememberLocalCommandTranscriptPromptId(localCommandTranscriptPromptIds, entry);
+    if (isUserTemplateEntry(entry, localCommandTranscriptPromptIds)) {
       userTemplate = line;
     }
     if (isAssistantTemplateEntry(entry)) {
       assistantTemplate = line;
+    }
+    if (isCompletionTemplateEntry(entry)) {
+      completionTemplate = line;
     }
     if (typeof entry.uuid === 'string' && entry.uuid.length > 0) {
       chainStartUuid = entry.uuid;
     }
   }
 
-  if (!userTemplate || !assistantTemplate) {
+  if (!userTemplate || !assistantTemplate || !completionTemplate) {
     throw new OpenPError(
-      'claude session log has no user/assistant template entry to clone',
+      'claude session log has no user/assistant/completion template entry to clone',
       EXIT_CODES.protocolViolation,
     );
   }
@@ -87,29 +99,61 @@ export function buildClaudeCodeHistoryEntries(
   }
 
   const lines: string[] = [];
+  const written: NativeWrittenTurn[] = [];
   let parentUuid = chainStartUuid;
-  turns.forEach((turn, index) => {
-    const uuid = randomUUID();
-    const timestamp = new Date(nowMs + index).toISOString();
-    const entry = turn.role === 'user'
-      ? buildUserEntry(userTemplate!, turn.text, uuid, parentUuid, timestamp)
-      : buildAssistantEntry(assistantTemplate!, turn.text, uuid, parentUuid, timestamp);
-    lines.push(JSON.stringify(entry));
-    parentUuid = uuid;
+  let entryIndex = 0;
+  turns.forEach((turn) => {
+    const userUuid = randomUUID();
+    const userTimestamp = new Date(nowMs + entryIndex).toISOString();
+    entryIndex += 1;
+    const userEntry = buildUserEntry(userTemplate!, turn.userText, userUuid, parentUuid, userTimestamp);
+    lines.push(JSON.stringify(userEntry));
+    parentUuid = userUuid;
+
+    const assistantUuid = randomUUID();
+    const assistantTimestamp = new Date(nowMs + entryIndex).toISOString();
+    entryIndex += 1;
+    const assistantEntry = buildAssistantEntry(assistantTemplate!, turn.assistantText, assistantUuid, parentUuid, assistantTimestamp);
+    const assistantMessageId = ((assistantEntry.message as JsonObject).id as string);
+    lines.push(JSON.stringify(assistantEntry));
+    parentUuid = assistantUuid;
+
+    const completionUuid = randomUUID();
+    const completionTimestamp = new Date(nowMs + entryIndex).toISOString();
+    entryIndex += 1;
+    const completionEntry = buildCompletionEntry(completionTemplate!, completionUuid, parentUuid, completionTimestamp);
+    lines.push(JSON.stringify(completionEntry));
+    parentUuid = completionUuid;
+
+    written.push({
+      logicalId: turn.logicalId,
+      contentDigest: turn.contentDigest,
+      nativeIds: {
+        userId: userUuid,
+        assistantIds: [assistantMessageId],
+        completionId: completionUuid,
+      },
+    });
   });
-  return lines;
+  return { lines, written };
 }
 
-function isUserTemplateEntry(entry: JsonObject): boolean {
-  if (entry.type !== 'user' || entry.isSidechain === true) {
+function isUserTemplateEntry(entry: JsonObject, localCommandTranscriptPromptIds: ReadonlySet<string>): boolean {
+  if (entry.type !== 'user' || entry.isSidechain === true || entry.isMeta === true || entry.isCompactSummary === true) {
     return false;
   }
   const message = entry.message;
-  return isJsonObject(message) && typeof message.content === 'string';
+  return isJsonObject(message) && typeof message.content === 'string' &&
+    isCallerUserTurn(entry, localCommandTranscriptPromptIds);
+}
+
+function isCompletionTemplateEntry(entry: JsonObject): boolean {
+  return entry.type === 'system' && entry.subtype === 'turn_duration' &&
+    entry.isSidechain !== true && entry.isMeta !== true && entry.isCompactSummary !== true;
 }
 
 function isAssistantTemplateEntry(entry: JsonObject): boolean {
-  if (entry.type !== 'assistant') {
+  if (entry.type !== 'assistant' || entry.isSidechain === true || entry.isMeta === true || entry.isCompactSummary === true) {
     return false;
   }
   const message = entry.message;
@@ -153,6 +197,20 @@ function buildAssistantEntry(
   const message = entry.message as JsonObject;
   message.content = [{ type: 'text', text }];
   message.id = `msg_${randomHex(32)}`;
+  return entry;
+}
+
+function buildCompletionEntry(
+  templateLine: string,
+  uuid: string,
+  parentUuid: string,
+  timestamp: string,
+): JsonObject {
+  const entry = JSON.parse(templateLine) as JsonObject;
+  entry.uuid = uuid;
+  entry.parentUuid = parentUuid;
+  entry.timestamp = timestamp;
+  entry.durationMs = 0;
   return entry;
 }
 

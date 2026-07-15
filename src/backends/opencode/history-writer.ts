@@ -1,9 +1,11 @@
 import { randomBytes } from 'node:crypto';
-import { rm, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 import { createAbortError, throwIfAborted } from '../../core/abort.js';
-import type { SessionHistoryTurn } from '../../core/backend.js';
+import type { AppendSessionHistoryResult, NativeWrittenTurn, SeedWriteTurn } from '../../core/backend.js';
 import { EXIT_CODES, OpenPError } from '../../core/errors.js';
+import { resolveOpenPStateRoot } from '../../core/state-root.js';
 import { resolveOpenCodeBin } from './bin.js';
 import { buildOpenCodeHistoryEnv } from './env.js';
 import { runOpenCodeExec, type OpenCodeExecResult } from './exec-runner.js';
@@ -33,18 +35,21 @@ interface JsonObject {
 }
 
 // Appends the caller's turns to an existing OpenCode session by re-importing the session's own
-// export with extra text-only messages. OpenCode `import` upserts on the document's `info.id`, so
-// the session id is preserved and the existing messages are re-sent verbatim. Nothing is written
+// export with extra text-only messages. OpenCode `import` upserts on the document-level `info.id`,
+// so the session id is preserved and the existing messages are re-sent verbatim. Nothing is written
 // to the session store directly: `export` and `import` are the only supported native surfaces.
 export async function appendOpenCodeSessionHistory(input: {
   readonly sessionId: string;
   readonly cwd: string;
-  readonly turns: readonly SessionHistoryTurn[];
+  readonly turns: readonly SeedWriteTurn[];
   readonly signal?: AbortSignal;
-}): Promise<void> {
+}): Promise<AppendSessionHistoryResult> {
   throwIfAborted(input.signal);
   const bin = resolveOpenCodeBin();
   const historyEnv = await buildOpenCodeHistoryEnv(input.cwd, process.env);
+  const stateRoot = resolveOpenPStateRoot(input.cwd, process.env);
+  const importTempRoot = await resolveOpenCodeImportTempRoot(stateRoot);
+  historyEnv.env.TMPDIR = importTempRoot;
 
   const exportCommand = buildLocalhostOnlySandboxCommand(bin, ['export', input.sessionId]);
   const exportResult = await runOpenCodeExec({
@@ -57,13 +62,13 @@ export async function appendOpenCodeSessionHistory(input: {
   });
   assertOpenCodeHistoryOk('export', exportResult, input.signal);
 
-  const importDoc = buildOpenCodeImportDoc(exportResult.stdout, input.turns);
+  const built = buildOpenCodeImport(exportResult.stdout, input.turns);
 
-  const tmpFile = join(historyEnv.cacheDir, `seed-import-${randomBytes(12).toString('hex')}.json`);
-  await writeFile(tmpFile, importDoc, { mode: 0o600 });
+  const temp = await createOpenCodeImportTempFile(built.doc, stateRoot, importTempRoot);
+  let primaryError: unknown = null;
   try {
     throwIfAborted(input.signal);
-    const importCommand = buildLocalhostOnlySandboxCommand(bin, ['import', tmpFile]);
+    const importCommand = buildLocalhostOnlySandboxCommand(bin, ['import', temp.path]);
     const importResult = await runOpenCodeExec({
       bin: importCommand.bin,
       args: importCommand.args,
@@ -81,21 +86,91 @@ export async function appendOpenCodeSessionHistory(input: {
         EXIT_CODES.protocolViolation,
       );
     }
+    return { turns: built.written };
+  } catch (error) {
+    primaryError = error;
+    throw error;
   } finally {
-    await rm(tmpFile, { force: true }).catch(() => undefined);
+    try {
+      await temp.cleanup();
+    } catch (cleanupError) {
+      if (primaryError === null) {
+        throw cleanupError;
+      }
+    }
   }
+}
+
+export async function createOpenCodeImportTempFile(
+  doc: string,
+  stateRoot: string,
+  requestedTempRoot: string = tmpdir(),
+): Promise<{
+  readonly path: string;
+  readonly cleanup: () => Promise<void>;
+}> {
+  const tempRoot = await resolveOpenCodeImportTempRoot(stateRoot, requestedTempRoot);
+  const dir = await mkdtemp(join(tempRoot, 'openp-opencode-seed-'));
+  const path = join(dir, 'import.json');
+  try {
+    await writeFile(path, doc, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+  } catch (error) {
+    await rm(dir, { force: true, recursive: true }).catch(() => undefined);
+    throw error;
+  }
+  return {
+    path,
+    cleanup: () => rm(dir, { force: true, recursive: true }),
+  };
+}
+
+export async function resolveOpenCodeImportTempRoot(
+  stateRoot: string,
+  requestedTempRoot: string = tmpdir(),
+): Promise<string> {
+  const tempRoot = await canonicalPath(requestedTempRoot);
+  const canonicalStateRoot = await canonicalPath(stateRoot);
+  if (isPathInside(tempRoot, canonicalStateRoot)) {
+    throw new OpenPError(
+      'OpenCode seed import temp root must be outside the open-p state root',
+      EXIT_CODES.protocolViolation,
+    );
+  }
+  return tempRoot;
+}
+
+async function canonicalPath(path: string): Promise<string> {
+  try {
+    return await realpath(path);
+  } catch {
+    return resolve(path);
+  }
+}
+
+function isPathInside(path: string, parent: string): boolean {
+  const child = relative(parent, path);
+  return child === '' || (!child.startsWith('..') && !isAbsolute(child));
 }
 
 // Pure transform (unit-test surface): an `opencode export` JSON string plus the caller's turns ->
 // an `opencode import` document JSON string. Existing messages are preserved verbatim and the new
-// text-only messages are appended. `info.id` (the upsert key) is never changed. The clone templates
-// are the last user message and last assistant message that carry a `text` part; a missing template
-// or unparseable export is a protocol violation.
+// text-only messages are appended. The document-level `info.id` (the upsert key) is never changed;
+// appended message-level `info.id` values are fresh native ids. The clone templates are the last
+// user message and last assistant message that carry a `text` part; a missing template or
+// unparseable export is a protocol violation.
 export function buildOpenCodeImportDoc(
   exportJson: string,
-  turns: readonly SessionHistoryTurn[],
+  turns: readonly SeedWriteTurn[],
   nowMs: number = Date.now(),
 ): string {
+  return buildOpenCodeImport(exportJson, turns, nowMs).doc;
+}
+
+export function buildOpenCodeImport(
+  exportJson: string,
+  turns: readonly SeedWriteTurn[],
+  nowMs: number = Date.now(),
+): { readonly doc: string; readonly written: readonly NativeWrittenTurn[] } {
   let doc: unknown;
   try {
     doc = JSON.parse(exportJson);
@@ -122,30 +197,45 @@ export function buildOpenCodeImportDoc(
   const nextSeedId = createSeedIdAllocator(messages);
   let created = nowMs;
   const appended: JsonObject[] = [];
+  const written: NativeWrittenTurn[] = [];
   for (const turn of turns) {
-    const template = turn.role === 'user' ? userTemplate : assistantTemplate;
-    const message = structuredClone(template);
-    const messageId = nextSeedId('msg_');
-    message.info.id = messageId;
-    // Part-level time (when the template carries one) must agree with the message's info.time.
-    let partTime: JsonObject;
-    if (turn.role === 'user') {
-      message.info.time = { created };
-      partTime = { start: created };
-    } else {
-      const completed = created + 1000;
-      message.info.time = { created, completed };
-      message.info.parentID = prevMessageId;
-      partTime = { start: created, end: completed };
-    }
-    message.parts = [buildTextPart(template, turn.text, messageId, nextSeedId('prt_'), partTime)];
-    appended.push(message);
-    prevMessageId = messageId;
+    const userMessage = structuredClone(userTemplate);
+    const userMessageId = nextSeedId('msg_');
+    userMessage.info.id = userMessageId;
+    userMessage.info.time = { created };
+    userMessage.parts = [buildTextPart(userTemplate, turn.userText, userMessageId, nextSeedId('prt_'), { start: created })];
+    appended.push(userMessage);
+    prevMessageId = userMessageId;
+    created += 3000;
+
+    const assistantMessage = structuredClone(assistantTemplate);
+    const assistantMessageId = nextSeedId('msg_');
+    const completed = created + 1000;
+    assistantMessage.info.id = assistantMessageId;
+    assistantMessage.info.time = { created, completed };
+    assistantMessage.info.parentID = prevMessageId;
+    assistantMessage.parts = [
+      buildTextPart(assistantTemplate, turn.assistantText, assistantMessageId, nextSeedId('prt_'), {
+        start: created,
+        end: completed,
+      }),
+    ];
+    appended.push(assistantMessage);
+    prevMessageId = assistantMessageId;
+    written.push({
+      logicalId: turn.logicalId,
+      contentDigest: turn.contentDigest,
+      nativeIds: {
+        userId: userMessageId,
+        assistantIds: [assistantMessageId],
+        completionId: assistantMessageId,
+      },
+    });
     created += 3000;
   }
 
   doc.messages = [...messages, ...appended];
-  return JSON.stringify(doc);
+  return { doc: JSON.stringify(doc), written };
 }
 
 // A message carrying `info` and at least one `{type:"text", text:string}` part.

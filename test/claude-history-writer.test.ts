@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
-import type { SessionHistoryTurn } from '../src/core/backend.js';
+import type { SeedWriteTurn } from '../src/core/backend.js';
 import { isAbortError } from '../src/core/abort.js';
 import { OpenPError } from '../src/core/errors.js';
 import {
@@ -17,12 +17,14 @@ const GOLDEN = join(process.cwd(), 'test/fixtures/seed/redacted-claude-golden.js
 const BOOTSTRAP = join(process.cwd(), 'test/fixtures/seed/redacted-claude-bootstrap.jsonl');
 const FIXTURE_CWD = '/redacted/workspace';
 const NOW = Date.UTC(2026, 6, 14, 12, 0, 0);
-const TURNS: readonly SessionHistoryTurn[] = [
-  { role: 'user', text: 'U-one' },
-  { role: 'assistant', text: 'A-one' },
-  { role: 'user', text: 'U-two' },
-  { role: 'assistant', text: 'A-two' },
+const TURNS: readonly SeedWriteTurn[] = [
+  { logicalId: 'turn-1', userText: 'U-one', assistantText: 'A-one', contentDigest: 'digest-1', sourceNativeIds: null },
+  { logicalId: 'turn-2', userText: 'U-two', assistantText: 'A-two', contentDigest: 'digest-2', sourceNativeIds: null },
 ];
+const EXPECTED_TEXT_ENTRIES = TURNS.flatMap((turn) => [
+  { role: 'user', text: turn.userText },
+  { role: 'assistant', text: turn.assistantText },
+]);
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 type Entry = Record<string, any>;
@@ -50,6 +52,14 @@ function extractedText(entry: Entry): string {
   return entry.type === 'user' ? entry.message.content : entry.message.content[0].text;
 }
 
+function textEntries(entries: readonly Entry[]): Entry[] {
+  return entries.filter((entry) => entry.type === 'user' || entry.type === 'assistant');
+}
+
+function completionEntries(entries: readonly Entry[]): Entry[] {
+  return entries.filter((entry) => entry.type === 'system' && entry.subtype === 'turn_duration');
+}
+
 function assertExitCode(fn: () => unknown, code: number): void {
   try {
     fn();
@@ -70,19 +80,28 @@ for (const [label, path] of [['golden', GOLDEN], ['bootstrap', BOOTSTRAP]] as co
     const chainStart = lastUuid(entries);
     const fixtureUuids = new Set(entries.filter((e) => typeof e.uuid === 'string').map((e) => e.uuid));
 
-    const lines = buildClaudeCodeHistoryEntries(logText, TURNS, NOW);
-    assert.equal(lines.length, TURNS.length);
+    const built = buildClaudeCodeHistoryEntries(logText, TURNS, NOW);
+    const lines = built.lines;
+    assert.equal(lines.length, TURNS.length * 3);
+    assert.equal(built.written.length, TURNS.length);
     const appended = lines.map((l) => JSON.parse(l) as Entry);
 
-    // Roles and content reconstruction.
-    appended.forEach((entry, index) => {
-      const turn = TURNS[index]!;
-      assert.equal(entry.type, turn.role);
-      if (turn.role === 'user') {
-        assert.equal(entry.message.content, turn.text);
-      } else {
-        assert.deepEqual(entry.message.content, [{ type: 'text', text: turn.text }]);
-      }
+    // Native sequence and content reconstruction: user, assistant, completion boundary per turn.
+    TURNS.forEach((turn, turnIndex) => {
+      const base = turnIndex * 3;
+      const userEntry = appended[base]!;
+      const assistantEntry = appended[base + 1]!;
+      const completionEntry = appended[base + 2]!;
+      assert.equal(userEntry.type, 'user');
+      assert.equal(userEntry.message.content, turn.userText);
+      assert.equal(assistantEntry.type, 'assistant');
+      assert.deepEqual(assistantEntry.message.content, [{ type: 'text', text: turn.assistantText }]);
+      assert.equal(completionEntry.type, 'system');
+      assert.equal(completionEntry.subtype, 'turn_duration');
+      assert.equal(completionEntry.durationMs, 0);
+      assert.equal(built.written[turnIndex]!.nativeIds.userId, userEntry.uuid);
+      assert.deepEqual(built.written[turnIndex]!.nativeIds.assistantIds, [assistantEntry.message.id]);
+      assert.equal(built.written[turnIndex]!.nativeIds.completionId, completionEntry.uuid);
     });
 
     // parentUuid chain: first entry off the fixture's last uuid, then each off the previous.
@@ -100,7 +119,7 @@ for (const [label, path] of [['golden', GOLDEN], ['bootstrap', BOOTSTRAP]] as co
     }
 
     // Per-role fresh identity fields.
-    for (const entry of appended) {
+    for (const entry of textEntries(appended)) {
       if (entry.type === 'user') {
         assert.match(entry.promptId, UUID_RE);
       } else {
@@ -109,7 +128,7 @@ for (const [label, path] of [['golden', GOLDEN], ['bootstrap', BOOTSTRAP]] as co
       }
     }
 
-    // Monotonic timestamps, +1ms per entry from the injected clock.
+    // Monotonic timestamps, +1ms per entry from the supplied clock.
     appended.forEach((entry, index) => {
       assert.equal(entry.timestamp, new Date(NOW + index).toISOString());
     });
@@ -125,9 +144,11 @@ for (const [label, path] of [['golden', GOLDEN], ['bootstrap', BOOTSTRAP]] as co
       assert.deepEqual(entry.message.usage, assistantTemplate.message.usage);
       assert.equal(entry.cwd, assistantTemplate.cwd);
     }
+    assert.equal(completionEntries(appended).length, TURNS.length);
 
     // Round-trip: re-extracted texts equal the input turns.
-    assert.deepEqual(appended.map(extractedText), TURNS.map((t) => t.text));
+    assert.deepEqual(textEntries(appended).map(extractedText), EXPECTED_TEXT_ENTRIES.map((t) => t.text));
+    assert.deepEqual(built.written.map((turn) => turn.logicalId), TURNS.map((turn) => turn.logicalId));
   });
 }
 
@@ -150,10 +171,11 @@ test('appendClaudeCodeSessionHistory appends to the resolved log without rewriti
   );
   const originalLines = original.toString('utf8').trimEnd().split('\n');
   const afterLines = after.toString('utf8').trimEnd().split('\n');
-  assert.equal(afterLines.length, originalLines.length + TURNS.length);
+  assert.equal(afterLines.length, originalLines.length + TURNS.length * 3);
   const appended = afterLines.slice(originalLines.length).map((l) => JSON.parse(l) as Entry);
   assert.equal(appended[0]!.parentUuid, lastUuid(fixtureEntries(original.toString('utf8'))));
-  assert.deepEqual(appended.map(extractedText), TURNS.map((t) => t.text));
+  assert.deepEqual(textEntries(appended).map(extractedText), EXPECTED_TEXT_ENTRIES.map((t) => t.text));
+  assert.equal(completionEntries(appended).length, TURNS.length);
 });
 
 test('missing user or assistant template is a protocol violation', () => {
@@ -176,11 +198,67 @@ test('a log with templates but no uuid-bearing entry is a protocol violation', (
   assertExitCode(() => buildClaudeCodeHistoryEntries(logText, TURNS, NOW), 40);
 });
 
+test('sidechain and meta entries are never selected as Claude seed templates', async () => {
+  const logText = await readFile(GOLDEN, 'utf8');
+  const poisoned = [
+    logText.trimEnd(),
+    JSON.stringify({
+      type: 'user', isMeta: true, uuid: randomUUID(), message: { role: 'user', content: 'META-USER' },
+    }),
+    JSON.stringify({
+      type: 'assistant', isSidechain: true, uuid: randomUUID(),
+      message: { role: 'assistant', content: [{ type: 'text', text: 'SIDECHAIN-ASSISTANT' }] },
+    }),
+    JSON.stringify({
+      type: 'system', subtype: 'turn_duration', isMeta: true, uuid: randomUUID(), durationMs: 999,
+    }),
+  ].join('\n');
+
+  const built = buildClaudeCodeHistoryEntries(poisoned, TURNS.slice(0, 1), NOW);
+  const appended = built.lines.map((line) => JSON.parse(line) as Entry);
+  assert.equal(appended[0]!.message.content, 'U-one');
+  assert.equal(appended[1]!.message.content[0].text, 'A-one');
+  assert.equal(appended[2]!.durationMs, 0);
+  assert.notEqual(appended[0]!.isMeta, true);
+  assert.notEqual(appended[1]!.isSidechain, true);
+  assert.notEqual(appended[2]!.isMeta, true);
+});
+
+test('prompt-id-linked local command transcripts are never selected as Claude user templates', async () => {
+  const logText = await readFile(GOLDEN, 'utf8');
+  const parent = lastUuid(fixtureEntries(logText));
+  const poisoned = [
+    logText.trimEnd(),
+    JSON.stringify({
+      type: 'user', isMeta: true, uuid: 'writer-local-caveat', parentUuid: parent,
+      promptId: 'writer-local-group',
+      message: { role: 'user', content: '<local-command-caveat>local command</local-command-caveat>' },
+    }),
+    JSON.stringify({
+      type: 'user', uuid: 'writer-local-name', parentUuid: 'writer-local-caveat',
+      promptId: 'writer-local-group', localCommandTemplatePoison: true,
+      message: { role: 'user', content: '<command-name>/exit</command-name>' },
+    }),
+    JSON.stringify({
+      type: 'user', uuid: 'writer-local-output', parentUuid: 'writer-local-name',
+      promptId: 'writer-local-group', localCommandTemplatePoison: true,
+      message: { role: 'user', content: '<local-command-stdout>done</local-command-stdout>' },
+    }),
+  ].join('\n');
+
+  const built = buildClaudeCodeHistoryEntries(poisoned, TURNS.slice(0, 1), NOW);
+  const appendedUser = JSON.parse(built.lines[0]!) as Entry;
+  assert.equal(appendedUser.message.content, 'U-one');
+  assert.equal(appendedUser.localCommandTemplatePoison, undefined);
+});
+
 test('unparseable lines are skipped, not rewritten or fatal', async () => {
   const logText = `not json\n${await readFile(GOLDEN, 'utf8')}\n{unterminated`;
-  const lines = buildClaudeCodeHistoryEntries(logText, TURNS, NOW);
-  assert.equal(lines.length, TURNS.length);
-  assert.deepEqual(lines.map((l) => extractedText(JSON.parse(l))), TURNS.map((t) => t.text));
+  const built = buildClaudeCodeHistoryEntries(logText, TURNS, NOW);
+  assert.equal(built.lines.length, TURNS.length * 3);
+  const appended = built.lines.map((l) => JSON.parse(l) as Entry);
+  assert.deepEqual(textEntries(appended).map(extractedText), EXPECTED_TEXT_ENTRIES.map((t) => t.text));
+  assert.equal(completionEntries(appended).length, TURNS.length);
 });
 
 test('appendClaudeCodeSessionHistory reports a missing log as sessionLogNotFound', async () => {

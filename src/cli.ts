@@ -42,7 +42,6 @@ import {
 } from './core/streaming-output-helpers.js';
 import { SessionStateStore, validateSessionStateCompatibility } from './core/session-state.js';
 import { parseSeedArgs } from './core/seed-args.js';
-import { loadSeedHistoryFile } from './core/seed-history.js';
 import { runSeed } from './core/seed.js';
 import { runStreamJsonWorkerLines } from './core/stream-json-worker-runner.js';
 import type { AssistantEventSnapshot, TurnResult } from './core/types.js';
@@ -103,8 +102,9 @@ Streaming and diagnostics:
 
 Top-level commands:
   openp auth-status           Print Claude, Codex, and Kiro CLI login booleans as JSON
-  openp seed <backend> --history <path> [--resume <id>]
-                              Seed or extend a native backend session from prior turns
+  openp seed <target> --source-backend <source> --source-session <id> [--resume <id>]
+  openp seed <target> --input-ir <path>
+                              Convert completed native turns or strict IR into a target native session
   openp --version             Show version
   openp -h, openp --help      Show this help
 
@@ -147,16 +147,28 @@ async function main(argv: readonly string[]): Promise<number> {
     if (argv[0] === 'seed') {
       const seedOptions = parseSeedArgs(argv.slice(1), getKnownBackendNames());
       const registeredId = resolveRegisteredBackendId(seedOptions.backend);
+      const registeredSeedOptions = seedOptions.source.kind === 'native'
+        ? {
+            ...seedOptions,
+            backend: registeredId,
+            source: {
+              ...seedOptions.source,
+              backend: resolveRegisteredBackendId(seedOptions.source.backend),
+            },
+          }
+        : { ...seedOptions, backend: registeredId };
       const provider = getBackendProvider(registeredId);
-      const turns = await loadSeedHistoryFile(seedOptions.historyPath);
+      const sourceProvider = registeredSeedOptions.source.kind === 'native'
+        ? getBackendProvider(registeredSeedOptions.source.backend)
+        : null;
       const signalHandlers = installProcessSignalHandlers();
       try {
         const result = await runSeed({
-          options: { ...seedOptions, backend: registeredId },
+          options: registeredSeedOptions,
           provider,
+          sourceProvider,
           createBackend: () => provider.createBackend(new TmuxProvider()),
           cwd,
-          turns,
           debugLog: debugLogPath,
           signal: signalHandlers.signal,
           forceSignal: signalHandlers.forceSignal,

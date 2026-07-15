@@ -9,6 +9,7 @@ import { OPENCODE_DESCRIPTOR } from './descriptor.js';
 import { OpenCodeBackend } from './backend.js';
 import { OpenCodeWorkerBridge } from './worker-bridge.js';
 import { appendOpenCodeSessionHistory } from './history-writer.js';
+import { readOpenCodeNativeSession } from './native-reader.js';
 
 export const opencodeBackendProvider: BackendProvider = {
   id: 'opencode',
@@ -26,8 +27,17 @@ export const opencodeBackendProvider: BackendProvider = {
     return null;
   },
 
-  async appendSessionHistory(input: AppendSessionHistoryInput): Promise<void> {
-    await appendOpenCodeSessionHistory({
+  async readNativeSession(input) {
+    return readOpenCodeNativeSession({
+      backend: 'opencode',
+      sessionId: input.sessionId,
+      cwd: input.cwd,
+      signal: input.signal,
+    });
+  },
+
+  async appendSessionHistory(input: AppendSessionHistoryInput) {
+    return appendOpenCodeSessionHistory({
       sessionId: input.sessionId,
       cwd: input.cwd,
       turns: input.turns,

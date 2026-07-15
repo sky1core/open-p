@@ -1,24 +1,28 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readdir, readFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import test from 'node:test';
 import { isAbortError } from '../src/core/abort.js';
-import type { SessionHistoryTurn } from '../src/core/backend.js';
+import type { SeedWriteTurn } from '../src/core/backend.js';
 import { OpenPError } from '../src/core/errors.js';
 import {
   appendOpenCodeSessionHistory,
+  buildOpenCodeImport,
   buildOpenCodeImportDoc,
+  createOpenCodeImportTempFile,
 } from '../src/backends/opencode/history-writer.js';
 
 const GOLDEN = join(process.cwd(), 'test/fixtures/seed/redacted-opencode-golden-export.json');
 const NOW_MS = Date.UTC(2026, 6, 14, 12, 0, 0);
-const TURNS: readonly SessionHistoryTurn[] = [
-  { role: 'user', text: 'codename REDMOON' },
-  { role: 'assistant', text: 'noted one' },
-  { role: 'user', text: 'month is March' },
-  { role: 'assistant', text: 'noted two' },
+const TURNS: readonly SeedWriteTurn[] = [
+  { logicalId: 'turn-1', userText: 'codename REDMOON', assistantText: 'noted one', contentDigest: 'digest-1', sourceNativeIds: null },
+  { logicalId: 'turn-2', userText: 'month is March', assistantText: 'noted two', contentDigest: 'digest-2', sourceNativeIds: null },
 ];
+const EXPECTED_MESSAGES = TURNS.flatMap((turn) => [
+  { role: 'user', text: turn.userText },
+  { role: 'assistant', text: turn.assistantText },
+]);
 const MSG_RE = /^msg_[0-9a-f]{12}[0-9A-Za-z]{14}$/;
 const PRT_RE = /^prt_[0-9a-f]{12}[0-9A-Za-z]{14}$/;
 
@@ -61,10 +65,10 @@ test('buildOpenCodeImportDoc appends text-only turns and preserves the existing 
   assert.deepEqual(doc.messages.slice(0, existingCount), before.messages);
 
   const appended: Msg[] = doc.messages.slice(existingCount);
-  assert.equal(appended.length, TURNS.length);
+  assert.equal(appended.length, EXPECTED_MESSAGES.length);
 
   appended.forEach((message, index) => {
-    const turn = TURNS[index]!;
+    const turn = EXPECTED_MESSAGES[index]!;
     assert.equal(message.info.role, turn.role);
     // Exactly one text-only part carrying the turn text.
     assert.equal(message.parts.length, 1);
@@ -102,7 +106,7 @@ test('buildOpenCodeImportDoc appends text-only turns and preserves the existing 
   assert.ok(appended[3]!.info.time.completed > appended[3]!.info.time.created);
 
   // Round-trip: the re-extracted appended texts equal the input turns.
-  assert.deepEqual(appended.map((m) => textParts(m)), TURNS.map((t) => [t.text]));
+  assert.deepEqual(appended.map((m) => textParts(m)), EXPECTED_MESSAGES.map((t) => [t.text]));
 });
 
 test('seed ids continue the export id ordering with monotonic hex time segments', async () => {
@@ -143,7 +147,7 @@ test('seeded text parts never keep the template time and agree with their messag
 
   const doc = JSON.parse(buildOpenCodeImportDoc(exportJson, TURNS, NOW_MS));
   const appended: Msg[] = doc.messages.slice(before.messages.length);
-  assert.equal(appended.length, TURNS.length);
+  assert.equal(appended.length, EXPECTED_MESSAGES.length);
   for (const message of appended) {
     const part = message.parts[0];
     if (message.info.role === 'user') {
@@ -244,18 +248,29 @@ test('near-native malformed ids do not count as native and fail closed', () => {
   ), 40);
 });
 
-test('buildOpenCodeImportDoc chains a leading assistant turn onto the last existing message', async () => {
+test('buildOpenCodeImport returns target native ids for each seeded pair', async () => {
   const exportJson = await readFile(GOLDEN, 'utf8');
   const before = JSON.parse(exportJson);
-  const lastExistingId = before.messages[before.messages.length - 1].info.id;
-
-  const doc = JSON.parse(buildOpenCodeImportDoc(exportJson, [{ role: 'assistant', text: 'leads' }], NOW_MS));
+  const built = buildOpenCodeImport(exportJson, TURNS, NOW_MS);
+  const doc = JSON.parse(built.doc);
   const appended: Msg[] = doc.messages.slice(before.messages.length);
 
-  assert.equal(appended.length, 1);
-  assert.equal(appended[0]!.info.role, 'assistant');
-  assert.equal(appended[0]!.info.parentID, lastExistingId);
-  assert.equal(appended[0]!.parts[0].text, 'leads');
+  assert.equal(built.written.length, TURNS.length);
+  assert.equal(appended.length, EXPECTED_MESSAGES.length);
+  assert.deepEqual(built.written.map((turn) => turn.logicalId), TURNS.map((turn) => turn.logicalId));
+  assert.deepEqual(built.written.map((turn) => turn.contentDigest), TURNS.map((turn) => turn.contentDigest));
+  assert.deepEqual(built.written.map((turn) => turn.nativeIds), [
+    {
+      userId: appended[0]!.info.id,
+      assistantIds: [appended[1]!.info.id],
+      completionId: appended[1]!.info.id,
+    },
+    {
+      userId: appended[2]!.info.id,
+      assistantIds: [appended[3]!.info.id],
+      completionId: appended[3]!.info.id,
+    },
+  ]);
 });
 
 test('buildOpenCodeImportDoc rejects an export without user/assistant text templates', () => {
@@ -284,6 +299,42 @@ test('buildOpenCodeImportDoc rejects unparseable or non-message export output', 
   assertExitCode(() => buildOpenCodeImportDoc('not json{', TURNS, NOW_MS), 40);
   assertExitCode(() => buildOpenCodeImportDoc(JSON.stringify({ info: {}, messages: 'nope' }), TURNS, NOW_MS), 40);
   assertExitCode(() => buildOpenCodeImportDoc(JSON.stringify([1, 2, 3]), TURNS, NOW_MS), 40);
+});
+
+test('OpenCode import documents use a private OS temp file outside open-p state', async () => {
+  const stateRoot = await mkdtemp(join(tmpdir(), 'openp-opencode-temp-state-'));
+  const doc = JSON.stringify({ transcript: 'sensitive seed text' });
+  const temp = await createOpenCodeImportTempFile(doc, stateRoot);
+  try {
+    assert.equal(relative(stateRoot, temp.path).startsWith('..'), true);
+    assert.equal(await readFile(temp.path, 'utf8'), doc);
+    assert.equal((await stat(temp.path)).mode & 0o777, 0o600);
+    assert.deepEqual(await readdir(stateRoot), []);
+  } finally {
+    await temp.cleanup();
+  }
+  await assert.rejects(() => readFile(temp.path), (error: any) => error?.code === 'ENOENT');
+});
+
+test('OpenCode import rejects TMPDIR when it resolves inside open-p state', async () => {
+  const stateRoot = await mkdtemp(join(tmpdir(), 'openp-opencode-contained-temp-state-'));
+  const containedTempRoot = join(stateRoot, 'cache');
+  await mkdir(containedTempRoot);
+  const previous = process.env.TMPDIR;
+  process.env.TMPDIR = containedTempRoot;
+  try {
+    await assert.rejects(
+      () => createOpenCodeImportTempFile('{"transcript":"must not land in state"}', stateRoot),
+      (error) => error instanceof OpenPError && error.exitCode === 40,
+    );
+    assert.deepEqual(await readdir(containedTempRoot), []);
+  } finally {
+    if (previous === undefined) {
+      delete process.env.TMPDIR;
+    } else {
+      process.env.TMPDIR = previous;
+    }
+  }
 });
 
 test('appendOpenCodeSessionHistory rejects a pre-aborted signal before any child process or state', async () => {

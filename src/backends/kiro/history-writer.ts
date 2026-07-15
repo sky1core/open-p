@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
-import type { SessionHistoryTurn } from '../../core/backend.js';
+import { readFile, rename, stat, truncate, unlink, writeFile } from 'node:fs/promises';
+import { throwIfAborted } from '../../core/abort.js';
+import type { AppendSessionHistoryResult, NativeWrittenTurn, SeedWriteTurn } from '../../core/backend.js';
 import { EXIT_CODES, OpenPError } from '../../core/errors.js';
 import { appendJsonlLines } from '../../core/jsonl-append.js';
 import { resolveKiroSessionLogPath } from './session-log.js';
@@ -9,16 +10,17 @@ interface JsonObject {
   [key: string]: unknown;
 }
 
-// Resolves the canonical Kiro CLI session log, then appends the caller's turns as native `Prompt`
-// and `AssistantMessage` records cloned from the log's own last such records (runtime golden). The
-// `.json` companion is neither read nor written: an existing session accepts `.jsonl`-only appends
-// (research-confirmed live), so the companion's turn metadata is intentionally left untouched.
+// Resolves the canonical Kiro CLI session log, then appends the caller's paired turns as native
+// `Prompt` and `AssistantMessage` records cloned from the log's own last such records (runtime
+// golden). The `.json` companion is updated with completion metadata for each appended pair so the
+// seeded pairs can later be read as completed native turns.
 export async function appendKiroSessionHistory(input: {
   readonly sessionId: string;
   readonly cwd: string; // signature parity only; Kiro resolves its log by session id, not cwd
-  readonly turns: readonly SessionHistoryTurn[];
+  readonly turns: readonly SeedWriteTurn[];
   readonly signal?: AbortSignal;
-}): Promise<void> {
+}): Promise<AppendSessionHistoryResult> {
+  throwIfAborted(input.signal);
   const logPath = resolveKiroSessionLogPath(input.sessionId);
   if (!logPath) {
     throw new OpenPError(`kiro session log not found for ${input.sessionId}`, EXIT_CODES.sessionLogNotFound);
@@ -32,8 +34,58 @@ export async function appendKiroSessionHistory(input: {
     }
     throw error;
   }
-  const lines = buildKiroHistoryEntries(logText, input.turns);
-  await appendJsonlLines(logPath, lines, input.signal);
+  let companionText: string;
+  const companionPath = logPath.replace(/\.jsonl$/, '.json');
+  try {
+    companionText = await readFile(companionPath, 'utf8');
+  } catch {
+    throw new OpenPError(`kiro companion metadata not found for ${input.sessionId}`, EXIT_CODES.protocolViolation);
+  }
+  const built = buildKiroHistoryEntries(logText, input.turns);
+  const companion = buildKiroCompanionWithAppendedTurns(companionText, input.turns, built.written);
+  await commitKiroHistoryAppend({
+    logPath,
+    companionPath,
+    lines: built.lines,
+    companion,
+    signal: input.signal,
+  });
+  return { turns: built.written };
+}
+
+// Kiro stores one logical history in two files. If publishing the prepared companion fails after
+// JSONL append, restore the JSONL to its exact prior byte length so readers and native resume never
+// observe an unproven suffix.
+export async function commitKiroHistoryAppend(input: {
+  readonly logPath: string;
+  readonly companionPath: string;
+  readonly lines: readonly string[];
+  readonly companion: string;
+  readonly signal?: AbortSignal;
+}): Promise<void> {
+  throwIfAborted(input.signal);
+  const originalSize = (await stat(input.logPath)).size;
+  const tmpPath = `${input.companionPath}.${process.pid}.${randomUUID()}.tmp`;
+  await writeFile(tmpPath, input.companion, { mode: 0o600 });
+  try {
+    await appendJsonlLines(input.logPath, input.lines, input.signal);
+    await rename(tmpPath, input.companionPath);
+  } catch (error) {
+    let rollbackFailed = false;
+    try {
+      await truncate(input.logPath, originalSize);
+    } catch {
+      rollbackFailed = true;
+    }
+    await unlink(tmpPath).catch(() => undefined);
+    if (rollbackFailed) {
+      throw new OpenPError(
+        'kiro companion publish failed and the JSONL append could not be rolled back',
+        EXIT_CODES.protocolViolation,
+      );
+    }
+    throw error;
+  }
 }
 
 // Pure transform (unit-test surface): existing log text -> JSON lines to append. The last single
@@ -42,9 +94,9 @@ export async function appendKiroSessionHistory(input: {
 // records carry `data.meta.timestamp`; AssistantMessage records have no meta and none is created.
 export function buildKiroHistoryEntries(
   logText: string,
-  turns: readonly SessionHistoryTurn[],
+  turns: readonly SeedWriteTurn[],
   nowSec: number = Math.floor(Date.now() / 1000),
-): string[] {
+): { readonly lines: readonly string[]; readonly written: readonly NativeWrittenTurn[] } {
   let promptTemplate: string | null = null;
   let assistantTemplate: string | null = null;
 
@@ -78,13 +130,77 @@ export function buildKiroHistoryEntries(
   }
 
   const lines: string[] = [];
+  const written: NativeWrittenTurn[] = [];
   turns.forEach((turn, index) => {
-    const entry = turn.role === 'user'
-      ? buildKiroPromptEntry(promptTemplate!, turn.text, nowSec + index)
-      : buildKiroAssistantEntry(assistantTemplate!, turn.text);
-    lines.push(JSON.stringify(entry));
+    const prompt = buildKiroPromptEntry(promptTemplate!, turn.userText, nowSec + index);
+    const assistant = buildKiroAssistantEntry(assistantTemplate!, turn.assistantText);
+    lines.push(JSON.stringify(prompt));
+    lines.push(JSON.stringify(assistant));
+    const userId = (prompt.data as JsonObject).message_id as string;
+    const assistantId = (assistant.data as JsonObject).message_id as string;
+    written.push({
+      logicalId: turn.logicalId,
+      contentDigest: turn.contentDigest,
+      nativeIds: {
+        userId,
+        assistantIds: [assistantId],
+        completionId: assistantId,
+      },
+    });
   });
-  return lines;
+  return { lines, written };
+}
+
+export function buildKiroCompanionWithAppendedTurns(
+  companionText: string,
+  turns: readonly SeedWriteTurn[],
+  written: readonly NativeWrittenTurn[],
+): string {
+  let companion: unknown;
+  try {
+    companion = JSON.parse(companionText);
+  } catch {
+    throw new OpenPError('kiro companion metadata is not valid JSON', EXIT_CODES.protocolViolation);
+  }
+  if (!isJsonObject(companion) || !isJsonObject(companion.session_state) ||
+    companion.session_state.version !== 'v1' ||
+    !isJsonObject(companion.session_state.conversation_metadata) ||
+    !Array.isArray(companion.session_state.conversation_metadata.user_turn_metadatas)) {
+    throw new OpenPError('kiro companion metadata has no user_turn_metadatas', EXIT_CODES.protocolViolation);
+  }
+  if (turns.length !== written.length) {
+    throw new OpenPError('kiro companion metadata turn count mismatch', EXIT_CODES.protocolViolation);
+  }
+  const metadatas = companion.session_state.conversation_metadata.user_turn_metadatas;
+  const template = metadatas.length > 0 && isJsonObject(metadatas[metadatas.length - 1])
+    ? metadatas[metadatas.length - 1] as JsonObject
+    : null;
+  if (!template) {
+    throw new OpenPError('kiro companion metadata has no template turn', EXIT_CODES.protocolViolation);
+  }
+  const now = new Date();
+  for (let index = 0; index < turns.length; index += 1) {
+    const turn = turns[index]!;
+    const native = written[index]!.nativeIds;
+    const metadata = structuredClone(template) as JsonObject;
+    metadata.message_ids = [native.userId, ...native.assistantIds];
+    metadata.end_reason = 'UserTurnEnd';
+    metadata.end_timestamp = new Date(now.getTime() + index * 1000).toISOString();
+    metadata.user_prompt_length = turn.userText.length;
+    metadata.result = {
+      Ok: {
+        id: native.completionId,
+        role: 'assistant',
+        content: [{ kind: 'text', data: turn.assistantText }],
+        meta: { timestamp: Math.floor((now.getTime() + index * 1000) / 1000) },
+      },
+    };
+    if (isJsonObject(metadata.loop_id)) {
+      metadata.loop_id = { ...metadata.loop_id, rand: randomUint32() };
+    }
+    metadatas.push(metadata);
+  }
+  return `${JSON.stringify(companion, null, 2)}\n`;
 }
 
 function isKiroPromptTemplate(entry: JsonObject): boolean {
@@ -130,6 +246,10 @@ function buildKiroAssistantEntry(templateLine: string, text: string): JsonObject
   data.message_id = randomUUID();
   (data.content as JsonObject[])[0]!.data = text;
   return entry;
+}
+
+function randomUint32(): number {
+  return Math.floor(Math.random() * 0x100000000);
 }
 
 function isJsonObject(value: unknown): value is JsonObject {
