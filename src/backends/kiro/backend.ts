@@ -1,6 +1,7 @@
 import type { Backend } from '../../core/backend.js';
 import { EXIT_CODES, OpenPError } from '../../core/errors.js';
 import { SessionLockStore } from '../../core/session-lock.js';
+import { settlePendingSeedBeforeResume } from '../../core/resume-preflight.js';
 import type { TurnRequest, TurnResult, BackendRunOptions } from '../../core/types.js';
 
 import { buildKiroAcpArgs } from './args.js';
@@ -12,6 +13,7 @@ export class KiroBackend implements Backend {
     const lock = await new SessionLockStore(options.cwd).acquire(options.backendSessionId);
     let primaryError: unknown = null;
     try {
+      await settlePendingSeedBeforeResume(options);
       return await this.runTurnWithLock(request, options);
     } catch (error) {
       primaryError = error;

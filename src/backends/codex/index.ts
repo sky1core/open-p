@@ -57,6 +57,7 @@ export function createCodexBackendProvider(options: CodexBackendProviderOptions 
         backend: id,
         sessionId: input.sessionId,
         homeDir,
+        mode: input.mode,
       });
     },
 
@@ -65,6 +66,7 @@ export function createCodexBackendProvider(options: CodexBackendProviderOptions 
         sessionId: input.sessionId,
         cwd: input.cwd,
         turns: input.turns,
+        persistPreparedAppend: input.persistPreparedAppend,
         homeDir,
         signal: input.signal,
       });

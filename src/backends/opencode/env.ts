@@ -1,5 +1,5 @@
-import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
+import { ensureDurableDirectory } from '../../core/fs-durability.js';
 import { resolveOpenPStateRoot } from '../../core/state-root.js';
 import type { OpenCodeLocalModel } from './args.js';
 
@@ -53,12 +53,10 @@ async function buildOpenCodeEnvBase(
   const configDir = join(root, 'config');
   const dataDir = join(root, 'data');
   const cacheDir = join(root, 'cache');
-  await Promise.all([
-    mkdir(homeDir, { recursive: true, mode: 0o700 }),
-    mkdir(configDir, { recursive: true, mode: 0o700 }),
-    mkdir(dataDir, { recursive: true, mode: 0o700 }),
-    mkdir(cacheDir, { recursive: true, mode: 0o700 }),
-  ]);
+  await ensureDurableDirectory(root);
+  for (const directory of [homeDir, configDir, dataDir, cacheDir]) {
+    await ensureDurableDirectory(directory);
+  }
 
   const env = sanitizeOpenCodeEnv(baseEnv);
   env.HOME = homeDir;

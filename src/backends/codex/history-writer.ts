@@ -1,8 +1,15 @@
 import { randomBytes } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
-import type { AppendSessionHistoryResult, NativeWrittenTurn, SeedWriteTurn } from '../../core/backend.js';
+import type { AppendSessionHistoryInput, AppendSessionHistoryResult, NativeWrittenTurn, SeedWriteTurn } from '../../core/backend.js';
 import { EXIT_CODES, OpenPError } from '../../core/errors.js';
-import { appendJsonlLines } from '../../core/jsonl-append.js';
+import { appendJsonlLines, encodeJsonlAppendPayload } from '../../core/jsonl-append.js';
+import { decodeNativeStateUtf8 } from '../../core/native-state-digest.js';
+import { assertNativeAppendCandidate } from '../../core/native-append-preflight.js';
+import {
+  assertCodexNativeSessionIdentity,
+  codexNativeStateDigest,
+  extractCodexNativeTurns,
+} from './native-reader.js';
 import { findCodexSessionLogPath } from './session-log.js';
 import { uuidv7 } from './uuidv7.js';
 
@@ -18,6 +25,7 @@ export async function appendCodexSessionHistory(input: {
   readonly sessionId: string;
   readonly cwd: string;
   readonly turns: readonly SeedWriteTurn[];
+  readonly persistPreparedAppend: AppendSessionHistoryInput['persistPreparedAppend'];
   readonly homeDir?: string | null;
   readonly signal?: AbortSignal;
 }): Promise<AppendSessionHistoryResult> {
@@ -25,18 +33,41 @@ export async function appendCodexSessionHistory(input: {
   if (!logPath) {
     throw new OpenPError(`codex session log not found for ${input.sessionId}`, EXIT_CODES.sessionLogNotFound);
   }
-  let logText: string;
+  let logBytes: Buffer;
   try {
-    logText = await readFile(logPath, 'utf8');
+    logBytes = await readFile(logPath);
   } catch (error) {
     if (isNotFoundError(error)) {
       throw new OpenPError(`codex session log not found for ${input.sessionId}`, EXIT_CODES.sessionLogNotFound);
     }
     throw error;
   }
+  const logText = decodeNativeStateUtf8(logBytes, 'Codex native session log');
+  assertCodexNativeSessionIdentity(logText, input.sessionId);
+  const before = extractCodexNativeTurns(logText);
   const built = buildCodexHistoryEntries(logText, input.turns);
+  const payload = encodeJsonlAppendPayload(
+    logBytes.length === 0 || logBytes[logBytes.length - 1] === 0x0a,
+    built.lines,
+  );
+  const candidateText = `${logText}${payload.toString('utf8')}`;
+  const candidateBytes = Buffer.concat([logBytes, payload]);
+  const candidate = extractCodexNativeTurns(candidateText);
+  assertNativeAppendCandidate({
+    backend: 'Codex',
+    before,
+    candidate,
+    requested: input.turns,
+    written: built.written,
+  });
+  await input.persistPreparedAppend({
+    before,
+    beforeNativeStateDigest: codexNativeStateDigest(logBytes),
+    candidateNativeStateDigest: codexNativeStateDigest(candidateBytes),
+    turns: built.written,
+  });
   await appendJsonlLines(logPath, built.lines, input.signal);
-  return { turns: built.written };
+  return { sessionId: input.sessionId, turns: built.written };
 }
 
 // Pure transform (unit-test surface): existing log text -> JSON lines to append. The last

@@ -1,5 +1,6 @@
 import { registerBackend } from '../../src/core/backend-registry.js';
 import type { BackendProvider } from '../../src/core/backend.js';
+import { digestNativeState } from '../../src/core/native-state-digest.js';
 import type { BackendRunOptions, TurnRequest, TurnResult } from '../../src/core/types.js';
 
 const SESSION_ID = '44444444-4444-4444-8444-444444444444';
@@ -9,6 +10,9 @@ const provider: BackendProvider = {
   descriptor: {} as never,
   createBackend: () => ({
     runTurn: async (request: TurnRequest, options: BackendRunOptions): Promise<TurnResult> => {
+      if (options.resume) {
+        await options.settlePendingSeedAppend?.();
+      }
       const scenario = process.env.OPENP_TEST_DIRECT_CLI_SCENARIO;
       if (scenario === 'text-mismatch') {
         options.onIntermediateText?.('working draft', 'jsonl');
@@ -70,6 +74,17 @@ const provider: BackendProvider = {
       throw new Error(`unsupported test direct CLI scenario: ${scenario ?? '(unset)'}`);
     },
   }),
+  readNativeSession: async (input) => {
+    const turns: readonly [] = [];
+    return {
+      backend: 'test-direct-cli',
+      sessionId: input.sessionId,
+      turns,
+      nativeStateDigest: digestNativeState('direct-cli-pending-seed-test-v1', [
+        Buffer.from(JSON.stringify(turns), 'utf8'),
+      ]),
+    };
+  },
   createWorkerBridge: () => ({
     runTurn: async () => {
       throw new Error('test-direct-cli worker bridge is not used by direct CLI tests');

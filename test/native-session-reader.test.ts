@@ -2,12 +2,27 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import test from 'node:test';
-import { extractClaudeNativeTurns } from '../src/backends/claude/native-reader.js';
-import { extractCodexNativeTurns } from '../src/backends/codex/native-reader.js';
-import { extractKiroNativeTurns } from '../src/backends/kiro/native-reader.js';
-import { assertOpenCodeExportOk, extractOpenCodeNativeTurns } from '../src/backends/opencode/native-reader.js';
+import { Worker } from 'node:worker_threads';
+import {
+  assertClaudeNativeSessionIdentity,
+  claudeNativeStateDigest,
+  extractClaudeNativeTurns,
+} from '../src/backends/claude/native-reader.js';
+import {
+  assertCodexNativeSessionIdentity,
+  codexNativeStateDigest,
+  extractCodexNativeTurns,
+} from '../src/backends/codex/native-reader.js';
+import { extractKiroNativeTurns, kiroNativeStateDigest } from '../src/backends/kiro/native-reader.js';
+import {
+  assertOpenCodeExportOk,
+  assertStableOpenCodeNativeExports,
+  extractOpenCodeNativeTurns,
+  openCodeNativeStateDigest,
+} from '../src/backends/opencode/native-reader.js';
 import { isAbortError } from '../src/core/abort.js';
 import { OpenPError } from '../src/core/errors.js';
+import { decodeNativeStateUtf8, digestNativeState } from '../src/core/native-state-digest.js';
 
 const FIXTURES = join(process.cwd(), 'test/fixtures/seed');
 
@@ -34,6 +49,54 @@ function lastUuid(logText: string): string {
   return entry.uuid;
 }
 
+async function rejectClaudeCyclesWithoutHanging(logTexts: readonly string[]): Promise<void> {
+  const moduleUrl = new URL('../src/backends/claude/native-reader.ts', import.meta.url).href;
+  await new Promise<void>((resolve, reject) => {
+    const worker = new Worker(`
+      import { parentPort, workerData } from 'node:worker_threads';
+      import { extractClaudeNativeTurns } from ${JSON.stringify(moduleUrl)};
+      const results = workerData.map((logText) => {
+        try {
+          extractClaudeNativeTurns(logText);
+          return { ok: true };
+        } catch (error) {
+          return { ok: false, exitCode: error?.exitCode ?? null, message: error?.message ?? String(error) };
+        }
+      });
+      parentPort.postMessage(results);
+    `, {
+      eval: true,
+      workerData: [...logTexts],
+      execArgv: ['--import', 'tsx'],
+    });
+    let settled = false;
+    const finish = (error?: Error): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      void worker.terminate();
+      if (error) reject(error);
+      else resolve();
+    };
+    const timer = setTimeout(() => {
+      finish(new Error('Claude native reader cycle check timed out'));
+    }, 10_000);
+    worker.on('message', (message: unknown) => {
+      const results = Array.isArray(message) ? message : [];
+      const valid = results.length === logTexts.length && results.every((result) =>
+        typeof result === 'object' && result !== null &&
+        (result as { readonly ok?: unknown }).ok === false &&
+        (result as { readonly exitCode?: unknown }).exitCode === 40,
+      );
+      finish(valid ? undefined : new Error(`expected Claude cycle protocol failures, got ${JSON.stringify(message)}`));
+    });
+    worker.on('error', (error) => finish(error));
+    worker.on('exit', (code) => {
+      if (!settled) finish(new Error(`Claude native reader worker exited before reporting (code ${code})`));
+    });
+  });
+}
+
 function validKiroCompanion(logText: string, companionText: string): string {
   const logIds = new Set(lines(logText).map((line) => JSON.parse(line).data?.message_id).filter(Boolean));
   const companion = JSON.parse(companionText);
@@ -52,11 +115,17 @@ test('Claude reader extracts completed caller/final assistant pairs and drops tr
     parentUuid: lastUuid(logText),
     message: { role: 'user', content: 'unfinished' },
   });
-  const turns = extractClaudeNativeTurns(`${logText}\n${trailingUser}\n`);
+  const baseText = logText.endsWith('\n') ? logText : `${logText}\n`;
+  const withTrailingUser = `${baseText}${trailingUser}\n`;
+  const turns = extractClaudeNativeTurns(withTrailingUser);
   assert.equal(turns.length, 2);
   assert.equal(turns[0]!.assistantText, 'REMEMBERED');
   assert.equal(turns[1]!.assistantText, 'BLUEFIN-7');
   assert.ok(turns.every((turn) => turn.nativeIds.userId.length > 0 && turn.nativeIds.assistantIds.length === 1));
+  assert.notEqual(
+    claudeNativeStateDigest(Buffer.from(withTrailingUser)),
+    claudeNativeStateDigest(Buffer.from(baseText)),
+  );
 
   const withoutLastCompletion = lines(logText)
     .map((line) => JSON.parse(line))
@@ -65,6 +134,76 @@ test('Claude reader extracts completed caller/final assistant pairs and drops tr
     .map((entry) => JSON.stringify(entry))
     .join('\n');
   assert.equal(extractClaudeNativeTurns(`${withoutLastCompletion}\n`).length, 1);
+  assert.notEqual(
+    claudeNativeStateDigest(Buffer.from(`${withoutLastCompletion}\n`)),
+    claudeNativeStateDigest(Buffer.from(baseText)),
+  );
+});
+
+test('Claude reader binds in-record identity to the requested session and workspace', async () => {
+  const logText = await readFile(join(FIXTURES, 'redacted-claude-golden.jsonl'), 'utf8');
+  const entries = lines(logText).map((line) => JSON.parse(line));
+  const expectedSessionId = entries.find((entry) => typeof entry.sessionId === 'string')!.sessionId as string;
+  const expectedCwd = entries.find((entry) => typeof entry.cwd === 'string')!.cwd as string;
+  await assert.doesNotReject(() => assertClaudeNativeSessionIdentity(logText, expectedSessionId, expectedCwd));
+
+  const wrongSession = entries.map((entry) => entry.sessionId === expectedSessionId
+    ? { ...entry, sessionId: 'foreign-session' }
+    : entry).map((entry) => JSON.stringify(entry)).join('\n');
+  await assert.rejects(() => assertClaudeNativeSessionIdentity(wrongSession, expectedSessionId, expectedCwd));
+
+  const wrongWorkspace = entries.map((entry) => typeof entry.cwd === 'string'
+    ? { ...entry, cwd: '/foreign/workspace' }
+    : entry).map((entry) => JSON.stringify(entry)).join('\n');
+  await assert.rejects(() => assertClaudeNativeSessionIdentity(wrongWorkspace, expectedSessionId, expectedCwd));
+
+  const mixedWorkspace = structuredClone(entries);
+  mixedWorkspace.find((entry) => typeof entry.cwd === 'string')!.cwd = '/foreign/workspace';
+  await assert.rejects(() => assertClaudeNativeSessionIdentity(
+    mixedWorkspace.map((entry) => JSON.stringify(entry)).join('\n'),
+    expectedSessionId,
+    expectedCwd,
+  ));
+});
+
+test('Claude reader rejects portable boundary records without a native uuid', async () => {
+  const logText = await readFile(join(FIXTURES, 'redacted-claude-golden.jsonl'), 'utf8');
+  const parentUuid = lastUuid(logText);
+  const missingUuidRecords = [
+    { type: 'user', parentUuid, message: { role: 'user', content: 'unfinished' } },
+    {
+      type: 'assistant', parentUuid,
+      message: { id: 'assistant-without-entry-uuid', role: 'assistant', content: [{ type: 'text', text: 'answer' }] },
+    },
+    { type: 'system', subtype: 'turn_duration', parentUuid },
+  ];
+  for (const record of missingUuidRecords) {
+    rejects(() => extractClaudeNativeTurns(`${logText.trimEnd()}\n${JSON.stringify(record)}\n`));
+  }
+});
+
+test('Claude reader rejects a completion uuid reused as an assistant message id', () => {
+  const records = [
+    { type: 'system', subtype: 'init', uuid: 'root-status' },
+    {
+      type: 'user', uuid: 'user-entry', parentUuid: 'root-status',
+      message: { role: 'user', content: 'hello' },
+    },
+    {
+      type: 'assistant', uuid: 'assistant-entry', parentUuid: 'user-entry',
+      message: {
+        id: 'shared-completion-id',
+        role: 'assistant',
+        content: [{ type: 'text', text: 'answer' }],
+      },
+    },
+    {
+      type: 'system', subtype: 'turn_duration', uuid: 'shared-completion-id',
+      parentUuid: 'assistant-entry', durationMs: 1,
+    },
+  ];
+
+  rejects(() => extractClaudeNativeTurns(records.map((entry) => JSON.stringify(entry)).join('\n')));
 });
 
 test('Claude reader rejects compaction summaries and compact boundaries', async () => {
@@ -108,6 +247,48 @@ test('Claude reader excludes prompt-id-linked local command transcript records',
   assert.equal(turns[2]!.userText, 'real caller after local command');
   assert.equal(turns.some((turn) => turn.userText.includes('<command-name>') ||
     turn.userText.includes('<local-command-stdout>')), false);
+});
+
+test('Claude reader excludes meta and sidechain assistants and completion boundaries', async () => {
+  const logText = await readFile(join(FIXTURES, 'redacted-claude-golden.jsonl'), 'utf8');
+  const parent = lastUuid(logText);
+  const scopedTurn = [
+    {
+      type: 'user', uuid: 'scoped-user', parentUuid: parent,
+      message: { role: 'user', content: 'portable prompt' },
+    },
+    {
+      type: 'assistant', isMeta: true, uuid: 'meta-assistant', parentUuid: 'scoped-user',
+      message: { id: 'meta-message', role: 'assistant', content: [{ type: 'text', text: 'meta answer' }] },
+    },
+    {
+      type: 'system', subtype: 'turn_duration', isMeta: true, uuid: 'meta-completion',
+      parentUuid: 'meta-assistant', durationMs: 1,
+    },
+    {
+      type: 'assistant', uuid: 'portable-assistant', parentUuid: 'meta-completion',
+      message: { id: 'portable-message', role: 'assistant', content: [{ type: 'text', text: 'portable answer' }] },
+    },
+    {
+      type: 'assistant', isSidechain: true, uuid: 'sidechain-assistant', parentUuid: 'portable-assistant',
+      message: { id: 'sidechain-message', role: 'assistant', content: [{ type: 'text', text: 'sidechain answer' }] },
+    },
+    {
+      type: 'system', subtype: 'turn_duration', isSidechain: true, uuid: 'sidechain-completion',
+      parentUuid: 'sidechain-assistant', durationMs: 1,
+    },
+    {
+      type: 'system', subtype: 'turn_duration', uuid: 'portable-completion',
+      parentUuid: 'sidechain-completion', durationMs: 1,
+    },
+  ].map((entry) => JSON.stringify(entry)).join('\n');
+
+  const turns = extractClaudeNativeTurns(`${logText}\n${scopedTurn}\n`);
+  assert.equal(turns.length, 3);
+  assert.equal(turns[2]!.userText, 'portable prompt');
+  assert.equal(turns[2]!.assistantText, 'portable answer');
+  assert.deepEqual(turns[2]!.nativeIds.assistantIds, ['portable-message']);
+  assert.equal(turns[2]!.nativeIds.completionId, 'portable-completion');
 });
 
 test('Claude reader drops an entire provider-error interrupted turn', async () => {
@@ -170,6 +351,133 @@ test('Claude reader rejects a non-trailing turn without a completion boundary', 
   rejects(() => extractClaudeNativeTurns(`${logText}\n${malformed}\n`));
 });
 
+test('Claude reader rejects malformed parent lineage without truncating or looping', async () => {
+  const root = {
+    type: 'system',
+    subtype: 'init',
+    uuid: 'root-status',
+  };
+  const user = {
+    type: 'user',
+    uuid: 'user-1',
+    parentUuid: 'root-status',
+    message: { role: 'user', content: 'hello' },
+  };
+  const assistant = {
+    type: 'assistant',
+    uuid: 'assistant-1',
+    parentUuid: 'user-1',
+    message: { id: 'assistant-message-1', role: 'assistant', content: [{ type: 'text', text: 'hi' }] },
+  };
+  const completion = {
+    type: 'system',
+    subtype: 'turn_duration',
+    uuid: 'completion-1',
+    parentUuid: 'assistant-1',
+  };
+  const valid = [root, user, assistant, completion].map((entry) => JSON.stringify(entry)).join('\n');
+  assert.equal(extractClaudeNativeTurns(`${valid}\n`).length, 1);
+
+  rejects(() => extractClaudeNativeTurns([
+    JSON.stringify(root),
+    JSON.stringify(user),
+    JSON.stringify({ ...assistant, parentUuid: 'missing-parent' }),
+    JSON.stringify(completion),
+  ].join('\n')));
+
+  for (const parentUuid of [42, '']) {
+    rejects(() => extractClaudeNativeTurns([
+      JSON.stringify(root),
+      JSON.stringify(user),
+      JSON.stringify(assistant),
+      JSON.stringify({ ...completion, parentUuid }),
+    ].join('\n')));
+  }
+  for (const malformedCompletion of [
+    { ...completion, parentUuid: null },
+    (() => {
+      const withoutParent = { ...completion } as Record<string, unknown>;
+      delete withoutParent.parentUuid;
+      return withoutParent;
+    })(),
+  ]) {
+    rejects(() => extractClaudeNativeTurns([
+      JSON.stringify(root),
+      JSON.stringify(user),
+      JSON.stringify(assistant),
+      JSON.stringify(malformedCompletion),
+    ].join('\n')));
+  }
+
+  rejects(() => extractClaudeNativeTurns([
+    JSON.stringify(root),
+    JSON.stringify(user),
+    JSON.stringify(assistant),
+    JSON.stringify(completion),
+    JSON.stringify({ type: 'system', uuid: 'inactive-duplicate', parentUuid: 'completion-1', isSidechain: true }),
+    JSON.stringify({ type: 'system', uuid: 'inactive-duplicate', parentUuid: 'completion-1', isSidechain: true }),
+  ].join('\n')));
+
+  await rejectClaudeCyclesWithoutHanging([
+    [
+      JSON.stringify(root),
+      JSON.stringify({ ...user, parentUuid: 'user-1' }),
+      JSON.stringify(assistant),
+      JSON.stringify(completion),
+    ].join('\n'),
+    [
+      JSON.stringify(root),
+      JSON.stringify({ ...user, parentUuid: 'assistant-1' }),
+      JSON.stringify({ ...assistant, parentUuid: 'user-1' }),
+      JSON.stringify(completion),
+    ].join('\n'),
+  ]);
+
+  rejects(() => extractClaudeNativeTurns([
+    JSON.stringify(root),
+    JSON.stringify(assistant),
+    JSON.stringify(user),
+    JSON.stringify(completion),
+  ].join('\n')));
+  rejects(() => extractClaudeNativeTurns([
+    JSON.stringify(user),
+    JSON.stringify(root),
+    JSON.stringify(assistant),
+    JSON.stringify(completion),
+  ].join('\n')));
+
+  const withInactiveMalformedSidechains = [
+    root,
+    user,
+    assistant,
+    completion,
+    { type: 'system', uuid: 'inactive-dangling', parentUuid: 'missing-sidechain-parent', isSidechain: true },
+    { type: 'system', uuid: 'inactive-cycle-a', parentUuid: 'inactive-cycle-b', isSidechain: true },
+    { type: 'system', uuid: 'inactive-cycle-b', parentUuid: 'inactive-cycle-a', isSidechain: true },
+  ].map((entry) => JSON.stringify(entry)).join('\n');
+  assert.equal(extractClaudeNativeTurns(withInactiveMalformedSidechains).length, 1);
+});
+
+test('Claude reader handles deep active lineages without recursive stack overflow', () => {
+  const validEntries: object[] = [{ type: 'system', uuid: 'valid-deep-0' }];
+  for (let index = 1; index <= 15_000; index += 1) {
+    validEntries.push({ type: 'system', uuid: `valid-deep-${index}`, parentUuid: `valid-deep-${index - 1}` });
+  }
+  assert.deepEqual(extractClaudeNativeTurns(validEntries.map((entry) => JSON.stringify(entry)).join('\n')), []);
+
+  const reverseEntries: object[] = [];
+  for (let index = 15_000; index >= 0; index -= 1) {
+    reverseEntries.push({
+      type: 'system',
+      uuid: `deep-${index}`,
+      ...(index === 0 ? {} : { parentUuid: `deep-${index - 1}` }),
+      isSidechain: true,
+    });
+  }
+  reverseEntries.push({ type: 'system', uuid: 'active-tip', parentUuid: 'deep-15000' });
+  rejects(() => extractClaudeNativeTurns(reverseEntries.map((entry) => JSON.stringify(entry)).join('\n')));
+});
+
 test('Codex reader extracts task-complete paired turns and ignores developer/reasoning mirrors', async () => {
   const logText = await readFile(join(FIXTURES, 'redacted-codex-golden.jsonl'), 'utf8');
   const trailingUser = JSON.stringify({
@@ -181,11 +489,17 @@ test('Codex reader extracts task-complete paired turns and ignores developer/rea
       internal_chat_message_metadata_passthrough: { turn_id: 'trailing-turn' },
     },
   });
-  const turns = extractCodexNativeTurns(`${logText}\n${trailingUser}\n`);
+  const baseText = logText.endsWith('\n') ? logText : `${logText}\n`;
+  const withTrailingUser = `${baseText}${trailingUser}\n`;
+  const turns = extractCodexNativeTurns(withTrailingUser);
   assert.equal(turns.length, 2);
   assert.equal(turns[0]!.assistantText, 'REMEMBERED');
   assert.equal(turns[1]!.assistantText, 'BLUEFIN-7');
   assert.ok(turns.every((turn) => turn.nativeIds.completionId.length > 0));
+  assert.notEqual(
+    codexNativeStateDigest(Buffer.from(withTrailingUser)),
+    codexNativeStateDigest(Buffer.from(baseText)),
+  );
 
   const withoutLastCompletion = lines(logText)
     .map((line) => JSON.parse(line))
@@ -194,11 +508,37 @@ test('Codex reader extracts task-complete paired turns and ignores developer/rea
     .map((entry) => JSON.stringify(entry))
     .join('\n');
   assert.equal(extractCodexNativeTurns(`${withoutLastCompletion}\n`).length, 1);
+  assert.notEqual(
+    codexNativeStateDigest(Buffer.from(`${withoutLastCompletion}\n`)),
+    codexNativeStateDigest(Buffer.from(baseText)),
+  );
+});
+
+test('Codex reader binds session_meta identity to the requested native session', async () => {
+  const logText = await readFile(join(FIXTURES, 'redacted-codex-golden.jsonl'), 'utf8');
+  const entries = lines(logText).map((line) => JSON.parse(line));
+  const sessionMeta = entries.find((entry) => entry.type === 'session_meta')!;
+  const expectedSessionId = sessionMeta.payload.id as string;
+  assert.doesNotThrow(() => assertCodexNativeSessionIdentity(logText, expectedSessionId));
+
+  const wrongIdentity = structuredClone(entries);
+  wrongIdentity.find((entry) => entry.type === 'session_meta')!.payload.session_id = 'foreign-session';
+  rejects(() => assertCodexNativeSessionIdentity(
+    wrongIdentity.map((entry) => JSON.stringify(entry)).join('\n'),
+    expectedSessionId,
+  ));
+
+  const duplicateMetadata = `${logText.trimEnd()}\n${JSON.stringify(sessionMeta)}\n`;
+  rejects(() => assertCodexNativeSessionIdentity(duplicateMetadata, expectedSessionId));
 });
 
 test('Codex reader rejects compaction, aborted turns, and rollback markers', async () => {
   const logText = await readFile(join(FIXTURES, 'redacted-codex-golden.jsonl'), 'utf8');
   rejects(() => extractCodexNativeTurns(`${logText}\n${JSON.stringify({ type: 'compacted' })}\n`));
+  rejects(() => extractCodexNativeTurns(`${logText}\n${JSON.stringify({
+    type: 'event_msg',
+    payload: { type: 'context_compacted' },
+  })}\n`));
   rejects(() => extractCodexNativeTurns(`${logText}\n${JSON.stringify({ type: 'event_msg', payload: { type: 'turn_aborted' } })}\n`));
   rejects(() => extractCodexNativeTurns(`${logText}\n${JSON.stringify({ type: 'event_msg', payload: { type: 'thread_rolled_back' } })}\n`));
 });
@@ -226,6 +566,119 @@ test('Codex reader rejects completed lifecycle evidence without portable message
   rejects(() => extractCodexNativeTurns(`${logText}\n${structureless}\n`));
 });
 
+test('Codex reader rejects missing assistant ids and out-of-order portable lifecycle records', () => {
+  const started = { type: 'event_msg', payload: { type: 'task_started', turn_id: 'turn-a' } };
+  const user = {
+    type: 'response_item',
+    payload: {
+      type: 'message',
+      role: 'user',
+      content: [{ type: 'input_text', text: 'hello' }],
+      internal_chat_message_metadata_passthrough: { turn_id: 'turn-a' },
+    },
+  };
+  const assistant = {
+    type: 'response_item',
+    payload: {
+      type: 'message',
+      role: 'assistant',
+      content: [{ type: 'output_text', text: 'hi' }],
+      internal_chat_message_metadata_passthrough: { turn_id: 'turn-a' },
+    },
+  };
+  const assistantWithId = { ...assistant, payload: { ...assistant.payload, id: 'assistant-message-a' } };
+  const complete = { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'turn-a' } };
+  const unrelated = { type: 'event_msg', payload: { type: 'world_state', note: true } };
+
+  assert.equal(extractCodexNativeTurns([
+    started, unrelated, user, assistantWithId, complete,
+  ].map((entry) => JSON.stringify(entry)).join('\n')).length, 1);
+  rejects(() => extractCodexNativeTurns([
+    started, user, assistant, complete,
+  ].map((entry) => JSON.stringify(entry)).join('\n')));
+  rejects(() => extractCodexNativeTurns([
+    started,
+    user,
+    { ...assistantWithId, payload: { ...assistantWithId.payload, id: 'turn-a' } },
+    complete,
+  ].map((entry) => JSON.stringify(entry)).join('\n')));
+  rejects(() => extractCodexNativeTurns([
+    complete, started, user, assistantWithId,
+  ].map((entry) => JSON.stringify(entry)).join('\n')));
+  rejects(() => extractCodexNativeTurns([
+    started, assistantWithId, user, complete,
+  ].map((entry) => JSON.stringify(entry)).join('\n')));
+  rejects(() => extractCodexNativeTurns([
+    started, user, complete, assistantWithId,
+  ].map((entry) => JSON.stringify(entry)).join('\n')));
+  rejects(() => extractCodexNativeTurns([
+    user, started, assistantWithId, complete,
+  ].map((entry) => JSON.stringify(entry)).join('\n')));
+  rejects(() => extractCodexNativeTurns([
+    started, started, user, assistantWithId, complete,
+  ].map((entry) => JSON.stringify(entry)).join('\n')));
+  rejects(() => extractCodexNativeTurns([
+    started, user, assistantWithId, complete, complete,
+  ].map((entry) => JSON.stringify(entry)).join('\n')));
+  rejects(() => extractCodexNativeTurns([
+    started, user, assistantWithId, complete, assistantWithId,
+  ].map((entry) => JSON.stringify(entry)).join('\n')));
+
+  const startedB = { type: 'event_msg', payload: { type: 'task_started', turn_id: 'turn-b' } };
+  const userB = {
+    ...user,
+    payload: {
+      ...user.payload,
+      internal_chat_message_metadata_passthrough: { turn_id: 'turn-b' },
+    },
+  };
+  const assistantB = {
+    ...assistantWithId,
+    payload: {
+      ...assistantWithId.payload,
+      id: 'assistant-message-b',
+      internal_chat_message_metadata_passthrough: { turn_id: 'turn-b' },
+    },
+  };
+  const completeB = { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'turn-b' } };
+  rejects(() => extractCodexNativeTurns([
+    started, user, startedB, userB, assistantWithId, complete, assistantB, completeB,
+  ].map((entry) => JSON.stringify(entry)).join('\n')));
+
+  const excludedForeignMessages = [
+    {
+      type: 'response_item',
+      payload: {
+        type: 'message',
+        role: 'developer',
+        content: [{ type: 'input_text', text: 'excluded developer context' }],
+        internal_chat_message_metadata_passthrough: { turn_id: 'turn-b' },
+      },
+    },
+    {
+      type: 'response_item',
+      payload: {
+        type: 'message',
+        role: 'assistant',
+        content: [{ type: 'output_text', text: 'one' }, { type: 'output_text', text: 'two' }],
+        internal_chat_message_metadata_passthrough: { turn_id: 'turn-b' },
+      },
+    },
+    {
+      type: 'response_item',
+      payload: {
+        type: 'message',
+        role: 'assistant',
+        content: [{ type: 'output_text', text: '' }],
+        internal_chat_message_metadata_passthrough: { turn_id: 'turn-b' },
+      },
+    },
+  ];
+  assert.equal(extractCodexNativeTurns([
+    started, ...excludedForeignMessages, user, assistantWithId, complete,
+  ].map((entry) => JSON.stringify(entry)).join('\n')).length, 1);
+});
+
 test('Kiro reader requires JSONL plus companion completion metadata', async () => {
   const logText = await readFile(join(FIXTURES, 'redacted-kiro-golden.jsonl'), 'utf8');
   const companionText = validKiroCompanion(logText, await readFile(join(FIXTURES, 'redacted-kiro-golden.json'), 'utf8'));
@@ -239,6 +692,19 @@ test('Kiro reader requires JSONL plus companion completion metadata', async () =
 test('Kiro reader reports malformed companion JSON as a protocol violation', async () => {
   const logText = await readFile(join(FIXTURES, 'redacted-kiro-golden.jsonl'), 'utf8');
   rejects(() => extractKiroNativeTurns(logText, '{not-json'));
+});
+
+test('Kiro reader rejects non-object companion turn metadata', async () => {
+  const logText = await readFile(join(FIXTURES, 'redacted-kiro-golden.jsonl'), 'utf8');
+  const companion = JSON.parse(validKiroCompanion(
+    logText,
+    await readFile(join(FIXTURES, 'redacted-kiro-golden.json'), 'utf8'),
+  ));
+  for (const malformed of [null, 1, 'metadata', []]) {
+    const candidate = structuredClone(companion);
+    candidate.session_state.conversation_metadata.user_turn_metadatas.push(malformed);
+    rejects(() => extractKiroNativeTurns(logText, JSON.stringify(candidate)));
+  }
 });
 
 test('Kiro reader rejects JSONL and companion version drift', async () => {
@@ -256,6 +722,29 @@ test('Kiro reader rejects JSONL and companion version drift', async () => {
 
   companion.session_state.version = 'v2';
   rejects(() => extractKiroNativeTurns(logText, JSON.stringify(companion)));
+});
+
+test('Kiro reader binds companion metadata to the requested native session id', async () => {
+  const logText = await readFile(join(FIXTURES, 'redacted-kiro-golden.jsonl'), 'utf8');
+  const companion = JSON.parse(validKiroCompanion(
+    logText,
+    await readFile(join(FIXTURES, 'redacted-kiro-golden.json'), 'utf8'),
+  ));
+  const expectedSessionId = companion.session_id as string;
+  assert.equal(extractKiroNativeTurns(logText, JSON.stringify(companion), expectedSessionId).length, 2);
+
+  const wrongTopLevel = structuredClone(companion);
+  wrongTopLevel.session_id = 'wrong-top-level-session';
+  rejects(() => extractKiroNativeTurns(logText, JSON.stringify(wrongTopLevel), expectedSessionId));
+
+  const wrongNested = structuredClone(companion);
+  wrongNested.session_state.rts_model_state.conversation_id = 'wrong-nested-session';
+  rejects(() => extractKiroNativeTurns(logText, JSON.stringify(wrongNested), expectedSessionId));
+
+  const missingIdentity = structuredClone(companion);
+  delete missingIdentity.session_id;
+  delete missingIdentity.session_state.rts_model_state.conversation_id;
+  rejects(() => extractKiroNativeTurns(logText, JSON.stringify(missingIdentity), expectedSessionId));
 });
 
 test('Kiro reader rejects compaction and companion drift', async () => {
@@ -289,6 +778,53 @@ test('Kiro reader rejects duplicate native and completed-turn message ids', asyn
   assert.ok(completed);
   completed.message_ids.push(completed.message_ids[0]);
   rejects(() => extractKiroNativeTurns(logText, JSON.stringify(companion)));
+});
+
+test('Kiro reader binds completed companion turns to native JSONL record order', async () => {
+  const logText = await readFile(join(FIXTURES, 'redacted-kiro-golden.jsonl'), 'utf8');
+  const companion = JSON.parse(validKiroCompanion(
+    logText,
+    await readFile(join(FIXTURES, 'redacted-kiro-golden.json'), 'utf8'),
+  ));
+  const metadatas = companion.session_state.conversation_metadata.user_turn_metadatas;
+  assert.equal(metadatas.length, 2);
+
+  const crossedAssistants = structuredClone(companion);
+  const crossed = crossedAssistants.session_state.conversation_metadata.user_turn_metadatas;
+  [crossed[0].message_ids[1], crossed[1].message_ids[1]] =
+    [crossed[1].message_ids[1], crossed[0].message_ids[1]];
+  rejects(() => extractKiroNativeTurns(logText, JSON.stringify(crossedAssistants)));
+
+  const reversedTurn = structuredClone(companion);
+  reversedTurn.session_state.conversation_metadata.user_turn_metadatas[0].message_ids.reverse();
+  rejects(() => extractKiroNativeTurns(logText, JSON.stringify(reversedTurn)));
+
+  const reversedMetadatas = structuredClone(companion);
+  reversedMetadatas.session_state.conversation_metadata.user_turn_metadatas.reverse();
+  rejects(() => extractKiroNativeTurns(logText, JSON.stringify(reversedMetadatas)));
+});
+
+test('Kiro reader rejects Prompt and AssistantMessage records without native message ids', async () => {
+  const logText = await readFile(join(FIXTURES, 'redacted-kiro-golden.jsonl'), 'utf8');
+  const companionText = validKiroCompanion(
+    logText,
+    await readFile(join(FIXTURES, 'redacted-kiro-golden.json'), 'utf8'),
+  );
+  for (const record of [
+    {
+      version: 'v1', kind: 'Prompt',
+      data: { content: [{ kind: 'text', data: 'missing id' }], meta: { timestamp: 1 } },
+    },
+    {
+      version: 'v1', kind: 'AssistantMessage',
+      data: { content: [{ kind: 'text', data: 'missing id' }] },
+    },
+  ]) {
+    rejects(() => extractKiroNativeTurns(
+      `${logText.trimEnd()}\n${JSON.stringify(record)}\n`,
+      companionText,
+    ));
+  }
 });
 
 test('Kiro reader requires a completion boundary id in completed metadata', async () => {
@@ -329,6 +865,85 @@ test('Kiro reader rejects malformed completed message_ids instead of filtering t
     result: { Ok: { id: 'empty-completed-turn' } },
   });
   rejects(() => extractKiroNativeTurns(logText, JSON.stringify(emptyIds)));
+});
+
+test('Kiro reader rejects missing message ids referenced by incomplete metadata', async () => {
+  const logText = await readFile(join(FIXTURES, 'redacted-kiro-golden.jsonl'), 'utf8');
+  const companion = JSON.parse(validKiroCompanion(
+    logText,
+    await readFile(join(FIXTURES, 'redacted-kiro-golden.json'), 'utf8'),
+  ));
+  companion.session_state.conversation_metadata.user_turn_metadatas.push({
+    message_ids: ['missing-native-id'],
+    end_reason: 'Pending',
+  });
+
+  rejects(() => extractKiroNativeTurns(logText, JSON.stringify(companion)));
+});
+
+test('Kiro reader does not infer unverified result snapshot semantics beyond the completion id', async () => {
+  const logText = await readFile(join(FIXTURES, 'redacted-kiro-golden.jsonl'), 'utf8');
+  const companion = JSON.parse(validKiroCompanion(
+    logText,
+    await readFile(join(FIXTURES, 'redacted-kiro-golden.json'), 'utf8'),
+  ));
+  const firstAssistant = lines(logText).map((line) => JSON.parse(line))
+    .find((entry) => entry.kind === 'AssistantMessage');
+  assert.ok(firstAssistant);
+  const extraAssistant = structuredClone(firstAssistant);
+  extraAssistant.data.message_id = 'extra-assistant-message';
+  extraAssistant.data.content[0].data = 'follow-up assistant text';
+  companion.session_state.conversation_metadata.user_turn_metadatas[0].message_ids.push(
+    extraAssistant.data.message_id,
+  );
+  companion.session_state.conversation_metadata.user_turn_metadatas[0].result.Ok.role = 'unverified-role-field';
+  companion.session_state.conversation_metadata.user_turn_metadatas[0].result.Ok.content[0].data = 'unverified snapshot';
+  companion.session_state.conversation_metadata.user_turn_metadatas[0].result.Ok.meta.timestamp = 'unverified timestamp';
+
+  const orderedLog = lines(logText);
+  const firstTurnLastMessageId = companion.session_state.conversation_metadata
+    .user_turn_metadatas[0].message_ids.at(-2);
+  const insertAfter = orderedLog.findIndex((line) => JSON.parse(line).data?.message_id === firstTurnLastMessageId);
+  assert.ok(insertAfter >= 0);
+  orderedLog.splice(insertAfter + 1, 0, JSON.stringify(extraAssistant));
+
+  const turns = extractKiroNativeTurns(
+    `${orderedLog.join('\n')}\n`,
+    JSON.stringify(companion),
+  );
+  assert.equal(turns[0]!.assistantText.endsWith('\n\nfollow-up assistant text'), true);
+  assert.equal(turns[0]!.nativeIds.completionId.length > 0, true);
+});
+
+test('Kiro reader rejects completed metadata id reuse across completed turns', async () => {
+  const logText = await readFile(join(FIXTURES, 'redacted-kiro-golden.jsonl'), 'utf8');
+  const companion = JSON.parse(validKiroCompanion(
+    logText,
+    await readFile(join(FIXTURES, 'redacted-kiro-golden.json'), 'utf8'),
+  ));
+  const reusedMessageId = structuredClone(companion);
+  reusedMessageId.session_state.conversation_metadata.user_turn_metadatas[1].message_ids[0] =
+    reusedMessageId.session_state.conversation_metadata.user_turn_metadatas[0].message_ids[0];
+  rejects(() => extractKiroNativeTurns(logText, JSON.stringify(reusedMessageId)));
+
+  const reusedCompletionId = structuredClone(companion);
+  reusedCompletionId.session_state.conversation_metadata.user_turn_metadatas[1].result.Ok.id =
+    reusedCompletionId.session_state.conversation_metadata.user_turn_metadatas[0].result.Ok.id;
+  rejects(() => extractKiroNativeTurns(logText, JSON.stringify(reusedCompletionId)));
+
+  const completionReusedAsMessage = structuredClone(companion);
+  const priorCompletionId = completionReusedAsMessage.session_state.conversation_metadata
+    .user_turn_metadatas[0].result.Ok.id;
+  const replacedMessageId = completionReusedAsMessage.session_state.conversation_metadata
+    .user_turn_metadatas[1].message_ids[0];
+  completionReusedAsMessage.session_state.conversation_metadata.user_turn_metadatas[1].message_ids[0] =
+    priorCompletionId;
+  const remappedLog = lines(logText).map((line) => {
+    const record = JSON.parse(line);
+    if (record.data?.message_id === replacedMessageId) record.data.message_id = priorCompletionId;
+    return JSON.stringify(record);
+  }).join('\n');
+  rejects(() => extractKiroNativeTurns(remappedLog, JSON.stringify(completionReusedAsMessage)));
 });
 
 test('Kiro reader rejects a completed partial portable pair but excludes completed tool-only metadata', async () => {
@@ -401,25 +1016,118 @@ test('native JSONL readers reject valid JSON non-object records', async () => {
 
 test('OpenCode reader extracts completed exported pairs and drops trailing incomplete user messages', async () => {
   const exportDoc = JSON.parse(await readFile(join(FIXTURES, 'redacted-opencode-golden-export.json'), 'utf8'));
+  const before = JSON.stringify(exportDoc);
   exportDoc.messages.push({
     info: { id: 'msg_f60012b56001AAAAAAAAAAAAAA', role: 'user' },
     parts: [{ id: 'prt_f60012b57001AAAAAAAAAAAAAA', type: 'text', text: 'unfinished' }],
   });
-  const turns = extractOpenCodeNativeTurns(JSON.stringify(exportDoc));
+  const withTrailingUser = JSON.stringify(exportDoc);
+  const turns = extractOpenCodeNativeTurns(withTrailingUser);
   assert.equal(turns.length, 1);
   assert.equal(turns[0]!.assistantText.trim(), 'OK');
   assert.equal(turns[0]!.nativeIds.assistantIds.length, 1);
+  assert.notEqual(openCodeNativeStateDigest(withTrailingUser), openCodeNativeStateDigest(before));
 });
 
-test('OpenCode reader rejects pending revert and compaction parts', async () => {
+test('native state digests cover every backend-owned component but ignore OpenCode object key order', async () => {
+  const kiroLog = await readFile(join(FIXTURES, 'redacted-kiro-golden.jsonl'), 'utf8');
+  const kiroCompanion = await readFile(join(FIXTURES, 'redacted-kiro-golden.json'), 'utf8');
+  assert.notEqual(
+    kiroNativeStateDigest(Buffer.from(kiroLog), Buffer.from(kiroCompanion)),
+    kiroNativeStateDigest(Buffer.from(`${kiroLog}\n`), Buffer.from(kiroCompanion)),
+  );
+  assert.notEqual(
+    kiroNativeStateDigest(Buffer.from(kiroLog), Buffer.from(kiroCompanion)),
+    kiroNativeStateDigest(Buffer.from(kiroLog), Buffer.from(`${kiroCompanion}\n`)),
+  );
+
+  const first = '{"messages":[{"info":{"role":"user","id":"one"},"parts":[]}]}';
+  const reorderedKeys = '{"messages":[{"parts":[],"info":{"id":"one","role":"user"}}]}';
+  const changedArray = '{"messages":[{"info":{"role":"user","id":"one"},"parts":[null]}]}';
+  assert.equal(openCodeNativeStateDigest(first), openCodeNativeStateDigest(reorderedKeys));
+  assert.notEqual(openCodeNativeStateDigest(first), openCodeNativeStateDigest(changedArray));
+});
+
+test('native state byte digests distinguish invalid UTF-8 that lossy decoding would merge', () => {
+  const first = Buffer.from([0x22, 0x80, 0x22]);
+  const second = Buffer.from([0x22, 0x81, 0x22]);
+  assert.equal(first.toString('utf8'), second.toString('utf8'));
+  assert.notEqual(digestNativeState('invalid-byte-probe', [first]), digestNativeState('invalid-byte-probe', [second]));
+  assert.throws(
+    () => decodeNativeStateUtf8(first, 'test native state'),
+    (error) => error instanceof OpenPError && error.exitCode === 40,
+  );
+});
+
+test('OpenCode reader validates export document info.id against the requested session id', async () => {
+  const exportDoc = JSON.parse(await readFile(join(FIXTURES, 'redacted-opencode-golden-export.json'), 'utf8'));
+  assert.equal(extractOpenCodeNativeTurns(JSON.stringify(exportDoc), exportDoc.info.id).length, 1);
+  rejects(() => extractOpenCodeNativeTurns(JSON.stringify(exportDoc), 'different-session'));
+
+  const wrongMessageOwner = structuredClone(exportDoc);
+  wrongMessageOwner.messages[0].info.sessionID = 'different-session';
+  rejects(() => extractOpenCodeNativeTurns(JSON.stringify(wrongMessageOwner), exportDoc.info.id));
+
+  const wrongPartOwner = structuredClone(exportDoc);
+  wrongPartOwner.messages[0].parts[0].sessionID = 'different-session';
+  rejects(() => extractOpenCodeNativeTurns(JSON.stringify(wrongPartOwner), exportDoc.info.id));
+
+  const wrongPartMessage = structuredClone(exportDoc);
+  wrongPartMessage.messages[0].parts[0].messageID = wrongPartMessage.messages[1].info.id;
+  rejects(() => extractOpenCodeNativeTurns(JSON.stringify(wrongPartMessage), exportDoc.info.id));
+});
+
+test('OpenCode reader rejects missing, malformed, and unsupported export versions', async () => {
+  const exportDoc = JSON.parse(await readFile(join(FIXTURES, 'redacted-opencode-golden-export.json'), 'utf8'));
+  for (const version of [undefined, 1, '99.0.0']) {
+    const candidate = structuredClone(exportDoc);
+    if (version === undefined) {
+      delete candidate.info.version;
+    } else {
+      candidate.info.version = version;
+    }
+    rejects(() => extractOpenCodeNativeTurns(JSON.stringify(candidate), candidate.info.id));
+  }
+});
+
+test('OpenCode reader rejects malformed or duplicate native message and part ids', async () => {
+  const exportDoc = JSON.parse(await readFile(join(FIXTURES, 'redacted-opencode-golden-export.json'), 'utf8'));
+  const corruptions: readonly ((doc: any) => void)[] = [
+    (doc) => { doc.messages[0].info.id = 'msg_not-native'; },
+    (doc) => { delete doc.messages[0].parts[0].id; },
+    (doc) => { doc.messages[1].info.id = doc.messages[0].info.id; },
+    (doc) => { doc.messages[1].parts[0].id = doc.messages[0].parts[0].id; },
+  ];
+  for (const corrupt of corruptions) {
+    const candidate = structuredClone(exportDoc);
+    corrupt(candidate);
+    rejects(() => extractOpenCodeNativeTurns(JSON.stringify(candidate)));
+  }
+});
+
+test('OpenCode reader rejects pending revert and every native compaction marker', async () => {
   const exportDoc = JSON.parse(await readFile(join(FIXTURES, 'redacted-opencode-golden-export.json'), 'utf8'));
   const reverted = structuredClone(exportDoc);
-  reverted.messages[0].info.revert = { messageID: 'x' };
+  reverted.info.revert = { messageID: reverted.messages[0].info.id };
   rejects(() => extractOpenCodeNativeTurns(JSON.stringify(reverted)));
 
+  const compacting = structuredClone(exportDoc);
+  compacting.info.time.compacting = compacting.info.time.updated;
+  rejects(() => extractOpenCodeNativeTurns(JSON.stringify(compacting)));
+
   const compacted = structuredClone(exportDoc);
-  compacted.messages[0].parts.push({ id: 'prt_compact', type: 'compaction', text: 'summary' });
+  compacted.messages[0].parts.push({
+    id: 'prt_f60012997001AAAAAAAAAAAAAA',
+    sessionID: compacted.info.id,
+    messageID: compacted.messages[0].info.id,
+    type: 'compaction',
+    auto: true,
+  });
   rejects(() => extractOpenCodeNativeTurns(JSON.stringify(compacted)));
+
+  const summaryAssistant = structuredClone(exportDoc);
+  summaryAssistant.messages[1].info.summary = true;
+  rejects(() => extractOpenCodeNativeTurns(JSON.stringify(summaryAssistant)));
 
   const nonAdjacent = structuredClone(exportDoc);
   nonAdjacent.messages.splice(1, 0, {
@@ -445,12 +1153,175 @@ test('OpenCode reader rejects pending revert and compaction parts', async () => 
     {
       info: {
         id: 'msg_f60012a50001AAAAAAAAAAAAAA', role: 'assistant',
+        parentID: 'msg_f60012a30001AAAAAAAAAAAAAA', finish: 'stop',
         time: { created: 1784022154547, completed: 1784022154548 },
       },
       parts: [{ id: 'prt_f60012a60001AAAAAAAAAAAAAA', type: 'text', text: 'later answer' }],
     },
   );
   rejects(() => extractOpenCodeNativeTurns(JSON.stringify(middleIncomplete)));
+});
+
+test('OpenCode reader binds every assistant subturn to its user and keeps the terminal completion id', async () => {
+  const exportDoc = JSON.parse(await readFile(join(FIXTURES, 'redacted-opencode-golden-export.json'), 'utf8'));
+  const user = exportDoc.messages[0];
+  const finalAssistant = exportDoc.messages[1];
+  finalAssistant.parts.find((part: any) => part.type === 'text').text = 'final answer';
+  const intermediate = structuredClone(finalAssistant);
+  intermediate.info.id = 'msg_f60012a00001AAAAAAAAAAAAAA';
+  intermediate.info.parentID = user.info.id;
+  intermediate.info.finish = 'tool-calls';
+  intermediate.info.time = { created: finalAssistant.info.time.created - 2, completed: finalAssistant.info.time.created - 1 };
+  intermediate.parts = [{
+    id: 'prt_f60012a10001AAAAAAAAAAAAAA',
+    sessionID: exportDoc.info.id,
+    messageID: intermediate.info.id,
+    type: 'text',
+    text: 'intermediate answer',
+  }];
+  exportDoc.messages = [user, intermediate, finalAssistant];
+
+  const turns = extractOpenCodeNativeTurns(JSON.stringify(exportDoc), exportDoc.info.id);
+  assert.equal(turns.length, 1);
+  assert.equal(turns[0]!.assistantText, 'final answer');
+  assert.deepEqual(turns[0]!.nativeIds.assistantIds, [intermediate.info.id, finalAssistant.info.id]);
+  assert.equal(turns[0]!.nativeIds.completionId, finalAssistant.info.id);
+
+  const malformedSibling = structuredClone(exportDoc);
+  malformedSibling.messages[1].info.finish = 'stop';
+  rejects(() => extractOpenCodeNativeTurns(JSON.stringify(malformedSibling), malformedSibling.info.id));
+
+  const toolContinuedSibling = structuredClone(malformedSibling);
+  toolContinuedSibling.messages[1].parts.push({
+    id: 'prt_f60012a20001AAAAAAAAAAAAAA',
+    sessionID: toolContinuedSibling.info.id,
+    messageID: toolContinuedSibling.messages[1].info.id,
+    type: 'tool',
+    callID: 'call-intermediate',
+    tool: 'read',
+    state: { status: 'completed', input: {}, output: 'done', title: 'read', metadata: {}, time: { start: 1, end: 2 } },
+  });
+  assert.equal(extractOpenCodeNativeTurns(
+    JSON.stringify(toolContinuedSibling),
+    toolContinuedSibling.info.id,
+  ).length, 1);
+
+  for (const corrupt of [
+    (doc: any) => { delete doc.messages[1].info.parentID; },
+    (doc: any) => { doc.messages[1].info.parentID = 'msg_f60012a20001AAAAAAAAAAAAAA'; },
+  ]) {
+    const candidate = structuredClone(exportDoc);
+    corrupt(candidate);
+    rejects(() => extractOpenCodeNativeTurns(JSON.stringify(candidate), candidate.info.id));
+  }
+});
+
+test('OpenCode reader excludes explicit provider-error turns and rejects false completion evidence', async () => {
+  const exportDoc = JSON.parse(await readFile(join(FIXTURES, 'redacted-opencode-golden-export.json'), 'utf8'));
+  const interrupted = structuredClone(exportDoc);
+  interrupted.messages[1].info.error = { name: 'ProviderError', data: { message: 'redacted' } };
+  assert.deepEqual(extractOpenCodeNativeTurns(JSON.stringify(interrupted), interrupted.info.id), []);
+
+  const assistantAfterError = structuredClone(exportDoc);
+  const errorIntermediate = structuredClone(assistantAfterError.messages[1]);
+  errorIntermediate.info.id = 'msg_f60012ab0001AAAAAAAAAAAAAA';
+  errorIntermediate.info.error = { name: 'ProviderError', data: { message: 'redacted' } };
+  errorIntermediate.parts = [{
+    id: 'prt_f60012ac0001AAAAAAAAAAAAAA',
+    sessionID: assistantAfterError.info.id,
+    messageID: errorIntermediate.info.id,
+    type: 'text',
+    text: 'partial',
+  }];
+  assistantAfterError.messages.splice(1, 0, errorIntermediate);
+  rejects(() => extractOpenCodeNativeTurns(JSON.stringify(assistantAfterError), assistantAfterError.info.id));
+
+  const missingFinish = structuredClone(exportDoc);
+  delete missingFinish.messages[1].info.finish;
+  rejects(() => extractOpenCodeNativeTurns(JSON.stringify(missingFinish), missingFinish.info.id));
+
+  const unfinishedToolCall = structuredClone(exportDoc);
+  unfinishedToolCall.messages[1].info.finish = 'tool-calls';
+  assert.deepEqual(extractOpenCodeNativeTurns(JSON.stringify(unfinishedToolCall), unfinishedToolCall.info.id), []);
+
+  const nonTrailingToolCall = structuredClone(unfinishedToolCall);
+  const nextUser = structuredClone(nonTrailingToolCall.messages[0]);
+  nextUser.info.id = 'msg_f60012c00001AAAAAAAAAAAAAA';
+  nextUser.parts[0].id = 'prt_f60012c10001AAAAAAAAAAAAAA';
+  nextUser.parts[0].messageID = nextUser.info.id;
+  nextUser.parts[0].text = 'later user';
+  nonTrailingToolCall.messages.push(nextUser);
+  rejects(() => extractOpenCodeNativeTurns(JSON.stringify(nonTrailingToolCall), nonTrailingToolCall.info.id));
+
+  for (const finish of ['unknown', 'content-filter', 'error']) {
+    const unsupportedFinish = structuredClone(exportDoc);
+    unsupportedFinish.messages[1].info.finish = finish;
+    rejects(() => extractOpenCodeNativeTurns(JSON.stringify(unsupportedFinish), unsupportedFinish.info.id));
+  }
+
+  const pendingTool = structuredClone(exportDoc);
+  pendingTool.messages[1].parts.push({
+    id: 'prt_f60012a80001AAAAAAAAAAAAAA',
+    sessionID: pendingTool.info.id,
+    messageID: pendingTool.messages[1].info.id,
+    type: 'tool',
+    callID: 'call-1',
+    tool: 'read',
+    state: { status: 'pending', input: {}, raw: '{}' },
+  });
+  assert.deepEqual(extractOpenCodeNativeTurns(JSON.stringify(pendingTool), pendingTool.info.id), []);
+
+  const providerExecuted = structuredClone(pendingTool);
+  providerExecuted.messages[1].parts.at(-1).metadata = { providerExecuted: true };
+  assert.equal(extractOpenCodeNativeTurns(JSON.stringify(providerExecuted), providerExecuted.info.id).length, 1);
+});
+
+test('OpenCode reader excludes synthetic internal user text from caller IR', async () => {
+  const exportDoc = JSON.parse(await readFile(join(FIXTURES, 'redacted-opencode-golden-export.json'), 'utf8'));
+  const userTextPart = exportDoc.messages[0].parts.find((part: any) => part.type === 'text');
+  userTextPart.synthetic = true;
+  assert.deepEqual(extractOpenCodeNativeTurns(JSON.stringify(exportDoc), exportDoc.info.id), []);
+
+  const mixed = structuredClone(exportDoc);
+  mixed.messages[0].parts.push({
+    id: 'prt_f60012a70001AAAAAAAAAAAAAA',
+    sessionID: mixed.info.id,
+    messageID: mixed.messages[0].info.id,
+    type: 'text',
+    text: 'real caller text',
+  });
+  const turns = extractOpenCodeNativeTurns(JSON.stringify(mixed), mixed.info.id);
+  assert.equal(turns.length, 1);
+  assert.equal(turns[0]!.userText, 'real caller text');
+});
+
+test('OpenCode settlement validates both exports before accepting an equal messages digest', async () => {
+  const exportDoc = JSON.parse(await readFile(join(FIXTURES, 'redacted-opencode-golden-export.json'), 'utf8'));
+  assert.doesNotThrow(() => assertStableOpenCodeNativeExports(
+    JSON.stringify(exportDoc),
+    JSON.stringify(exportDoc),
+    exportDoc.info.id,
+  ));
+
+  const revertedFirst = structuredClone(exportDoc);
+  revertedFirst.info.revert = { messageID: revertedFirst.messages[0].info.id };
+  assert.equal(
+    openCodeNativeStateDigest(JSON.stringify(revertedFirst)),
+    openCodeNativeStateDigest(JSON.stringify(exportDoc)),
+  );
+  rejects(() => assertStableOpenCodeNativeExports(
+    JSON.stringify(revertedFirst),
+    JSON.stringify(exportDoc),
+    exportDoc.info.id,
+  ));
+
+  const compactingFirst = structuredClone(exportDoc);
+  compactingFirst.info.time.compacting = compactingFirst.info.time.updated;
+  rejects(() => assertStableOpenCodeNativeExports(
+    JSON.stringify(compactingFirst),
+    JSON.stringify(exportDoc),
+    exportDoc.info.id,
+  ));
 });
 
 test('OpenCode export maps an abort-caused signal to AbortError', () => {

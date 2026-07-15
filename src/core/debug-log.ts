@@ -1,6 +1,7 @@
-import { chmod, mkdir, writeFile } from 'node:fs/promises';
+import { chmod, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { EXIT_CODES, OpenPError } from './errors.js';
+import { ensureDurableDirectory } from './fs-durability.js';
 import { resolveOpenPStateRoot } from './state-root.js';
 import { getOpenPVersionInfo } from './version.js';
 
@@ -27,7 +28,9 @@ export async function appendDebugLog(path: string | null, entry: DebugLogEntry):
   })}\n`;
 
   try {
-    await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+    // A caller-provided debug directory may be shared; make newly-created path entries durable but
+    // never tighten an already-existing caller-owned directory's permissions.
+    await ensureDurableDirectory(dirname(path), 0o700, false);
     await writeFile(path, line, { flag: 'a', mode: 0o600 });
     await chmod(path, 0o600).catch(() => undefined);
   } catch {

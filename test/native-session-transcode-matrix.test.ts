@@ -11,7 +11,12 @@ import { buildKiroCompanionWithAppendedTurns, buildKiroHistoryEntries } from '..
 import { extractOpenCodeNativeTurns } from '../src/backends/opencode/native-reader.js';
 import { buildOpenCodeImport } from '../src/backends/opencode/history-writer.js';
 import type { NativeSessionReadResult, NativeSessionTurn, NativeWrittenTurn, SeedWriteTurn } from '../src/core/backend.js';
-import { logicalTurnsFromNative, toSeedWriteTurns } from '../src/core/seed-ir.js';
+import {
+  logicalTurnsFromExternalIr,
+  logicalTurnsFromNative,
+  parseExternalSeedIrJson,
+  toSeedWriteTurns,
+} from '../src/core/seed-ir.js';
 
 const FIXTURES = join(process.cwd(), 'test/fixtures/seed');
 
@@ -48,11 +53,12 @@ async function loadSources(): Promise<readonly SourceFixture[]> {
   const kiroLog = await readFile(join(FIXTURES, 'redacted-kiro-golden.jsonl'), 'utf8');
   const kiroCompanion = validKiroCompanion(kiroLog, await readFile(join(FIXTURES, 'redacted-kiro-golden.json'), 'utf8'));
   const opencodeExport = await readFile(join(FIXTURES, 'redacted-opencode-golden-export.json'), 'utf8');
+  const opencodeSessionId = JSON.parse(opencodeExport).info.id as string;
   const reads: NativeSessionReadResult[] = [
     { backend: 'claude', sessionId: 'claude-source', turns: extractClaudeNativeTurns(claudeLog) },
     { backend: 'codex', sessionId: 'codex-source', turns: extractCodexNativeTurns(codexLog) },
     { backend: 'kiro', sessionId: 'kiro-source', turns: extractKiroNativeTurns(kiroLog, kiroCompanion) },
-    { backend: 'opencode', sessionId: 'opencode-source', turns: extractOpenCodeNativeTurns(opencodeExport) },
+    { backend: 'opencode', sessionId: opencodeSessionId, turns: extractOpenCodeNativeTurns(opencodeExport, opencodeSessionId) },
   ];
   return reads.map((read) => ({
     backend: read.backend as BackendId,
@@ -98,7 +104,7 @@ async function writeToTarget(target: BackendId, turns: readonly SeedWriteTurn[])
       const result = buildOpenCodeImport(exportJson, turns, Date.UTC(2026, 6, 14, 12, 0, 0));
       const doc = JSON.parse(result.doc);
       assert.equal(doc.messages.length >= turns.length * 2, true);
-      const readBack = extractOpenCodeNativeTurns(result.doc);
+      const readBack = extractOpenCodeNativeTurns(result.doc, doc.info.id);
       return { written: result.written, readBack };
     }
   }
@@ -106,7 +112,6 @@ async function writeToTarget(target: BackendId, turns: readonly SeedWriteTurn[])
 
 for (const source of ['claude', 'codex', 'kiro', 'opencode'] as const) {
   for (const target of ['claude', 'codex', 'kiro', 'opencode'] as const) {
-    if (source === target) continue;
     test(`${source} reader IR writes to ${target} target writer`, async () => {
       const sources = await loadSources();
       const fixture = sources.find((item) => item.backend === source)!;
@@ -123,6 +128,28 @@ for (const source of ['claude', 'codex', 'kiro', 'opencode'] as const) {
       const suffix = readBack.slice(-fixture.turns.length);
       assert.deepEqual(suffix.map((turn) => turn.userText), fixture.turns.map((turn) => turn.userText));
       assert.deepEqual(suffix.map((turn) => turn.assistantText), fixture.turns.map((turn) => turn.assistantText));
+      assert.deepEqual(suffix.map((turn) => turn.nativeIds), written.map((turn) => turn.nativeIds));
     });
   }
+}
+
+for (const target of ['claude', 'codex', 'kiro', 'opencode'] as const) {
+  test(`external IR writes through the same boundary to ${target} target writer`, async () => {
+    const ir = parseExternalSeedIrJson(JSON.stringify({
+      schemaVersion: 1,
+      turns: [
+        { id: 'external-one', user: { text: 'external U-one' }, assistant: { text: 'external A-one' } },
+        { id: 'external-two', user: { text: 'external U-two' }, assistant: { text: 'external A-two' } },
+      ],
+    }), 'matrix.ir.json');
+    const turns = toSeedWriteTurns(logicalTurnsFromExternalIr(ir));
+    const { written, readBack } = await writeToTarget(target, turns);
+
+    assert.deepEqual(written.map((turn) => turn.logicalId), turns.map((turn) => turn.logicalId));
+    assert.deepEqual(written.map((turn) => turn.contentDigest), turns.map((turn) => turn.contentDigest));
+    const suffix = readBack.slice(-turns.length);
+    assert.deepEqual(suffix.map((turn) => turn.userText), turns.map((turn) => turn.userText));
+    assert.deepEqual(suffix.map((turn) => turn.assistantText), turns.map((turn) => turn.assistantText));
+    assert.deepEqual(suffix.map((turn) => turn.nativeIds), written.map((turn) => turn.nativeIds));
+  });
 }

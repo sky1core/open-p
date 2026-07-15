@@ -1,5 +1,6 @@
 import type { Backend } from '../../core/backend.js';
 import { SessionLockStore } from '../../core/session-lock.js';
+import { settlePendingSeedBeforeResume } from '../../core/resume-preflight.js';
 import type { BackendRunOptions, TurnRequest, TurnResult } from '../../core/types.js';
 
 import { resolveCodexBin } from './bin.js';
@@ -20,6 +21,7 @@ export class CodexBackend implements Backend {
     const lock = await new SessionLockStore(options.cwd).acquire(options.backendSessionId);
     let primaryError: unknown = null;
     try {
+      await settlePendingSeedBeforeResume(options);
       const result = await executeCodexTurn({
         bin: resolveCodexBin(),
         projectRoot: options.cwd,

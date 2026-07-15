@@ -42,7 +42,7 @@ import {
 } from './core/streaming-output-helpers.js';
 import { SessionStateStore, validateSessionStateCompatibility } from './core/session-state.js';
 import { parseSeedArgs } from './core/seed-args.js';
-import { runSeed } from './core/seed.js';
+import { runSeed, settleProviderPending } from './core/seed.js';
 import { runStreamJsonWorkerLines } from './core/stream-json-worker-runner.js';
 import type { AssistantEventSnapshot, TurnResult } from './core/types.js';
 import { TmuxProvider } from './runners/tmux.js';
@@ -229,7 +229,7 @@ async function main(argv: readonly string[]): Promise<number> {
       cwd,
     };
     const existingState = options.resume
-      ? await stateStore.requireCompatible(expectedState)
+      ? await stateStore.requireCompatibleForPendingSeedSettlement(expectedState)
       : await stateStore.load(options.backendSessionId);
     if (existingState) {
       validateSessionStateCompatibility(existingState, expectedState);
@@ -289,6 +289,17 @@ async function main(argv: readonly string[]): Promise<number> {
           signal: signalHandlers.signal,
           forceSignal: signalHandlers.forceSignal,
           killSignal: signalHandlers.killSignal,
+          settlePendingSeedAppend: options.resume
+            ? async () => {
+                await settleProviderPending(
+                  backendProvider,
+                  options.backendSessionId,
+                  cwd,
+                  signalHandlers.signal,
+                );
+                await stateStore.requireCompatible(expectedState);
+              }
+            : undefined,
           onIntermediateText: streamingEnabled
               ? (text, source) => {
                 if (source === 'jsonl') {
@@ -652,6 +663,14 @@ async function runStreamJsonWorker(options: ResolvedCliOptions): Promise<number>
       forceSignal: signalHandlers.forceSignal,
       killSignal: signalHandlers.killSignal,
       resolveSessionLogPath: (sessionId, cwd) => backendProvider.resolveSessionLogPath(sessionId, cwd),
+      settlePendingSeedAppend: options.resume
+        ? () => settleProviderPending(
+            backendProvider,
+            options.backendSessionId,
+            process.cwd(),
+            signalHandlers.signal,
+          )
+        : undefined,
       write: (chunk) => process.stdout.write(chunk),
     });
   } finally {

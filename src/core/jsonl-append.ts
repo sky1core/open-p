@@ -1,4 +1,5 @@
 import { open, stat, truncate } from 'node:fs/promises';
+import { Buffer } from 'node:buffer';
 import { throwIfAborted } from './abort.js';
 import { EXIT_CODES, OpenPError } from './errors.js';
 
@@ -16,15 +17,44 @@ export async function appendJsonlLines(
     return;
   }
   const file = await inspectFileEnd(path);
-  const leading = file.endsWithNewline ? '' : '\n';
-  const payload = `${leading}${lines.join('\n')}\n`;
+  const payload = encodeJsonlAppendPayload(file.endsWithNewline, lines);
   throwIfAborted(signal);
   const handle = await open(path, 'a');
+  try {
+    throwIfAborted(signal);
+  } catch (error) {
+    // Preserve the primary abort classification just as commitAppendTransaction preserves a
+    // primary write failure when close also fails.
+    await handle.close().catch(() => undefined);
+    throw error;
+  }
   await commitAppendTransaction({
-    write: () => handle.writeFile(payload, 'utf8'),
+    write: async () => {
+      await handle.writeFile(payload);
+      await handle.sync();
+    },
     close: () => handle.close(),
-    rollback: () => truncate(path, file.size),
+    rollback: async () => {
+      await truncate(path, file.size);
+      const rollbackHandle = await open(path, 'r+');
+      try {
+        await rollbackHandle.sync();
+      } finally {
+        await rollbackHandle.close();
+      }
+    },
   });
+}
+
+export function encodeJsonlAppendPayload(
+  existingEndsWithNewline: boolean,
+  lines: readonly string[],
+): Buffer {
+  if (lines.length === 0) {
+    return Buffer.alloc(0);
+  }
+  const leading = existingEndsWithNewline ? '' : '\n';
+  return Buffer.from(`${leading}${lines.join('\n')}\n`, 'utf8');
 }
 
 export async function commitAppendTransaction(input: {

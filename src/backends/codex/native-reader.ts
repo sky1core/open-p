@@ -1,6 +1,11 @@
 import { readFile } from 'node:fs/promises';
 import type { NativeSessionReadResult, NativeSessionTurn } from '../../core/backend.js';
 import { EXIT_CODES, OpenPError } from '../../core/errors.js';
+import {
+  confirmStableNativeFileSnapshots,
+  NativeFileSnapshotChangedError,
+} from '../../core/fs-durability.js';
+import { decodeNativeStateUtf8, digestNativeState } from '../../core/native-state-digest.js';
 import { findCodexSessionLogPath } from './session-log.js';
 
 interface JsonObject {
@@ -8,8 +13,10 @@ interface JsonObject {
 }
 
 interface PendingCodexTurn {
-  userId: string;
-  userText: string;
+  started: boolean;
+  completed: boolean;
+  userId: string | null;
+  userText: string | null;
   assistantIds: string[];
   assistantText: string[];
   completionId: string | null;
@@ -19,22 +26,77 @@ export async function readCodexNativeSession(input: {
   readonly backend: string;
   readonly sessionId: string;
   readonly homeDir?: string | null;
+  readonly mode?: 'logical' | 'settlement';
 }): Promise<NativeSessionReadResult> {
   const logPath = await findCodexSessionLogPath(input.sessionId, input.homeDir ?? null);
   if (!logPath) {
     throw new OpenPError(`codex session log not found for ${input.sessionId}`, EXIT_CODES.sessionLogNotFound);
   }
-  let text: string;
+  let bytes: Buffer;
   try {
-    text = await readFile(logPath, 'utf8');
-  } catch {
-    throw new OpenPError(`codex session log not found for ${input.sessionId}`, EXIT_CODES.sessionLogNotFound);
+    bytes = await readFile(logPath);
+  } catch (error) {
+    if (isNotFoundError(error)) {
+      throw new OpenPError(`codex session log not found for ${input.sessionId}`, EXIT_CODES.sessionLogNotFound);
+    }
+    throw new OpenPError('Codex native session log could not be read after discovery', EXIT_CODES.protocolViolation);
   }
+  if (input.mode === 'settlement') {
+    bytes = await confirmStableCodexNativeFile(logPath, bytes);
+  }
+  const text = decodeNativeStateUtf8(bytes, 'Codex native session log');
+  assertCodexNativeSessionIdentity(text, input.sessionId);
   return {
     backend: input.backend,
     sessionId: input.sessionId,
     turns: extractCodexNativeTurns(text),
+    nativeStateDigest: codexNativeStateDigest(bytes),
   };
+}
+
+export function codexNativeStateDigest(logBytes: Uint8Array): string {
+  return digestNativeState('codex-rollout-jsonl-v1', [logBytes]);
+}
+
+async function confirmStableCodexNativeFile(path: string, before: Buffer): Promise<Buffer> {
+  try {
+    const [after] = await confirmStableNativeFileSnapshots([{ path, bytes: before }]);
+    return after!;
+  } catch (error) {
+    if (error instanceof NativeFileSnapshotChangedError) {
+      throw new OpenPError('Codex native session changed during durability confirmation', EXIT_CODES.protocolViolation);
+    }
+    throw new OpenPError('Codex native session durability could not be confirmed', EXIT_CODES.protocolViolation);
+  }
+}
+
+export function assertCodexNativeSessionIdentity(logText: string, expectedSessionId: string): void {
+  let sessionMetaCount = 0;
+  for (const line of logText.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    const entry = parseLine(line);
+    if (entry.type !== 'session_meta') continue;
+    sessionMetaCount += 1;
+    const payload = isObject(entry.payload) ? entry.payload : null;
+    if (!payload) {
+      throw new OpenPError('Codex session metadata has no native session identity', EXIT_CODES.protocolViolation);
+    }
+    const identities: string[] = [];
+    for (const key of ['id', 'session_id'] as const) {
+      if (!Object.prototype.hasOwnProperty.call(payload, key)) continue;
+      const value = payload[key];
+      if (typeof value !== 'string' || value.length === 0) {
+        throw new OpenPError('Codex session metadata has an invalid native session identity', EXIT_CODES.protocolViolation);
+      }
+      identities.push(value);
+    }
+    if (identities.length === 0 || identities.some((identity) => identity !== expectedSessionId)) {
+      throw new OpenPError('Codex session log belongs to a different native session', EXIT_CODES.protocolViolation);
+    }
+  }
+  if (sessionMetaCount !== 1) {
+    throw new OpenPError('Codex session log must contain exactly one session metadata record', EXIT_CODES.protocolViolation);
+  }
 }
 
 export function extractCodexNativeTurns(logText: string): readonly NativeSessionTurn[] {
@@ -43,6 +105,7 @@ export function extractCodexNativeTurns(logText: string): readonly NativeSession
   const completedTurnIds = new Set<string>();
   const order: string[] = [];
   const orderedTurnIds = new Set<string>();
+  let activeTurnId: string | null = null;
   const rememberTurnId = (turnId: string): void => {
     if (!orderedTurnIds.has(turnId)) {
       orderedTurnIds.add(turnId);
@@ -59,62 +122,86 @@ export function extractCodexNativeTurns(logText: string): readonly NativeSession
     if (!payload) continue;
     if (entry.type === 'event_msg' && payload.type === 'task_started') {
       const turnId = requireLifecycleTurnId(payload, 'task_started');
-      if (startedTurnIds.has(turnId)) {
+      const pending = ensureTurn(byTurnId, turnId);
+      if (pending.completed) {
+        throw new OpenPError(`Codex source has events after task_complete for ${turnId}`, EXIT_CODES.protocolViolation);
+      }
+      if (pending.started) {
         throw new OpenPError(`Codex source has duplicate task_started for ${turnId}`, EXIT_CODES.protocolViolation);
+      }
+      if (activeTurnId !== null) {
+        throw new OpenPError(
+          `Codex source overlaps task lifecycle ${activeTurnId} with ${turnId}`,
+          EXIT_CODES.protocolViolation,
+        );
+      }
+      if (pending.userText !== null || pending.assistantText.length > 0) {
+        throw new OpenPError(`Codex source turn ${turnId} has portable messages before task_started`, EXIT_CODES.protocolViolation);
       }
       rememberTurnId(turnId);
       startedTurnIds.add(turnId);
+      pending.started = true;
+      activeTurnId = turnId;
       continue;
     }
     if (entry.type === 'event_msg' && payload.type === 'task_complete') {
       const turnId = requireLifecycleTurnId(payload, 'task_complete');
-      if (completedTurnIds.has(turnId)) {
+      const pending = ensureTurn(byTurnId, turnId);
+      if (pending.completed) {
         throw new OpenPError(`Codex source has duplicate task_complete for ${turnId}`, EXIT_CODES.protocolViolation);
+      }
+      if (!pending.started) {
+        throw new OpenPError(`Codex source turn ${turnId} completed before task_started`, EXIT_CODES.protocolViolation);
+      }
+      if (activeTurnId !== turnId) {
+        throw new OpenPError(`Codex source task_complete does not own the active lifecycle`, EXIT_CODES.protocolViolation);
+      }
+      if (pending.userText === null || pending.assistantText.length === 0) {
+        throw new OpenPError(`Codex source turn ${turnId} completed before portable user/assistant messages`, EXIT_CODES.protocolViolation);
       }
       rememberTurnId(turnId);
       completedTurnIds.add(turnId);
-      const pending = byTurnId.get(turnId);
-      if (pending) pending.completionId = turnId;
+      pending.completed = true;
+      pending.completionId = turnId;
+      activeTurnId = null;
       continue;
     }
     if (entry.type !== 'response_item' || payload.type !== 'message') {
       continue;
     }
-    const turnId = readTurnId(payload);
-    if (!turnId) continue;
     if (payload.role === 'user') {
       const text = readSingleText(payload.content, 'input_text');
       if (text === null) continue;
+      const turnId = readTurnId(payload);
+      if (!turnId) continue;
+      rejectOverlappingPortableMessage(activeTurnId, turnId);
       rememberTurnId(turnId);
-      const pending = byTurnId.get(turnId);
-      if (pending) {
+      const pending = ensureTurn(byTurnId, turnId);
+      if (pending.completed) {
+        throw new OpenPError(`Codex source has events after task_complete for ${turnId}`, EXIT_CODES.protocolViolation);
+      }
+      if (pending.userText !== null) {
         throw new OpenPError('Codex source has multiple user messages for one turn id', EXIT_CODES.protocolViolation);
       }
-      byTurnId.set(turnId, {
-        userId: nativePayloadId(payload, `user:${turnId}`),
-        userText: text,
-        assistantIds: [],
-        assistantText: [],
-        completionId: null,
-      });
+      pending.userId = nativePayloadId(payload, `user:${turnId}`);
+      pending.userText = text;
       continue;
     }
     if (payload.role === 'assistant') {
       const text = readSingleText(payload.content, 'output_text');
       if (text === null || text.length === 0) continue;
-      let pending = byTurnId.get(turnId);
-      if (!pending) {
-        rememberTurnId(turnId);
-        pending = {
-          userId: `missing-user:${turnId}`,
-          userText: '',
-          assistantIds: [],
-          assistantText: [],
-          completionId: null,
-        };
-        byTurnId.set(turnId, pending);
+      const turnId = readTurnId(payload);
+      if (!turnId) continue;
+      rejectOverlappingPortableMessage(activeTurnId, turnId);
+      const pending = ensureTurn(byTurnId, turnId);
+      if (pending.completed) {
+        throw new OpenPError(`Codex source has events after task_complete for ${turnId}`, EXIT_CODES.protocolViolation);
       }
-      pending.assistantIds.push(nativePayloadId(payload, `assistant:${turnId}:${pending.assistantIds.length}`));
+      if (pending.userText === null) {
+        throw new OpenPError(`Codex source turn ${turnId} has assistant before portable user message`, EXIT_CODES.protocolViolation);
+      }
+      rememberTurnId(turnId);
+      pending.assistantIds.push(requireAssistantPayloadId(payload));
       pending.assistantText.push(text);
     }
   }
@@ -133,7 +220,8 @@ export function extractCodexNativeTurns(logText: string): readonly NativeSession
       );
     }
     const complete = startedTurnIds.has(turnId) && completedTurnIds.has(turnId) &&
-      pending.userText.length > 0 && pending.assistantText.length > 0 && pending.completionId !== null;
+      pending.userText !== null && pending.userText.length > 0 &&
+      pending.userId !== null && pending.assistantText.length > 0 && pending.completionId !== null;
     if (!complete) {
       const trailingWithoutCompletion = index === order.length - 1 && !completedTurnIds.has(turnId);
       if (!trailingWithoutCompletion) {
@@ -144,20 +232,56 @@ export function extractCodexNativeTurns(logText: string): readonly NativeSession
       }
       continue;
     }
-    if (pending.completionId === null) {
+    const userText = pending.userText;
+    const userId = pending.userId;
+    const completionId = pending.completionId;
+    if (userText === null || userId === null || completionId === null) {
       throw new OpenPError(`Codex source turn ${turnId} has no completion id`, EXIT_CODES.protocolViolation);
     }
+    if (pending.assistantIds.includes(completionId)) {
+      throw new OpenPError(
+        `Codex source turn ${turnId} reuses its completion id as an assistant message id`,
+        EXIT_CODES.protocolViolation,
+      );
+    }
     turns.push({
-      userText: pending.userText,
+      userText,
       assistantText: pending.assistantText.join('\n\n'),
       nativeIds: {
-        userId: pending.userId,
+        userId,
         assistantIds: pending.assistantIds,
-        completionId: pending.completionId,
+        completionId,
       },
     });
   }
   return turns;
+}
+
+function rejectOverlappingPortableMessage(activeTurnId: string | null, turnId: string): void {
+  if (activeTurnId !== null && activeTurnId !== turnId) {
+    throw new OpenPError(
+      `Codex source message for ${turnId} overlaps active lifecycle ${activeTurnId}`,
+      EXIT_CODES.protocolViolation,
+    );
+  }
+}
+
+function ensureTurn(map: Map<string, PendingCodexTurn>, turnId: string): PendingCodexTurn {
+  const existing = map.get(turnId);
+  if (existing) {
+    return existing;
+  }
+  const created: PendingCodexTurn = {
+    started: false,
+    completed: false,
+    userId: null,
+    userText: null,
+    assistantIds: [],
+    assistantText: [],
+    completionId: null,
+  };
+  map.set(turnId, created);
+  return created;
 }
 
 function requireLifecycleTurnId(payload: JsonObject, type: 'task_started' | 'task_complete'): string {
@@ -197,6 +321,13 @@ function nativePayloadId(payload: JsonObject, fallback: string): string {
   return typeof payload.id === 'string' && payload.id.length > 0 ? payload.id : fallback;
 }
 
+function requireAssistantPayloadId(payload: JsonObject): string {
+  if (typeof payload.id === 'string' && payload.id.length > 0) {
+    return payload.id;
+  }
+  throw new OpenPError('Codex assistant message is missing payload.id', EXIT_CODES.protocolViolation);
+}
+
 function parseLine(line: string): JsonObject {
   let value: unknown;
   try {
@@ -212,4 +343,9 @@ function parseLine(line: string): JsonObject {
 
 function isObject(value: unknown): value is JsonObject {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isNotFoundError(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error
+    && (error as { readonly code?: unknown }).code === 'ENOENT';
 }

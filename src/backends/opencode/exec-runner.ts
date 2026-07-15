@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process';
+import { isUtf8 } from 'node:buffer';
 import { createInterface } from 'node:readline';
 import { createAbortError } from '../../core/abort.js';
 import { EXIT_CODES, OpenPError } from '../../core/errors.js';
@@ -38,6 +39,7 @@ export function runOpenCodeExec(options: OpenCodeExecOptions): Promise<OpenCodeE
     child.stdin?.end();
 
     let stdout = '';
+    const stdoutChunks: Buffer[] = [];
     let stderr = '';
     let timedOut = false;
     let aborted = false;
@@ -95,6 +97,9 @@ export function runOpenCodeExec(options: OpenCodeExecOptions): Promise<OpenCodeE
     };
 
     const rl = createInterface({ input: child.stdout!, crlfDelay: Infinity });
+    child.stdout?.on('data', (chunk: Buffer) => {
+      stdoutChunks.push(Buffer.from(chunk));
+    });
     rl.on('line', (line: string) => {
       stdout += line + '\n';
     });
@@ -110,6 +115,27 @@ export function runOpenCodeExec(options: OpenCodeExecOptions): Promise<OpenCodeE
       fail(err);
     });
     child.on('close', (code, sig) => {
+      if (aborted) {
+        fail(createAbortError());
+        return;
+      }
+      // Process-control and native CLI failures are primary. Their stdout is diagnostic only, not
+      // native/result evidence, so malformed bytes must not replace abort, timeout, signal, or
+      // non-zero-exit classification.
+      if (timedOut || sig !== null || terminationSignal !== null || code !== 0) {
+        settle({
+          stdout,
+          stderr,
+          exitCode: code,
+          signal: sig ?? terminationSignal,
+          timedOut,
+        });
+        return;
+      }
+      if (!isUtf8(Buffer.concat(stdoutChunks))) {
+        fail(new OpenPError('OpenCode stdout is not valid UTF-8', EXIT_CODES.protocolViolation));
+        return;
+      }
       settle({
         stdout,
         stderr,

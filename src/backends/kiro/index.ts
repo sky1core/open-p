@@ -9,7 +9,10 @@ import { KIRO_DESCRIPTOR } from './descriptor.js';
 import { KiroBackend } from './backend.js';
 import { KiroWorkerBridge } from './worker-bridge.js';
 import { resolveKiroSessionLogPath } from './session-log.js';
-import { appendKiroSessionHistory } from './history-writer.js';
+import {
+  appendKiroSessionHistory,
+  cleanupKiroPreparedSessionHistoryAppend,
+} from './history-writer.js';
 import { probeKiroLogin } from './login.js';
 import { readKiroNativeSession } from './native-reader.js';
 
@@ -40,6 +43,7 @@ export const kiroBackendProvider: BackendProvider = {
     return readKiroNativeSession({
       backend: 'kiro',
       sessionId: input.sessionId,
+      mode: input.mode,
     });
   },
 
@@ -48,7 +52,12 @@ export const kiroBackendProvider: BackendProvider = {
       sessionId: input.sessionId,
       cwd: input.cwd,
       turns: input.turns,
+      persistPreparedAppend: input.persistPreparedAppend,
       signal: input.signal,
     });
+  },
+
+  async cleanupPreparedSessionHistoryAppend(input) {
+    return cleanupKiroPreparedSessionHistoryAppend(input);
   },
 };

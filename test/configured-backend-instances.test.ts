@@ -257,6 +257,22 @@ instances:
   );
 });
 
+test('rejects instance ids that collide with top-level commands', async () => {
+  for (const instanceId of ['seed', 'auth-status']) {
+    const { env } = await writeInstancesYaml(`
+instances:
+  ${JSON.stringify(instanceId)}:
+    backend: claude
+    configDir: ~/.claude-alt
+`);
+
+    await assertUsageError(
+      () => loadConfiguredBackendInstances({ env }),
+      new RegExp(`instance id must not collide with top-level command: ${instanceId}`),
+    );
+  }
+});
+
 test('rejects duplicate instance ids', async () => {
   const { env } = await writeInstancesYaml(`
 instances:

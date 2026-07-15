@@ -17,6 +17,7 @@ import {
   rememberLocalCommandTranscriptPromptId,
   userEventHasToolResult,
 } from './turn-boundary-predicates.js';
+import { isClaudeCodeApiErrorAssistant } from './provider-error.js';
 
 interface JsonObject {
   readonly [key: string]: unknown;
@@ -1097,19 +1098,6 @@ function isSyntheticNoResponseAssistant(event: JsonObject): boolean {
     .map((block) => (block.text as string).trim())
     .filter((text) => text.length > 0);
   return textBlocks.length === 1 && textBlocks[0] === 'No response requested.';
-}
-
-function isClaudeCodeApiErrorAssistant(event: JsonObject): boolean {
-  if (event.type !== 'assistant') {
-    return false;
-  }
-  if (event.isApiErrorMessage === true) {
-    return true;
-  }
-  if (typeof event.apiErrorStatus === 'number') {
-    return true;
-  }
-  return typeof event.error === 'string' && event.error.trim().length > 0;
 }
 
 function claudeCodeApiErrorMessage(event: JsonObject): string {

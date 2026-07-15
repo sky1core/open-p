@@ -23,6 +23,7 @@ const BASE_OPTIONS = {
   jsonSchema: null,
   backendArgs: [] as string[],
   debugLog: null,
+  settlePendingSeedAppend: async () => undefined,
 };
 
 function withFakeKiro(behavior: string, fn: () => Promise<void>): () => Promise<void> {

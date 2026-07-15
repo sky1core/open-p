@@ -54,6 +54,7 @@ export async function runStreamJsonWorkerLines(input: {
   readonly stateStore?: SessionStateStore;
   readonly lockStore?: SessionLockStore;
   readonly resolveSessionLogPath?: (sessionId: string, projectRoot: string) => Promise<string | null>;
+  readonly settlePendingSeedAppend?: () => Promise<void>;
   readonly write: (chunk: string) => void;
 }): Promise<number> {
   if (input.options.promptArg !== null) {
@@ -75,6 +76,7 @@ async function runStreamJsonWorkerLinesWithLock(input: {
   readonly stateStore?: SessionStateStore;
   readonly lockStore?: SessionLockStore;
   readonly resolveSessionLogPath?: (sessionId: string, projectRoot: string) => Promise<string | null>;
+  readonly settlePendingSeedAppend?: () => Promise<void>;
   readonly write: (chunk: string) => void;
 }): Promise<number> {
   const stateStore = input.stateStore ?? new SessionStateStore(input.projectRoot);
@@ -114,10 +116,20 @@ async function runStreamJsonWorkerLinesWithLock(input: {
       if (!initializedSession) {
         lock = await lockStore.acquire(input.options.backendSessionId);
         existingState = input.options.resume
-          ? await stateStore.requireCompatible(expectedState)
+          ? await stateStore.requireCompatibleForPendingSeedSettlement(expectedState)
           : await stateStore.load(input.options.backendSessionId);
         if (existingState) {
           validateSessionStateCompatibility(existingState, expectedState);
+        }
+        if (input.options.resume) {
+          if (!input.settlePendingSeedAppend) {
+            throw new OpenPError(
+              'resumed stream-json worker requires pending seed settlement',
+              EXIT_CODES.protocolViolation,
+            );
+          }
+          await input.settlePendingSeedAppend();
+          existingState = await stateStore.requireCompatible(expectedState);
         }
         initializedSession = true;
       }

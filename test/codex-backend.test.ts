@@ -149,6 +149,7 @@ const BASE_OPTIONS = {
   jsonSchema: null,
   backendArgs: [] as string[],
   debugLog: null,
+  settlePendingSeedAppend: async () => undefined,
 };
 const STRUCTURED_OUTPUT_SCHEMA = '{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"],"additionalProperties":false}';
 

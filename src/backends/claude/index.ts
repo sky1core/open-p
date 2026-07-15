@@ -64,6 +64,7 @@ export function createClaudeBackendProvider(options: ClaudeBackendProviderOption
         sessionId: input.sessionId,
         cwd: input.cwd,
         configDir,
+        mode: input.mode,
       });
     },
 
@@ -72,6 +73,7 @@ export function createClaudeBackendProvider(options: ClaudeBackendProviderOption
         sessionId: input.sessionId,
         cwd: input.cwd,
         turns: input.turns,
+        persistPreparedAppend: input.persistPreparedAppend,
         configDir,
         signal: input.signal,
       });

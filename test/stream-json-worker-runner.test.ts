@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { access, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -8,6 +8,11 @@ import type { ResolvedCliOptions } from '../src/core/cli-args.js';
 import { EXIT_CODES, OpenPError } from '../src/core/errors.js';
 import { SessionLockStore } from '../src/core/session-lock.js';
 import { SessionStateStore } from '../src/core/session-state.js';
+import { createSeedAppendJournal } from '../src/core/seed-append-journal.js';
+import { digestNativeState } from '../src/core/native-state-digest.js';
+import { contentDigest } from '../src/core/seed-ir.js';
+import { createInitialProvenanceState, externalSourceRefs } from '../src/core/seed-provenance.js';
+import type { NativeSessionReadResult, NativeTurnIds, NativeWrittenTurn } from '../src/core/backend.js';
 import type { AssistantEventSnapshot } from '../src/core/types.js';
 import type { WorkerTurnRequest, WorkerTurnResult } from '../src/core/worker-types.js';
 
@@ -858,6 +863,7 @@ test('stream-json worker treats first input as resume when --resume was requeste
 
   await runStreamJsonWorkerLines({
     options: options({ resume: true }),
+    settlePendingSeedAppend: async () => undefined,
     lines: lines([userEvent('turn-a', 'resume prompt')]),
     bridge,
     ...state,
@@ -868,6 +874,81 @@ test('stream-json worker treats first input as resume when --resume was requeste
   assert.equal(bridge.requests.length, 1);
   assert.equal(bridge.requests[0]?.isFirstTurn, false);
   assert.equal(bridge.requests[0]?.sessionId, SESSION_ID);
+});
+
+test('stream-json resume settles pending seed state under lock before WorkerBridge launch', async () => {
+  const order: string[] = [];
+  const bridge = new FakeBridge(() => order.push('bridge'));
+  const state = await stateContext('/work/open-p');
+  await saveCompatibleState(state.stateStore, '/work/open-p', null);
+
+  await runStreamJsonWorkerLines({
+    options: options({ resume: true }),
+    lines: lines([userEvent('turn-a', 'resume prompt')]),
+    bridge,
+    ...state,
+    settlePendingSeedAppend: async () => {
+      await assert.rejects(
+        () => state.lockStore.acquire(SESSION_ID),
+        (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.sessionBusy,
+      );
+      order.push('settle');
+    },
+    outputMetadata: metadata(),
+    write: () => undefined,
+  });
+
+  assert.deepEqual(order, ['settle', 'bridge']);
+});
+
+test('stream-json resume allows pending v2 marker only until settlement restores v1 before WorkerBridge', async () => {
+  const order: string[] = [];
+  const bridge = new FakeBridge(() => order.push('bridge'));
+  const state = await stateContext('/work/open-p');
+  const marker = await savePendingSeedMarker(state.stateStore, '/work/open-p');
+
+  await runStreamJsonWorkerLines({
+    options: options({ resume: true }),
+    lines: lines([userEvent('turn-a', 'resume prompt')]),
+    bridge,
+    ...state,
+    settlePendingSeedAppend: async () => {
+      await assert.rejects(
+        () => state.stateStore.load(SESSION_ID),
+        (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.sessionState,
+      );
+      await state.stateStore.restorePendingSeedAppendMarker(marker);
+      order.push('settle');
+    },
+    outputMetadata: metadata(),
+    write: () => undefined,
+  });
+
+  assert.deepEqual(order, ['settle', 'bridge']);
+  const restored = await state.stateStore.load(SESSION_ID);
+  assert.equal(restored?.schemaVersion, 1);
+  assert.equal(restored?.backend, marker.restoreState.backend);
+  assert.equal(restored?.backendSessionId, marker.restoreState.backendSessionId);
+  assert.equal(restored?.lastTurnId, 'turn-a');
+});
+
+test('stream-json resume fails before WorkerBridge when pending settlement is not wired', async () => {
+  const bridge = new FakeBridge();
+  const state = await stateContext('/work/open-p');
+  await saveCompatibleState(state.stateStore, '/work/open-p', null);
+
+  await assert.rejects(
+    () => runStreamJsonWorkerLines({
+      options: options({ resume: true }),
+      lines: lines([userEvent('turn-a', 'resume prompt')]),
+      bridge,
+      ...state,
+      outputMetadata: metadata(),
+      write: () => undefined,
+    }),
+    (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.protocolViolation,
+  );
+  assert.equal(bridge.requests.length, 0);
 });
 
 test('stream-json worker emits streaming snapshots from live WorkerBridge updates', async () => {
@@ -2812,6 +2893,7 @@ test('stream-json worker rejects resume state from a different workspace', async
   await assert.rejects(
     () => runStreamJsonWorkerLines({
       options: options({ resume: true }),
+      settlePendingSeedAppend: async () => undefined,
       lines: lines([userEvent('turn-a', 'prompt')]),
       bridge,
       ...state,
@@ -2853,6 +2935,7 @@ test('stream-json worker rejects a different returned session id on resume', asy
   await assert.rejects(
     () => runStreamJsonWorkerLines({
       options: options({ resume: true }),
+      settlePendingSeedAppend: async () => undefined,
       lines: lines([userEvent('turn-a', 'prompt')]),
       bridge,
       ...state,
@@ -3014,10 +3097,10 @@ test('stream-json worker releases returned session lock when provisional lock re
       /failed to read session lock/,
     );
 
-    await assert.rejects(access(resultLockPath), { code: 'ENOENT' });
+    assert.deepEqual(await readdir(resultLockPath), ['gate-v2']);
   } finally {
     await rm(provisionalLockPath, { recursive: true, force: true });
-    await rm(resultLockPath, { force: true });
+    await rm(resultLockPath, { recursive: true, force: true });
   }
 });
 
@@ -3117,6 +3200,7 @@ test('stream-json worker ignores saved provider process ids on resume', async ()
   const output: string[] = [];
   await runStreamJsonWorkerLines({
     options: options({ resume: true }),
+    settlePendingSeedAppend: async () => undefined,
     lines: lines([userEvent('turn-resume', 'follow up')]),
     bridge: wrappedBridge,
     projectRoot: '/work/open-p',
@@ -3193,6 +3277,69 @@ async function saveCompatibleState(
     lastProviderSessionId: null,
     sessionLogPath: null,
     lastTurnId,
+  });
+}
+
+async function savePendingSeedMarker(stateStore: SessionStateStore, projectRoot: string) {
+  const restoreState = await stateStore.save({
+    backend: 'claude',
+    backendSessionId: SESSION_ID,
+    cwd: projectRoot,
+    lastProviderSessionId: null,
+    sessionLogPath: null,
+    lastTurnId: 'turn-before-seed',
+  });
+  return stateStore.publishPendingSeedAppendMarker({
+    restoreState,
+    seedAppendJournal: streamJsonPendingJournal(),
+  });
+}
+
+function streamJsonIds(prefix: string): NativeTurnIds {
+  return {
+    userId: `${prefix}:user`,
+    assistantIds: [`${prefix}:assistant`],
+    completionId: `${prefix}:complete`,
+  };
+}
+
+function streamJsonNativeDigest(turns: readonly unknown[]): string {
+  return digestNativeState('stream-json-pending-seed-test-v1', [Buffer.from(JSON.stringify(turns), 'utf8')]);
+}
+
+function streamJsonPendingJournal() {
+  const beforeTurns = [{
+    userText: 'Reply with only: OK',
+    assistantText: 'OK',
+    nativeIds: streamJsonIds('base'),
+  }];
+  const before: NativeSessionReadResult = {
+    backend: 'claude',
+    sessionId: SESSION_ID,
+    turns: beforeTurns,
+    nativeStateDigest: streamJsonNativeDigest(beforeTurns),
+  };
+  const written: readonly NativeWrittenTurn[] = [{
+    logicalId: `ir:${'1'.repeat(64)}`,
+    contentDigest: contentDigest('seed user', 'seed assistant'),
+    nativeIds: streamJsonIds('written'),
+  }];
+  const fullTurns = [
+    ...beforeTurns,
+    { userText: 'seed user', assistantText: 'seed assistant', nativeIds: streamJsonIds('written') },
+  ];
+  return createSeedAppendJournal({
+    backend: 'claude',
+    sessionId: SESSION_ID,
+    before,
+    provenance: createInitialProvenanceState({
+      backend: 'claude',
+      sessionId: SESSION_ID,
+      bootstrap: [streamJsonIds('base')],
+    }),
+    sourceRefs: externalSourceRefs('d'.repeat(64), ['stream-json-external-id']),
+    written,
+    candidateNativeStateDigest: streamJsonNativeDigest(fullTurns),
   });
 }
 

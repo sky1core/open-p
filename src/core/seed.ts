@@ -6,9 +6,21 @@ import type {
   Backend,
   BackendProvider,
   NativeSessionReadResult,
+  NativeSessionTurn,
   NativeTurnIds,
+  NativeWrittenTurn,
+  PreparedSessionHistoryAppend,
+  SeedWriteTurn,
 } from './backend.js';
 import { EXIT_CODES, OpenPError } from './errors.js';
+import { assertNativeAppendCandidate } from './native-append-preflight.js';
+import { isNativeStateDigest } from './native-state-digest.js';
+import { isCanonicalUuidV4 } from './uuid.js';
+import {
+  SeedAppendJournalStore,
+  createSeedAppendJournal,
+  settlePendingSeedAppend,
+} from './seed-append-journal.js';
 import { loadExternalSeedIrFile, logicalTurnsFromExternalIr, toSeedWriteTurns, type LogicalSeedTurn } from './seed-ir.js';
 import {
   SeedProvenanceStore,
@@ -19,10 +31,11 @@ import {
   planSeedAppend,
   withAppendedProvenanceEntries,
   type SeedProvenanceSource,
+  type SeedProvenanceState,
 } from './seed-provenance.js';
 import type { SeedCliOptions } from './seed-args.js';
 import { SessionLockStore } from './session-lock.js';
-import { SessionStateStore } from './session-state.js';
+import { SessionStateStore, type PendingSeedAppendSessionState } from './session-state.js';
 
 // The bootstrap prompt is part of the approved Session Seeding Contract.
 export const SEED_BOOTSTRAP_PROMPT = 'Reply with only: OK';
@@ -74,6 +87,7 @@ export async function runSeed(input: SeedRunInput): Promise<SeedResult> {
     return runSameNativeNoopSeed(input);
   }
   const source = await resolveSeedSource(input);
+  assertSeedSourceHasPortableTurns(source.turns);
   return input.options.resume
     ? runAppendSeed(input, appendSessionHistory, source)
     : runCreateSeed(input, appendSessionHistory, source);
@@ -84,10 +98,22 @@ async function runSameNativeNoopSeed(input: SeedRunInput): Promise<SeedResult> {
   if (!sessionId || input.options.source.kind !== 'native') {
     throw new OpenPError('resume mode requires a session id', EXIT_CODES.usage);
   }
-  await new SessionStateStore(input.cwd).requireCompatible({
+  const stateStore = new SessionStateStore(input.cwd);
+  await stateStore.requireCompatibleForPendingSeedSettlement({
     backend: input.provider.id,
     backendSessionId: sessionId,
     cwd: input.cwd,
+  });
+  await withSessionLock(input, sessionId, async () => {
+    await settleProviderPending(input.provider, sessionId, input.cwd, input.signal);
+    await stateStore.requireCompatible({
+      backend: input.provider.id,
+      backendSessionId: sessionId,
+      cwd: input.cwd,
+    });
+    const read = await readNative(input.provider, sessionId, input.cwd, input.signal);
+    const provenance = await new SeedProvenanceStore(input.cwd).load(input.provider.id, sessionId);
+    assertSeedSourceHasPortableTurns(normalizeNativeReadWithProvenance(read, provenance));
   });
   return {
     source: {
@@ -144,8 +170,9 @@ async function runCreateSeed(
     throw new OpenPError('backend did not return a session id', EXIT_CODES.protocolViolation);
   }
 
-  // Save state before the append so that, if the append fails, the created session and its state
-  // survive and the caller can retry with append mode. The append is a real completed turn already.
+  // Save state before the append so the completed bootstrap remains addressable for diagnosis and
+  // explicit recovery if native append/provenance settlement fails. A writer failure does not prove
+  // that no native mutation happened, so this state does not make an automatic append retry safe.
   await new SessionStateStore(input.cwd).save({
     backend: input.provider.id,
     backendSessionId: sessionId,
@@ -158,24 +185,27 @@ async function runCreateSeed(
   const provenanceStore = new SeedProvenanceStore(input.cwd);
   try {
     await withSessionLock(input, sessionId, async () => {
-      const bootstrapIds = await readBootstrapNativeIds(input, sessionId);
-      await provenanceStore.save(createInitialProvenanceState({
+      const bootstrapRead = await readBootstrapNativeSession(input, sessionId);
+      const bootstrapIds = bootstrapRead.turns.map((turn) => turn.nativeIds);
+      const initialProvenance = createInitialProvenanceState({
         backend: input.provider.id,
         sessionId,
         bootstrap: bootstrapIds,
-      }));
-      const written = await appendTurns(input, sessionId, appendSessionHistory, source.turns);
-      const current = await provenanceStore.load(input.provider.id, sessionId);
-      await provenanceStore.save(withAppendedProvenanceEntries(current, {
-        targetBackend: input.provider.id,
-        targetSessionId: sessionId,
-        bootstrap: bootstrapIds,
+      });
+      await provenanceStore.save(initialProvenance);
+      await appendTurns({
+        input,
+        sessionId,
+        appendSessionHistory,
+        turns: source.turns,
         sourceRefs: source.refs,
-        written: written.turns,
-      }));
+        before: bootstrapRead,
+        provenance: initialProvenance,
+        bootstrap: bootstrapIds,
+      });
     });
   } catch (error) {
-    throw augmentCreateAppendError(error, input, sessionId);
+    throw augmentCreateAppendFailure(error, input, sessionId);
   }
   return {
     source: source.output,
@@ -197,7 +227,8 @@ async function runAppendSeed(
     throw new OpenPError('resume mode requires a session id', EXIT_CODES.usage);
   }
   // Existing openp state is required and must match backend + cwd (absent/mismatch -> exit 20).
-  await new SessionStateStore(input.cwd).requireCompatible({
+  const stateStore = new SessionStateStore(input.cwd);
+  await stateStore.requireCompatibleForPendingSeedSettlement({
     backend: input.provider.id,
     backendSessionId: sessionId,
     cwd: input.cwd,
@@ -206,6 +237,12 @@ async function runAppendSeed(
   const provenanceStore = new SeedProvenanceStore(input.cwd);
   let appendedTurns = 0;
   const status = await withSessionLock(input, sessionId, async (): Promise<'noop' | 'updated'> => {
+    await settleProviderPending(input.provider, sessionId, input.cwd, input.signal);
+    await stateStore.requireCompatible({
+      backend: input.provider.id,
+      backendSessionId: sessionId,
+      cwd: input.cwd,
+    });
     const targetRead = await readNative(input.provider, sessionId, input.cwd, input.signal);
     const targetProvenance = await provenanceStore.load(input.provider.id, sessionId);
     const targetTurns = normalizeNativeReadWithProvenance(targetRead, targetProvenance);
@@ -215,14 +252,15 @@ async function runAppendSeed(
     }
     const offset = targetTurns.length;
     const missingRefs = source.refs.slice(offset);
-    const written = await appendTurns(input, sessionId, appendSessionHistory, plan.missing);
-    const current = await provenanceStore.load(input.provider.id, sessionId);
-    await provenanceStore.save(withAppendedProvenanceEntries(current, {
-      targetBackend: input.provider.id,
-      targetSessionId: sessionId,
+    await appendTurns({
+      input,
+      sessionId,
+      appendSessionHistory,
+      turns: plan.missing,
       sourceRefs: missingRefs,
-      written: written.turns,
-    }));
+      before: targetRead,
+      provenance: targetProvenance,
+    });
     appendedTurns = plan.missing.length;
     return 'updated';
   });
@@ -251,6 +289,12 @@ function isSameNativeAppend(input: SeedRunInput): boolean {
     input.options.source.sessionId === input.options.backendSessionId);
 }
 
+function assertSeedSourceHasPortableTurns(turns: readonly LogicalSeedTurn[]): void {
+  if (turns.length === 0) {
+    throw new OpenPError('seed source contains no completed portable turns', EXIT_CODES.protocolViolation);
+  }
+}
+
 // Serializes against concurrent turns via the same lock namespace the backends use for turns.
 // Lock contention surfaces as exit 21; release failure only propagates when there is no primary error.
 async function withSessionLock<T>(
@@ -277,19 +321,216 @@ async function withSessionLock<T>(
   }
 }
 
-async function appendTurns(
-  input: SeedRunInput,
-  sessionId: string,
-  appendSessionHistory: AppendSessionHistory,
-  turns: readonly LogicalSeedTurn[],
-): Promise<AppendSessionHistoryResult> {
+async function appendTurns(parameters: {
+  readonly input: SeedRunInput;
+  readonly sessionId: string;
+  readonly appendSessionHistory: AppendSessionHistory;
+  readonly turns: readonly LogicalSeedTurn[];
+  readonly sourceRefs: readonly SeedProvenanceSource[];
+  readonly before: NativeSessionReadResult;
+  readonly provenance: SeedProvenanceState | null;
+  readonly bootstrap?: readonly NativeTurnIds[];
+}): Promise<void> {
+  const { input, sessionId, appendSessionHistory, turns, sourceRefs, before, provenance } = parameters;
   throwIfAborted(input.signal);
+  const requested = toSeedWriteTurns(turns);
+  const journalStore = new SeedAppendJournalStore(input.cwd);
+  const provenanceStore = new SeedProvenanceStore(input.cwd);
+  const sessionStateStore = new SessionStateStore(input.cwd);
+  const restoreState = await sessionStateStore.requireCompatible({
+    backend: input.provider.id,
+    backendSessionId: sessionId,
+    cwd: input.cwd,
+  });
+  let prepared: PreparedSessionHistoryAppend | null = null;
+  let pendingMarker: PendingSeedAppendSessionState | null = null;
   const result = await appendSessionHistory({
     sessionId,
     cwd: input.cwd,
-    turns: toSeedWriteTurns(turns),
+    turns: requested,
+    persistPreparedAppend: async (candidate) => {
+      if (prepared !== null) {
+        throw new OpenPError('seed writer prepared more than one native append', EXIT_CODES.protocolViolation);
+      }
+      assertPreparedAppend(input.provider, before, requested, candidate);
+      const journal = createSeedAppendJournal({
+        backend: input.provider.id,
+        sessionId,
+        before,
+        provenance,
+        sourceRefs,
+        written: candidate.turns,
+        candidateNativeStateDigest: candidate.candidateNativeStateDigest,
+        cleanupToken: candidate.cleanupToken ?? null,
+      });
+      pendingMarker = await sessionStateStore.publishPendingSeedAppendMarker({
+        restoreState,
+        seedAppendJournal: journal,
+      });
+      await journalStore.create(journal);
+      prepared = candidate;
+    },
     signal: input.signal,
   });
+  const completedPreparation = prepared as PreparedSessionHistoryAppend | null;
+  if (completedPreparation === null) {
+    throw new OpenPError('seed writer mutated without a prepared append durability barrier', EXIT_CODES.protocolViolation);
+  }
+  assertAppendResult(result, sessionId, turns);
+  assertSameWrittenTurns(result.turns, completedPreparation.turns);
+  if (result.postWriteCleanupFailure && completedPreparation.cleanupToken === undefined) {
+    throw new OpenPError(
+      'seed writer reported a transient artifact cleanup failure without a recoverable cleanup token',
+      EXIT_CODES.protocolViolation,
+    );
+  }
+  const progress = {
+    nativeAppendVerified: false,
+    provenanceSaved: false,
+    journalRetired: false,
+  };
+  let primaryError: unknown = null;
+  try {
+    const postWriteRead = await readNative(input.provider, sessionId, input.cwd, input.signal, 'settlement');
+    assertNativeAppendCandidate({
+      backend: input.provider.id,
+      before: before.turns,
+      candidate: postWriteRead.turns,
+      requested,
+      written: result.turns,
+    });
+    if (postWriteRead.nativeStateDigest !== completedPreparation.candidateNativeStateDigest) {
+      throw new OpenPError(
+        'seed writer post-write native state differs from its prepared candidate',
+        EXIT_CODES.protocolViolation,
+      );
+    }
+    progress.nativeAppendVerified = true;
+    assertNoCrossTurnNativeIdOverlap([...before.turns, ...result.turns], 'seed writer');
+    const next = withAppendedProvenanceEntries(provenance, {
+      targetBackend: input.provider.id,
+      targetSessionId: sessionId,
+      ...(parameters.bootstrap ? { bootstrap: parameters.bootstrap } : {}),
+      sourceRefs,
+      written: result.turns,
+    });
+    await provenanceStore.save(next);
+    progress.provenanceSaved = true;
+    if (!result.postWriteCleanupFailure) {
+      await cleanupPreparedAppend(input.provider, sessionId, input.cwd, completedPreparation, input.signal);
+      await journalStore.remove(input.provider.id, sessionId);
+      progress.journalRetired = true;
+      if (!pendingMarker) {
+        throw new OpenPError('seed writer committed without a pending session marker', EXIT_CODES.protocolViolation);
+      }
+      await sessionStateStore.restorePendingSeedAppendMarker(pendingMarker);
+    }
+  } catch (error) {
+    primaryError = error;
+  }
+  throwAppendSettlementFailure(result, primaryError, progress);
+}
+
+function assertPreparedAppend(
+  provider: BackendProvider,
+  before: NativeSessionReadResult,
+  requested: readonly SeedWriteTurn[],
+  prepared: PreparedSessionHistoryAppend,
+): void {
+  const hasCleanupToken = prepared.cleanupToken !== undefined;
+  const hasCleanupCapability = provider.cleanupPreparedSessionHistoryAppend !== undefined;
+  if (hasCleanupToken !== hasCleanupCapability ||
+    (prepared.cleanupToken !== undefined && !isCanonicalUuidV4(prepared.cleanupToken))) {
+    throw new OpenPError(
+      `seed writer ${provider.id} prepared an invalid cleanup capability contract`,
+      EXIT_CODES.protocolViolation,
+    );
+  }
+  assertNativeAppendCandidate({ backend: provider.id, before: before.turns, candidate: prepared.before, requested: [], written: [] });
+  if (!isNativeStateDigest(before.nativeStateDigest) ||
+    prepared.beforeNativeStateDigest !== before.nativeStateDigest ||
+    !isNativeStateDigest(prepared.candidateNativeStateDigest) ||
+    prepared.candidateNativeStateDigest === prepared.beforeNativeStateDigest) {
+    throw new OpenPError('seed writer prepared invalid native state evidence', EXIT_CODES.protocolViolation);
+  }
+  assertAppendResult(
+    { sessionId: before.sessionId, turns: prepared.turns },
+    before.sessionId,
+    requested.map((turn): LogicalSeedTurn => ({
+      logicalId: turn.logicalId,
+      userText: turn.userText,
+      assistantText: turn.assistantText,
+      contentDigest: turn.contentDigest,
+      nativeIds: turn.sourceNativeIds,
+    })),
+  );
+  assertNoCrossTurnNativeIdOverlap([...before.turns, ...prepared.turns], 'seed writer');
+}
+
+async function cleanupPreparedAppend(
+  provider: BackendProvider,
+  sessionId: string,
+  cwd: string,
+  prepared: PreparedSessionHistoryAppend,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (prepared.cleanupToken === undefined) {
+    return;
+  }
+  const cleanup = provider.cleanupPreparedSessionHistoryAppend;
+  if (!cleanup) {
+    throw new OpenPError(
+      `backend ${provider.id} cannot clean its prepared native append artifact`,
+      EXIT_CODES.protocolViolation,
+    );
+  }
+  try {
+    await cleanup.call(provider, {
+      sessionId,
+      cwd,
+      token: prepared.cleanupToken,
+      signal,
+    });
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw error;
+    }
+    const exitCode = error instanceof OpenPError ? error.exitCode : EXIT_CODES.sessionState;
+    throw new OpenPError(
+      `backend prepared native append artifact cleanup failed: ${errorMessage(error)}`,
+      exitCode,
+      {
+        reasonCode: error instanceof OpenPError ? error.reasonCode : undefined,
+        details: {
+          ...(error instanceof OpenPError ? error.details : undefined),
+          cleanupFailed: true,
+        },
+      },
+    );
+  }
+}
+
+function assertSameWrittenTurns(
+  actual: readonly NativeWrittenTurn[],
+  prepared: readonly NativeWrittenTurn[],
+): void {
+  if (actual.length !== prepared.length || actual.some((turn, index) => {
+    const expected = prepared[index]!;
+    return turn.logicalId !== expected.logicalId || turn.contentDigest !== expected.contentDigest ||
+      !sameNativeIds(turn.nativeIds, expected.nativeIds);
+  })) {
+    throw new OpenPError('seed writer returned mappings different from its prepared append', EXIT_CODES.protocolViolation);
+  }
+}
+
+function assertAppendResult(
+  result: AppendSessionHistoryResult,
+  sessionId: string,
+  turns: readonly LogicalSeedTurn[],
+): void {
+  if (result.sessionId !== sessionId || result.sessionId.length === 0) {
+    throw new OpenPError('seed writer returned a different or empty target session id', EXIT_CODES.protocolViolation);
+  }
   if (result.turns.length !== turns.length) {
     throw new OpenPError('seed writer returned a different number of turns', EXIT_CODES.protocolViolation);
   }
@@ -300,7 +541,77 @@ async function appendTurns(
     }
     assertNativeTurnIds(written.nativeIds, 'seed writer');
   });
-  return result;
+  assertNoCrossTurnNativeIdOverlap(result.turns, 'seed writer');
+}
+
+function throwAppendSettlementFailure(
+  result: AppendSessionHistoryResult,
+  primaryError: unknown,
+  progress: {
+    readonly nativeAppendVerified: boolean;
+    readonly provenanceSaved: boolean;
+    readonly journalRetired: boolean;
+  },
+): void {
+  const cleanupFailure = result.postWriteCleanupFailure ?? null;
+
+  if (primaryError !== null && cleanupFailure !== null) {
+    if (isAbortError(primaryError)) {
+      throw createAbortError(
+        `${primaryError.message}; backend transient artifact cleanup also failed: ${cleanupFailure.message}`,
+        primaryError.interruptedReasoningContent,
+      );
+    }
+    const exitCode = primaryError instanceof OpenPError ? primaryError.exitCode : EXIT_CODES.sessionState;
+    throw new OpenPError(
+      `${errorMessage(primaryError)}; backend transient artifact cleanup also failed: ${cleanupFailure.message}`,
+      exitCode,
+      {
+        reasonCode: primaryError instanceof OpenPError ? primaryError.reasonCode : undefined,
+        details: {
+          ...(primaryError instanceof OpenPError ? primaryError.details : undefined),
+          ...cleanupFailure.details,
+          nativeAppendCommitted: progress.nativeAppendVerified ? true : 'unknown',
+          provenanceSaved: progress.provenanceSaved,
+          journalRetired: progress.journalRetired,
+          cleanupFailed: true,
+        },
+      },
+    );
+  }
+  if (primaryError !== null) {
+    if (primaryError instanceof OpenPError) {
+      throw new OpenPError(primaryError.message, primaryError.exitCode, {
+        reasonCode: primaryError.reasonCode,
+        details: {
+          ...primaryError.details,
+          nativeAppendCommitted: progress.nativeAppendVerified ? true : 'unknown',
+          provenanceSaved: progress.provenanceSaved,
+          journalRetired: progress.journalRetired,
+        },
+      });
+    }
+    throw primaryError;
+  }
+  if (cleanupFailure !== null) {
+    throw new OpenPError(
+      `native append and provenance were saved, but backend transient artifact cleanup failed: ${cleanupFailure.message}`,
+      EXIT_CODES.sessionState,
+      {
+        details: {
+          ...cleanupFailure.details,
+          nativeAppendCommitted: true,
+          provenanceSaved: true,
+          journalRetired: progress.journalRetired,
+          cleanupFailed: true,
+        },
+      },
+    );
+  }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 async function resolveSeedSource(input: SeedRunInput): Promise<ResolvedSeedSource> {
@@ -313,30 +624,60 @@ async function resolveSeedSource(input: SeedRunInput): Promise<ResolvedSeedSourc
       refs: externalSourceRefs(ir.documentDigest, ir.turns.map((turn) => turn.externalId)),
     };
   }
+  const source = input.options.source;
   const provider = input.sourceProvider;
   if (!provider || !provider.readNativeSession) {
-    throw new OpenPError(`source backend ${input.options.source.backend} cannot read native sessions`, EXIT_CODES.usage);
+    throw new OpenPError(`source backend ${source.backend} cannot read native sessions`, EXIT_CODES.usage);
   }
-  const read = await readNative(provider, input.options.source.sessionId, input.cwd, input.signal);
-  const sourceProvenance = await new SeedProvenanceStore(input.cwd).load(provider.id, input.options.source.sessionId);
+  const { read, sourceProvenance } = await withSessionLock(input, source.sessionId, async () => {
+    await settleProviderPending(provider, source.sessionId, input.cwd, input.signal);
+    return {
+      read: await readNative(provider, source.sessionId, input.cwd, input.signal),
+      sourceProvenance: await new SeedProvenanceStore(input.cwd).load(provider.id, source.sessionId),
+    };
+  });
   const turns = normalizeNativeReadWithProvenance(read, sourceProvenance);
   return {
     output: {
       kind: 'native',
       backend: provider.id,
-      sessionId: input.options.source.sessionId,
+      sessionId: source.sessionId,
     },
     turns,
-    refs: nativeSourceRefs(provider.id, input.options.source.sessionId, turns),
+    refs: nativeSourceRefs(provider.id, source.sessionId, turns),
   };
 }
 
-async function readBootstrapNativeIds(input: SeedRunInput, sessionId: string): Promise<readonly NativeTurnIds[]> {
+async function readBootstrapNativeSession(input: SeedRunInput, sessionId: string): Promise<NativeSessionReadResult> {
   const read = await readNative(input.provider, sessionId, input.cwd, input.signal);
   if (read.turns.length !== 1) {
     throw new OpenPError('seed bootstrap did not produce exactly one readable native target turn', EXIT_CODES.protocolViolation);
   }
-  return [read.turns[0]!.nativeIds];
+  return read;
+}
+
+// Callers must already hold the canonical session lock. Backends and the stream-json runner reuse
+// this function before ordinary resumed turns so a committed seed suffix cannot be used before its
+// provenance settlement finishes.
+export async function settleProviderPending(
+  provider: BackendProvider,
+  sessionId: string,
+  cwd: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (!provider.readNativeSession) {
+    return;
+  }
+  await settlePendingSeedAppend({
+    backend: provider.id,
+    sessionId,
+    cwd,
+    signal,
+    readNativeSession: provider.readNativeSession.bind(provider),
+    ...(provider.cleanupPreparedSessionHistoryAppend
+      ? { cleanupPreparedAppend: provider.cleanupPreparedSessionHistoryAppend.bind(provider) }
+      : {}),
+  });
 }
 
 async function readNative(
@@ -344,13 +685,17 @@ async function readNative(
   sessionId: string,
   cwd: string,
   signal: AbortSignal,
+  mode: 'logical' | 'settlement' = 'logical',
 ): Promise<NativeSessionReadResult> {
   if (!provider.readNativeSession) {
     throw new OpenPError(`backend ${provider.id} cannot read native sessions`, EXIT_CODES.usage);
   }
-  const read = await provider.readNativeSession({ sessionId, cwd, signal });
+  const read = await provider.readNativeSession({ sessionId, cwd, signal, mode });
   if (read.backend !== provider.id || read.sessionId !== sessionId) {
     throw new OpenPError('native session reader returned the wrong backend or session id', EXIT_CODES.protocolViolation);
+  }
+  if (!isNativeStateDigest(read.nativeStateDigest)) {
+    throw new OpenPError('native session reader did not prove complete native state', EXIT_CODES.protocolViolation);
   }
   read.turns.forEach((turn) => {
     if (turn.userText.length === 0 || turn.assistantText.length === 0) {
@@ -358,31 +703,70 @@ async function readNative(
     }
     assertNativeTurnIds(turn.nativeIds, 'native session reader');
   });
+  assertNoCrossTurnNativeIdOverlap(read.turns, 'native session reader');
   return read;
 }
 
 function assertNativeTurnIds(ids: NativeTurnIds, source: string): void {
   if (ids.userId.length === 0 || ids.completionId.length === 0 || ids.assistantIds.length === 0 ||
     ids.assistantIds.some((id) => id.length === 0) || new Set(ids.assistantIds).size !== ids.assistantIds.length ||
-    ids.assistantIds.includes(ids.userId)) {
+    ids.assistantIds.includes(ids.userId) || ids.completionId === ids.userId) {
     throw new OpenPError(`${source} returned invalid native turn ids`, EXIT_CODES.protocolViolation);
   }
 }
 
-// In create mode the session already exists after bootstrap, so an append failure includes the
-// session id and the exact append-mode retry command (stderr is a diagnostics surface). The original
-// exit code is preserved; interrupts pass through unchanged.
-function augmentCreateAppendError(error: unknown, input: SeedRunInput, sessionId: string): unknown {
+function assertNoCrossTurnNativeIdOverlap(
+  turns: readonly { readonly nativeIds: NativeTurnIds }[],
+  source: string,
+): void {
+  const seen = new Set<string>();
+  for (const turn of turns) {
+    const turnIds = new Set([turn.nativeIds.userId, turn.nativeIds.completionId, ...turn.nativeIds.assistantIds]);
+    for (const id of turnIds) {
+      if (seen.has(id)) {
+        throw new OpenPError(`${source} reused a native id across logical turns`, EXIT_CODES.protocolViolation);
+      }
+    }
+    for (const id of turnIds) {
+      seen.add(id);
+    }
+  }
+}
+
+function sameNativeIds(a: NativeTurnIds, b: NativeTurnIds): boolean {
+  return a.userId === b.userId && a.completionId === b.completionId &&
+    a.assistantIds.length === b.assistantIds.length &&
+    a.assistantIds.every((id, index) => id === b.assistantIds[index]);
+}
+
+// A backend-neutral writer rejection does not prove that no native mutation happened (OpenCode uses
+// an import/upsert API). Report the created session for diagnosis, but never present an automatic
+// retry command as safe. The original exit code and structured diagnostics are preserved; interrupts
+// pass through unchanged.
+function augmentCreateAppendFailure(error: unknown, input: SeedRunInput, sessionId: string): unknown {
   if (isAbortError(error)) {
     return error;
   }
-  const retry = input.options.source.kind === 'native'
-    ? `openp seed ${input.options.backend} --resume ${sessionId} --source-backend ${input.options.source.backend} --source-session ${input.options.source.sessionId}`
-    : 'external IR imports are create-only; rebuild the target session after fixing the error';
+  const provenanceSaved = error instanceof OpenPError && error.details?.provenanceSaved === true;
+  const journalRetired = error instanceof OpenPError && error.details?.journalRetired === true;
+  const cleanupFailed = error instanceof OpenPError && error.details?.cleanupFailed === true;
+  const nativeAppendCommitted = error instanceof OpenPError && error.details?.nativeAppendCommitted === true;
+  const recovery = provenanceSaved && cleanupFailed
+    ? 'native append and provenance were saved; inspect the reported transient cleanup failure'
+    : provenanceSaved && !journalRetired
+      ? 'native append and provenance were saved; the retained settlement journal must be reconciled on next access'
+      : nativeAppendCommitted
+        ? 'native append was verified and settlement evidence was retained; do not repeat the seed write'
+        : input.options.source.kind === 'native'
+          ? 'native append state may be ambiguous; do not retry it automatically'
+          : 'external IR imports are create-only; rebuild the target session after fixing the error';
   const base = error instanceof Error ? error.message : String(error);
-  const message = `${base} (session ${sessionId} was created; ${retry})`;
+  const message = `${base} (session ${sessionId} was created; ${recovery})`;
   if (error instanceof OpenPError) {
-    return new OpenPError(message, error.exitCode, error.reasonCode ? { reasonCode: error.reasonCode } : undefined);
+    return new OpenPError(message, error.exitCode, {
+      reasonCode: error.reasonCode,
+      details: error.details,
+    });
   }
   return new OpenPError(message, EXIT_CODES.backendStartFailed);
 }

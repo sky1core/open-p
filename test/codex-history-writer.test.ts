@@ -6,17 +6,20 @@ import { dirname, join } from 'node:path';
 import test from 'node:test';
 import type { SeedWriteTurn } from '../src/core/backend.js';
 import { isAbortError } from '../src/core/abort.js';
-import { OpenPError } from '../src/core/errors.js';
+import { EXIT_CODES, OpenPError } from '../src/core/errors.js';
 import {
   appendCodexSessionHistory,
   buildCodexHistoryEntries,
 } from '../src/backends/codex/history-writer.js';
+import { codexNativeStateDigest, readCodexNativeSession } from '../src/backends/codex/native-reader.js';
 import { uuidv7 } from '../src/backends/codex/uuidv7.js';
+import { installFileDriftOnNextSync } from './helpers/native-file-sync-fault.js';
 
 const GOLDEN = join(process.cwd(), 'test/fixtures/seed/redacted-codex-golden.jsonl');
 const BOOTSTRAP = join(process.cwd(), 'test/fixtures/seed/redacted-codex-bootstrap.jsonl');
 const FIXTURE_CWD = '/redacted/workspace';
 const NOW = Date.UTC(2026, 6, 14, 12, 0, 0);
+const persistPreparedAppend = async (): Promise<void> => undefined;
 const TURNS: readonly SeedWriteTurn[] = [
   { logicalId: 'turn-1', userText: 'U-one', assistantText: 'A-one', contentDigest: 'digest-1', sourceNativeIds: null },
   { logicalId: 'turn-2', userText: 'U-two', assistantText: 'A-two', contentDigest: 'digest-2', sourceNativeIds: null },
@@ -32,6 +35,19 @@ type Entry = Record<string, any>;
 
 function fixtureEntries(logText: string): Entry[] {
   return logText.split('\n').filter((l) => l.trim()).map((l) => JSON.parse(l));
+}
+
+function logForSession(logText: string, sessionId: string): string {
+  return fixtureEntries(logText).map((entry) => {
+    const copy = structuredClone(entry);
+    if (copy.type === 'session_meta' && copy.payload && typeof copy.payload === 'object') {
+      copy.payload.id = sessionId;
+      if (Object.prototype.hasOwnProperty.call(copy.payload, 'session_id')) {
+        copy.payload.session_id = sessionId;
+      }
+    }
+    return JSON.stringify(copy);
+  }).join('\n') + '\n';
 }
 
 function lastCodexUserTemplate(entries: Entry[]): Entry {
@@ -214,19 +230,126 @@ test('appendCodexSessionHistory appends to the resolved log without rewriting th
   const sessionId = randomUUID();
   const logPath = join(homeDir, 'sessions', '2026', '07', '14', `rollout-2026-07-14T00-00-00-${sessionId}.jsonl`);
   await mkdir(dirname(logPath), { recursive: true });
-  const original = await readFile(GOLDEN);
+  const original = Buffer.from(logForSession(await readFile(GOLDEN, 'utf8'), sessionId));
   await writeFile(logPath, original);
   const beforeSha = sha256(original);
+  let preparationCalls = 0;
+  let preparedCandidateDigest: string | null = null;
 
-  await appendCodexSessionHistory({ sessionId, cwd: FIXTURE_CWD, turns: TURNS, homeDir });
+  await appendCodexSessionHistory({
+    sessionId,
+    cwd: FIXTURE_CWD,
+    turns: TURNS,
+    homeDir,
+    persistPreparedAppend: async (prepared) => {
+      preparationCalls += 1;
+      preparedCandidateDigest = prepared.candidateNativeStateDigest;
+      assert.equal(prepared.turns.length, TURNS.length);
+      assert.deepEqual(await readFile(logPath), original, 'durability barrier must precede native mutation');
+    },
+  });
 
   const after = await readFile(logPath);
+  assert.equal(preparationCalls, 1);
+  assert.equal(codexNativeStateDigest(after), preparedCandidateDigest);
   assert.equal(sha256(after.subarray(0, original.length)), beforeSha, 'existing bytes (instructions head included) must be immutable');
   const originalLines = original.toString('utf8').trimEnd().split('\n');
   const afterLines = after.toString('utf8').trimEnd().split('\n');
   assert.equal(afterLines.length, originalLines.length + TURNS.length * 4);
   const appended = afterLines.slice(originalLines.length).map((l) => JSON.parse(l) as Entry);
   assert.deepEqual(responseItems(appended).map(codexText), EXPECTED_TEXT_ENTRIES.map((t) => t.text));
+});
+
+test('Codex production reader confirms a stable file-backed settlement snapshot', async () => {
+  const homeDir = await mkdtemp(join(tmpdir(), 'openp-codex-settlement-'));
+  const sessionId = randomUUID();
+  const logPath = join(homeDir, 'sessions', '2026', '07', '14', `rollout-2026-07-14T00-00-00-${sessionId}.jsonl`);
+  await mkdir(dirname(logPath), { recursive: true });
+  const bytes = Buffer.from(logForSession(await readFile(GOLDEN, 'utf8'), sessionId));
+  await writeFile(logPath, bytes);
+
+  const read = await readCodexNativeSession({
+    backend: 'codex',
+    sessionId,
+    homeDir,
+    mode: 'settlement',
+  });
+
+  assert.equal(read.nativeStateDigest, codexNativeStateDigest(bytes));
+  assert.equal(read.turns.length > 0, true);
+});
+
+test('Codex production reader rejects first-read drift only in settlement mode', async () => {
+  const homeDir = await mkdtemp(join(tmpdir(), 'openp-codex-settlement-drift-'));
+  const sessionId = randomUUID();
+  const logPath = join(homeDir, 'sessions', '2026', '07', '14', `rollout-2026-07-14T00-00-00-${sessionId}.jsonl`);
+  await mkdir(dirname(logPath), { recursive: true });
+  const bytes = Buffer.from(logForSession(await readFile(GOLDEN, 'utf8'), sessionId));
+  await writeFile(logPath, bytes);
+  const fault = await installFileDriftOnNextSync(logPath, Buffer.concat([bytes, Buffer.from('\n')]));
+  try {
+    await assert.doesNotReject(() => readCodexNativeSession({
+      backend: 'codex', sessionId, homeDir, mode: 'logical',
+    }));
+    assert.equal(fault.wasTriggered(), false);
+    await assert.rejects(
+      () => readCodexNativeSession({ backend: 'codex', sessionId, homeDir, mode: 'settlement' }),
+      (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.protocolViolation &&
+        error.message.includes('changed during durability confirmation'),
+    );
+    assert.equal(fault.wasTriggered(), true);
+  } finally {
+    fault.restore();
+  }
+});
+
+test('appendCodexSessionHistory rejects a foreign session_meta before mutation', async () => {
+  const homeDir = await mkdtemp(join(tmpdir(), 'openp-codex-home-'));
+  const sessionId = randomUUID();
+  const logPath = join(homeDir, 'sessions', '2026', '07', '14', `rollout-2026-07-14T00-00-00-${sessionId}.jsonl`);
+  await mkdir(dirname(logPath), { recursive: true });
+  const foreign = await readFile(GOLDEN);
+  await writeFile(logPath, foreign);
+
+  await assert.rejects(
+    () => appendCodexSessionHistory({ sessionId, cwd: FIXTURE_CWD, turns: TURNS, persistPreparedAppend, homeDir }),
+    (error) => error instanceof OpenPError && error.exitCode === 40,
+  );
+  assert.deepEqual(await readFile(logPath), foreign);
+});
+
+test('appendCodexSessionHistory rejects a trailing incomplete lifecycle before mutation', async () => {
+  const homeDir = await mkdtemp(join(tmpdir(), 'openp-codex-home-'));
+  const sessionId = randomUUID();
+  const logPath = join(homeDir, 'sessions', '2026', '07', '14', `rollout-2026-07-14T00-00-00-${sessionId}.jsonl`);
+  await mkdir(dirname(logPath), { recursive: true });
+  const base = logForSession(await readFile(GOLDEN, 'utf8'), sessionId);
+  const danglingTurnId = uuidv7(NOW + 100_000);
+  const original = Buffer.from(`${base.trimEnd()}\n${[
+    { type: 'event_msg', payload: { type: 'task_started', turn_id: danglingTurnId } },
+    {
+      type: 'response_item',
+      payload: {
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_text', text: 'unfinished target state' }],
+        internal_chat_message_metadata_passthrough: { turn_id: danglingTurnId },
+      },
+    },
+  ].map((entry) => JSON.stringify(entry)).join('\n')}\n`);
+  await writeFile(logPath, original);
+
+  await assert.rejects(
+    () => appendCodexSessionHistory({
+      sessionId,
+      cwd: FIXTURE_CWD,
+      turns: TURNS.slice(0, 1),
+      persistPreparedAppend,
+      homeDir,
+    }),
+    (error) => error instanceof OpenPError && error.exitCode === 40,
+  );
+  assert.deepEqual(await readFile(logPath), original);
 });
 
 test('missing user or assistant template is a protocol violation', () => {
@@ -254,7 +377,7 @@ test('unparseable lines are skipped, not rewritten or fatal', async () => {
 test('appendCodexSessionHistory reports a missing log as sessionLogNotFound', async () => {
   const homeDir = await mkdtemp(join(tmpdir(), 'openp-codex-home-'));
   await assert.rejects(
-    () => appendCodexSessionHistory({ sessionId: randomUUID(), cwd: FIXTURE_CWD, turns: TURNS, homeDir }),
+    () => appendCodexSessionHistory({ sessionId: randomUUID(), cwd: FIXTURE_CWD, turns: TURNS, persistPreparedAppend, homeDir }),
     (error) => error instanceof OpenPError && error.exitCode === 41,
   );
 });
@@ -264,12 +387,12 @@ test('an aborted signal rejects before the write and leaves the log untouched', 
   const sessionId = randomUUID();
   const logPath = join(homeDir, 'sessions', '2026', '07', '14', `rollout-2026-07-14T00-00-00-${sessionId}.jsonl`);
   await mkdir(dirname(logPath), { recursive: true });
-  const original = await readFile(GOLDEN);
+  const original = Buffer.from(logForSession(await readFile(GOLDEN, 'utf8'), sessionId));
   await writeFile(logPath, original);
   const controller = new AbortController();
   controller.abort();
   await assert.rejects(
-    () => appendCodexSessionHistory({ sessionId, cwd: FIXTURE_CWD, turns: TURNS, homeDir, signal: controller.signal }),
+    () => appendCodexSessionHistory({ sessionId, cwd: FIXTURE_CWD, turns: TURNS, persistPreparedAppend, homeDir, signal: controller.signal }),
     isAbortError,
   );
   assert.equal(sha256(await readFile(logPath)), sha256(original), 'log must be byte-identical after an aborted append');

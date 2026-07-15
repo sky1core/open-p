@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { isUtf8 } from 'node:buffer';
 import { readFile } from 'node:fs/promises';
 import type { NativeSessionReadResult, NativeSessionTurn, NativeTurnIds, SeedWriteTurn } from './backend.js';
 import { EXIT_CODES, OpenPError } from './errors.js';
@@ -30,13 +31,16 @@ interface JsonObject {
 }
 
 export async function loadExternalSeedIrFile(path: string): Promise<ExternalSeedIr> {
-  let text: string;
+  let bytes: Buffer;
   try {
-    text = await readFile(path, 'utf8');
+    bytes = await readFile(path);
   } catch {
     throw usage(`failed to read IR file: ${path}`);
   }
-  return parseExternalSeedIrJson(text, path);
+  if (!isUtf8(bytes)) {
+    throw usage(`invalid IR file (not UTF-8): ${path}`);
+  }
+  return parseExternalSeedIrJson(bytes.toString('utf8'), path);
 }
 
 export function parseExternalSeedIrJson(text: string, sourcePath: string): ExternalSeedIr {
@@ -79,6 +83,10 @@ export function contentDigest(userText: string, assistantText: string): string {
 
 export function externalIrLogicalId(documentDigest: string, externalId: string): string {
   return `ir:${digestJson('openp.seed.external.logical.v1', { documentDigest, externalId })}`;
+}
+
+export function isLogicalSeedId(value: unknown): value is string {
+  return typeof value === 'string' && /^(?:native|ir):[0-9a-f]{64}$/.test(value);
 }
 
 export function logicalTurnsFromNative(read: NativeSessionReadResult): readonly LogicalSeedTurn[] {

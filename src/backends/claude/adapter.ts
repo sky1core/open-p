@@ -4,6 +4,7 @@ import { appendDebugLog, type DebugLogEntry } from '../../core/debug-log.js';
 import { ARTIFACT_REJECTION_REASONS, EXIT_CODES, OpenPError } from '../../core/errors.js';
 import { DEFAULT_TERMINATE_GRACE_MS, shouldTerminateOnAbort } from '../../core/graceful-interrupt.js';
 import { SessionLockStore } from '../../core/session-lock.js';
+import { settlePendingSeedBeforeResume } from '../../core/resume-preflight.js';
 import { SessionStateStore, validateSessionStateCompatibility } from '../../core/session-state.js';
 import type { Backend } from '../../core/backend.js';
 import type { BackendRunOptions, TurnRequest, TurnResult, TurnResultWarning } from '../../core/types.js';
@@ -84,6 +85,7 @@ export class ClaudeCodeBackend implements Backend {
     const lock = await new SessionLockStore(options.cwd).acquire(options.backendSessionId);
     let primaryError: unknown = null;
     try {
+      await settlePendingSeedBeforeResume(options);
       return await this.runTurnWithLock(request, options);
     } catch (error) {
       primaryError = error;

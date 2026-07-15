@@ -8,7 +8,10 @@ import type { PtyProvider } from '../../runners/types.js';
 import { OPENCODE_DESCRIPTOR } from './descriptor.js';
 import { OpenCodeBackend } from './backend.js';
 import { OpenCodeWorkerBridge } from './worker-bridge.js';
-import { appendOpenCodeSessionHistory } from './history-writer.js';
+import {
+  appendOpenCodeSessionHistory,
+  cleanupOpenCodePreparedSessionHistoryAppend,
+} from './history-writer.js';
 import { readOpenCodeNativeSession } from './native-reader.js';
 
 export const opencodeBackendProvider: BackendProvider = {
@@ -32,6 +35,7 @@ export const opencodeBackendProvider: BackendProvider = {
       backend: 'opencode',
       sessionId: input.sessionId,
       cwd: input.cwd,
+      mode: input.mode,
       signal: input.signal,
     });
   },
@@ -41,7 +45,12 @@ export const opencodeBackendProvider: BackendProvider = {
       sessionId: input.sessionId,
       cwd: input.cwd,
       turns: input.turns,
+      persistPreparedAppend: input.persistPreparedAppend,
       signal: input.signal,
     });
+  },
+
+  async cleanupPreparedSessionHistoryAppend(input) {
+    return cleanupOpenCodePreparedSessionHistoryAppend(input);
   },
 };

@@ -1,10 +1,13 @@
+import { isUtf8 } from 'node:buffer';
 import { createHash, randomUUID } from 'node:crypto';
-import { chmod, mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
+import { chmod, open, readFile, rename, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { NativeSessionReadResult, NativeTurnIds, NativeWrittenTurn } from './backend.js';
 import { EXIT_CODES, OpenPError } from './errors.js';
+import { ensureDurableDirectory, syncDirectory } from './fs-durability.js';
 import {
   contentDigest,
+  isLogicalSeedId,
   logicalTurnsFromNative,
   nativeLogicalId,
   type LogicalSeedTurn,
@@ -62,17 +65,25 @@ export class SeedProvenanceStore {
 
   async load(backend: string, sessionId: string): Promise<SeedProvenanceState | null> {
     const path = this.pathForSession(backend, sessionId);
-    let text: string;
+    let bytes: Buffer;
     try {
-      text = await readFile(path, 'utf8');
+      bytes = await readFile(path);
     } catch (error) {
       if (isNotFoundError(error)) {
         return null;
       }
       throw new OpenPError(`failed to read seed provenance: ${path}`, EXIT_CODES.sessionState);
     }
+    if (!isUtf8(bytes)) {
+      throw invalidProvenance(path);
+    }
+    const text = bytes.toString('utf8');
     try {
-      return parseState(JSON.parse(text), path);
+      const state = parseState(JSON.parse(text), path);
+      if (state.backend !== backend || state.sessionId !== sessionId) {
+        throw invalidProvenance(path);
+      }
+      return state;
     } catch (error) {
       if (error instanceof OpenPError) {
         throw error;
@@ -82,20 +93,23 @@ export class SeedProvenanceStore {
   }
 
   async save(state: SeedProvenanceState): Promise<void> {
-    assertSafeSessionId(state.sessionId);
-    await mkdir(join(this.stateRoot, 'seed-provenance'), { recursive: true, mode: 0o700 });
-    const path = this.pathForSession(state.backend, state.sessionId);
-    const tempPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
+    const checked = parseState(state, 'seed provenance input');
+    assertSafeSessionId(checked.sessionId);
+    const directory = join(this.stateRoot, 'seed-provenance');
+    const path = this.pathForSession(checked.backend, checked.sessionId);
+    const tempPath = join(directory, `.seed-provenance-${randomUUID()}.tmp`);
     try {
+      await ensureDurableDirectory(directory);
       const file = await open(tempPath, 'wx', 0o600);
       try {
-        await file.writeFile(`${JSON.stringify(state, null, 2)}\n`, 'utf8');
+        await file.writeFile(`${JSON.stringify(checked, null, 2)}\n`, 'utf8');
         await file.sync();
       } finally {
         await file.close();
       }
       await rename(tempPath, path);
       await chmod(path, 0o600).catch(() => undefined);
+      await syncDirectory(directory);
     } catch (error) {
       await unlink(tempPath).catch(() => undefined);
       if (error instanceof OpenPError) throw error;
@@ -158,12 +172,14 @@ export function withAppendedProvenanceEntries(
       nativeIds: written.nativeIds,
     },
   }));
-  return {
+  const next = {
     ...base,
     updatedAt: now,
     bootstrap: input.bootstrap ?? base.bootstrap,
     entries: [...base.entries, ...additions],
   };
+  assertProvenanceEntryIntegrity(next);
+  return next;
 }
 
 export function externalSourceRefs(documentDigest: string, externalIds: readonly string[]): readonly ExternalTurnRef[] {
@@ -198,7 +214,8 @@ export function normalizeNativeReadWithProvenance(
   if (provenance.backend !== read.backend || provenance.sessionId !== read.sessionId) {
     throw new OpenPError(`seed provenance does not belong to ${read.backend}/${read.sessionId}`, EXIT_CODES.sessionState);
   }
-  assertAllTargetMappingsPresent(read, provenance);
+  assertProvenanceEntryIntegrity(provenance);
+  assertAllProvenanceMappingsPresentInOrder(read, provenance);
   const result: LogicalSeedTurn[] = [];
   for (const turn of read.turns) {
     if (isBootstrapTurn(provenance.bootstrap, turn.nativeIds)) {
@@ -224,21 +241,72 @@ export function normalizeNativeReadWithProvenance(
       });
     }
   }
+  const logicalIds = new Set<string>();
+  for (const turn of result) {
+    if (logicalIds.has(turn.logicalId)) {
+      throw new OpenPError('seed provenance produced duplicate logical turn ids', EXIT_CODES.protocolViolation);
+    }
+    logicalIds.add(turn.logicalId);
+  }
   return result;
 }
 
-function assertAllTargetMappingsPresent(
+function assertProvenanceEntryIntegrity(provenance: SeedProvenanceState): void {
+  const logicalIds = new Set<string>();
+  const ownedTargets: NativeTurnIds[] = [];
+  for (let index = 0; index < provenance.bootstrap.length; index += 1) {
+    const ids = provenance.bootstrap[index]!;
+    if (provenance.bootstrap.slice(0, index).some((other) => overlapsNativeIds(other, ids))) {
+      throw new OpenPError('seed provenance bootstrap native ids overlap', EXIT_CODES.protocolViolation);
+    }
+  }
+  for (const entry of provenance.entries) {
+    if (entry.target.backend !== provenance.backend || entry.target.sessionId !== provenance.sessionId) {
+      throw new OpenPError('seed provenance target belongs to a different native session', EXIT_CODES.protocolViolation);
+    }
+    if (logicalIds.has(entry.logicalId)) {
+      throw new OpenPError('seed provenance contains duplicate logical turn ids', EXIT_CODES.protocolViolation);
+    }
+    if (ownedTargets.some((ids) => overlapsNativeIds(ids, entry.target.nativeIds))) {
+      throw new OpenPError('seed provenance target mappings overlap', EXIT_CODES.protocolViolation);
+    }
+    if (provenance.bootstrap.some((ids) => overlapsNativeIds(ids, entry.target.nativeIds))) {
+      throw new OpenPError('seed provenance target mapping overlaps bootstrap native ids', EXIT_CODES.protocolViolation);
+    }
+    if (entry.source.kind === 'native' && entry.source.backend === provenance.backend &&
+      entry.source.sessionId === provenance.sessionId) {
+      throw new OpenPError('seed provenance source cannot claim the target native session', EXIT_CODES.protocolViolation);
+    }
+    logicalIds.add(entry.logicalId);
+    ownedTargets.push(entry.target.nativeIds);
+  }
+}
+
+function assertAllProvenanceMappingsPresentInOrder(
   read: NativeSessionReadResult,
   provenance: SeedProvenanceState,
 ): void {
+  let previousMappingIndex = -1;
+  for (const bootstrap of provenance.bootstrap) {
+    const bootstrapIndex = read.turns.findIndex((turn) => sameNativeIds(bootstrap, turn.nativeIds));
+    if (bootstrapIndex < 0) {
+      throw new OpenPError('seed bootstrap provenance mapping is missing from the native session', EXIT_CODES.protocolViolation);
+    }
+    if (bootstrapIndex <= previousMappingIndex) {
+      throw new OpenPError('seed bootstrap provenance mapping order differs from the native session', EXIT_CODES.protocolViolation);
+    }
+    previousMappingIndex = bootstrapIndex;
+  }
   for (const entry of provenance.entries) {
     const target = entry.target;
-    if (target.backend !== read.backend || target.sessionId !== read.sessionId) {
-      throw new OpenPError('seed provenance target belongs to a different native session', EXIT_CODES.protocolViolation);
-    }
-    if (!read.turns.some((turn) => sameNativeIds(target.nativeIds, turn.nativeIds))) {
+    const targetIndex = read.turns.findIndex((turn) => sameNativeIds(target.nativeIds, turn.nativeIds));
+    if (targetIndex < 0) {
       throw new OpenPError('seed provenance target mapping is missing from the native session', EXIT_CODES.protocolViolation);
     }
+    if (targetIndex <= previousMappingIndex) {
+      throw new OpenPError('seed provenance target mapping order differs from the native session', EXIT_CODES.protocolViolation);
+    }
+    previousMappingIndex = targetIndex;
   }
 }
 
@@ -251,7 +319,8 @@ export function planSeedAppend(
   const targetIds = targetTurns.map((turn) => turn.logicalId);
   const min = Math.min(sourceIds.length, targetIds.length);
   for (let index = 0; index < min; index += 1) {
-    if (sourceIds[index] !== targetIds[index]) {
+    if (sourceIds[index] !== targetIds[index] ||
+      sourceTurns[index]!.contentDigest !== targetTurns[index]!.contentDigest) {
       throw new OpenPError('seed target diverges from source logical turn sequence', EXIT_CODES.protocolViolation);
     }
   }
@@ -273,20 +342,18 @@ function findProvenanceMatch(
 ): SeedProvenanceEntry | null {
   let partial = false;
   for (const entry of provenance.entries) {
-    const refs = [entry.target, entry.source].filter((ref): ref is NativeTurnRef => ref.kind === 'native');
-    for (const ref of refs) {
-      if (ref.backend !== backend || ref.sessionId !== sessionId) {
-        continue;
+    const ref = entry.target;
+    if (ref.backend !== backend || ref.sessionId !== sessionId) {
+      continue;
+    }
+    if (sameNativeIds(ref.nativeIds, nativeIds)) {
+      if (entry.contentDigest !== digest) {
+        throw new OpenPError('seed provenance content digest mismatch', EXIT_CODES.protocolViolation);
       }
-      if (sameNativeIds(ref.nativeIds, nativeIds)) {
-        if (entry.contentDigest !== digest) {
-          throw new OpenPError('seed provenance content digest mismatch', EXIT_CODES.protocolViolation);
-        }
-        return entry;
-      }
-      if (overlapsNativeIds(ref.nativeIds, nativeIds)) {
-        partial = true;
-      }
+      return entry;
+    }
+    if (overlapsNativeIds(ref.nativeIds, nativeIds)) {
+      partial = true;
     }
   }
   if (partial) {
@@ -319,22 +386,27 @@ function sameNativeIds(a: NativeTurnIds, b: NativeTurnIds): boolean {
 }
 
 function overlapsNativeIds(a: NativeTurnIds, b: NativeTurnIds): boolean {
-  if (a.userId === b.userId || a.completionId === b.completionId) {
-    return true;
-  }
-  const assistantIds = new Set(a.assistantIds);
-  return b.assistantIds.some((id) => assistantIds.has(id));
+  const aIds = new Set([a.userId, a.completionId, ...a.assistantIds]);
+  return [b.userId, b.completionId, ...b.assistantIds].some((id) => aIds.has(id));
 }
 
 function parseState(value: unknown, path: string): SeedProvenanceState {
-  const object = asObject(value);
-  if (!object || object.schemaVersion !== 1 || typeof object.backend !== 'string' ||
-    typeof object.sessionId !== 'string' || typeof object.createdAt !== 'string' ||
-    typeof object.updatedAt !== 'string' || !Array.isArray(object.bootstrap) ||
+  const object = exactObject(value, [
+    'schemaVersion',
+    'backend',
+    'sessionId',
+    'createdAt',
+    'updatedAt',
+    'bootstrap',
+    'entries',
+  ]);
+  if (!object || object.schemaVersion !== 1 || !nonEmptyString(object.backend) ||
+    !nonEmptyString(object.sessionId) || !isSafeSessionId(object.sessionId) ||
+    !validDate(object.createdAt) || !validDate(object.updatedAt) || !Array.isArray(object.bootstrap) ||
     !Array.isArray(object.entries)) {
-    throw new OpenPError(`invalid seed provenance: ${path}`, EXIT_CODES.sessionState);
+    throw invalidProvenance(path);
   }
-  return {
+  const state: SeedProvenanceState = {
     schemaVersion: 1,
     backend: object.backend,
     sessionId: object.sessionId,
@@ -343,12 +415,18 @@ function parseState(value: unknown, path: string): SeedProvenanceState {
     bootstrap: object.bootstrap.map((ids) => parseNativeIds(ids, path)),
     entries: object.entries.map((entry) => parseEntry(entry, path)),
   };
+  try {
+    assertProvenanceEntryIntegrity(state);
+  } catch {
+    throw invalidProvenance(path);
+  }
+  return state;
 }
 
 function parseEntry(value: unknown, path: string): SeedProvenanceEntry {
-  const object = asObject(value);
-  if (!object || typeof object.logicalId !== 'string' || typeof object.contentDigest !== 'string') {
-    throw new OpenPError(`invalid seed provenance: ${path}`, EXIT_CODES.sessionState);
+  const object = exactObject(value, ['logicalId', 'contentDigest', 'source', 'target']);
+  if (!object || !isLogicalSeedId(object.logicalId) || !sha256(object.contentDigest)) {
+    throw invalidProvenance(path);
   }
   return {
     logicalId: object.logicalId,
@@ -361,26 +439,28 @@ function parseEntry(value: unknown, path: string): SeedProvenanceEntry {
 function parseSourceRef(value: unknown, path: string): SeedProvenanceSource {
   const object = asObject(value);
   if (!object || typeof object.kind !== 'string') {
-    throw new OpenPError(`invalid seed provenance: ${path}`, EXIT_CODES.sessionState);
+    throw invalidProvenance(path);
   }
   if (object.kind === 'native') {
-    return parseNativeRef(object, path);
+    return parseNativeRef(value, path);
   }
-  if (object.kind === 'external-ir' && typeof object.documentDigest === 'string' &&
-    typeof object.externalIdDigest === 'string') {
+  const external = exactObject(value, ['kind', 'documentDigest', 'externalIdDigest']);
+  if (external?.kind === 'external-ir' && sha256(external.documentDigest) &&
+    sha256(external.externalIdDigest)) {
     return {
       kind: 'external-ir',
-      documentDigest: object.documentDigest,
-      externalIdDigest: object.externalIdDigest,
+      documentDigest: external.documentDigest,
+      externalIdDigest: external.externalIdDigest,
     };
   }
-  throw new OpenPError(`invalid seed provenance: ${path}`, EXIT_CODES.sessionState);
+  throw invalidProvenance(path);
 }
 
 function parseNativeRef(value: unknown, path: string): NativeTurnRef {
-  const object = asObject(value);
-  if (!object || object.kind !== 'native' || typeof object.backend !== 'string' || typeof object.sessionId !== 'string') {
-    throw new OpenPError(`invalid seed provenance: ${path}`, EXIT_CODES.sessionState);
+  const object = exactObject(value, ['kind', 'backend', 'sessionId', 'nativeIds']);
+  if (!object || object.kind !== 'native' || !nonEmptyString(object.backend) ||
+    !nonEmptyString(object.sessionId) || !isSafeSessionId(object.sessionId)) {
+    throw invalidProvenance(path);
   }
   return {
     kind: 'native',
@@ -391,16 +471,53 @@ function parseNativeRef(value: unknown, path: string): NativeTurnRef {
 }
 
 function parseNativeIds(value: unknown, path: string): NativeTurnIds {
-  const object = asObject(value);
-  if (!object || typeof object.userId !== 'string' || typeof object.completionId !== 'string' ||
-    !Array.isArray(object.assistantIds) || !object.assistantIds.every((id) => typeof id === 'string')) {
-    throw new OpenPError(`invalid seed provenance: ${path}`, EXIT_CODES.sessionState);
+  const object = exactObject(value, ['userId', 'assistantIds', 'completionId']);
+  if (!object || !nonEmptyString(object.userId) || !nonEmptyString(object.completionId) ||
+    !Array.isArray(object.assistantIds) || object.assistantIds.length === 0 ||
+    !object.assistantIds.every(nonEmptyString)) {
+    throw invalidProvenance(path);
   }
-  return {
+  const ids: NativeTurnIds = {
     userId: object.userId,
-    assistantIds: object.assistantIds,
+    assistantIds: object.assistantIds as string[],
     completionId: object.completionId,
   };
+  if (new Set(ids.assistantIds).size !== ids.assistantIds.length ||
+    ids.assistantIds.includes(ids.userId) || ids.completionId === ids.userId) {
+    throw invalidProvenance(path);
+  }
+  return ids;
+}
+
+function exactObject(value: unknown, keys: readonly string[]): JsonObject | null {
+  const object = asObject(value);
+  if (!object) return null;
+  const actual = Object.keys(object).sort();
+  const expected = [...keys].sort();
+  return actual.length === expected.length && actual.every((key, index) => key === expected[index])
+    ? object
+    : null;
+}
+
+function nonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0;
+}
+
+function sha256(value: unknown): value is string {
+  return typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
+}
+
+function validDate(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  try {
+    return new Date(value).toISOString() === value;
+  } catch {
+    return false;
+  }
+}
+
+function invalidProvenance(path: string): OpenPError {
+  return new OpenPError(`invalid seed provenance: ${path}`, EXIT_CODES.sessionState);
 }
 
 function asObject(value: unknown): JsonObject | null {

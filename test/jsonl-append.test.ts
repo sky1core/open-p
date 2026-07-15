@@ -80,6 +80,27 @@ test('an aborted signal rejects after the newline probe and before the write', a
   assert.equal(sha256(await readFile(path)), sha256(original), 'file must be untouched after an aborted append');
 });
 
+test('an abort observed after opening the file rejects before the write', async () => {
+  const path = await scratchFile('log.jsonl');
+  const original = Buffer.from('{"a":1}\n', 'utf8');
+  await writeFile(path, original);
+  let checks = 0;
+  const signal = {
+    get aborted() {
+      checks += 1;
+      return checks >= 2;
+    },
+  } as AbortSignal;
+
+  await assert.rejects(
+    () => appendJsonlLines(path, ['{"b":2}'], signal),
+    isAbortError,
+  );
+
+  assert.equal(checks >= 2, true);
+  assert.equal(sha256(await readFile(path)), sha256(original), 'file must be untouched after a pre-write abort');
+});
+
 test('a partial append failure truncates the file back to its exact original bytes', async () => {
   const path = await scratchFile('log.jsonl');
   const original = Buffer.from('{"a":1}\n', 'utf8');
@@ -99,4 +120,43 @@ test('a partial append failure truncates the file back to its exact original byt
   );
 
   assert.equal(sha256(await readFile(path)), sha256(original));
+});
+
+test('a close failure rolls back any written suffix and surfaces the close error', async () => {
+  const path = await scratchFile('log.jsonl');
+  const original = Buffer.from('{"a":1}\n', 'utf8');
+  await writeFile(path, original);
+  const injected = new Error('injected close failure');
+
+  await assert.rejects(
+    () => commitAppendTransaction({
+      write: () => appendFile(path, '{"closed":false}\n'),
+      close: async () => {
+        throw injected;
+      },
+      rollback: () => truncate(path, original.length),
+    }),
+    (error) => error === injected,
+  );
+
+  assert.equal(sha256(await readFile(path)), sha256(original));
+});
+
+test('a rollback failure after append failure is reported as protocol violation', async () => {
+  const path = await scratchFile('log.jsonl');
+  await writeFile(path, '{"a":1}\n');
+
+  await assert.rejects(
+    () => commitAppendTransaction({
+      write: async () => {
+        await appendFile(path, '{"partial":true}');
+        throw new Error('write failed');
+      },
+      close: async () => undefined,
+      rollback: async () => {
+        throw new Error('rollback failed');
+      },
+    }),
+    (error) => error instanceof Error && 'exitCode' in error && error.exitCode === 40,
+  );
 });

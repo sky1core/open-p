@@ -1,13 +1,21 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
-import type { AppendSessionHistoryResult, NativeWrittenTurn, SeedWriteTurn } from '../../core/backend.js';
+import type { AppendSessionHistoryInput, AppendSessionHistoryResult, NativeWrittenTurn, SeedWriteTurn } from '../../core/backend.js';
 import { EXIT_CODES, OpenPError } from '../../core/errors.js';
-import { appendJsonlLines } from '../../core/jsonl-append.js';
+import { appendJsonlLines, encodeJsonlAppendPayload } from '../../core/jsonl-append.js';
+import { decodeNativeStateUtf8 } from '../../core/native-state-digest.js';
+import { assertNativeAppendCandidate } from '../../core/native-append-preflight.js';
+import {
+  assertClaudeNativeSessionIdentity,
+  claudeNativeStateDigest,
+  extractClaudeNativeTurns,
+} from './native-reader.js';
 import { findClaudeCodeSessionLog } from './session-log.js';
 import {
   isCallerUserTurn,
   rememberLocalCommandTranscriptPromptId,
 } from './turn-boundary-predicates.js';
+import { isClaudeCodeApiErrorAssistant } from './provider-error.js';
 
 interface JsonObject {
   [key: string]: unknown;
@@ -19,6 +27,7 @@ export async function appendClaudeCodeSessionHistory(input: {
   readonly sessionId: string;
   readonly cwd: string;
   readonly turns: readonly SeedWriteTurn[];
+  readonly persistPreparedAppend: AppendSessionHistoryInput['persistPreparedAppend'];
   readonly configDir?: string | null;
   readonly signal?: AbortSignal;
 }): Promise<AppendSessionHistoryResult> {
@@ -26,18 +35,41 @@ export async function appendClaudeCodeSessionHistory(input: {
   if (!logPath) {
     throw new OpenPError(`claude session log not found for ${input.sessionId}`, EXIT_CODES.sessionLogNotFound);
   }
-  let logText: string;
+  let logBytes: Buffer;
   try {
-    logText = await readFile(logPath, 'utf8');
+    logBytes = await readFile(logPath);
   } catch (error) {
     if (isNotFoundError(error)) {
       throw new OpenPError(`claude session log not found for ${input.sessionId}`, EXIT_CODES.sessionLogNotFound);
     }
     throw error;
   }
+  const logText = decodeNativeStateUtf8(logBytes, 'Claude native session log');
+  await assertClaudeNativeSessionIdentity(logText, input.sessionId, input.cwd);
+  const before = extractClaudeNativeTurns(logText);
   const built = buildClaudeCodeHistoryEntries(logText, input.turns);
+  const payload = encodeJsonlAppendPayload(
+    logBytes.length === 0 || logBytes[logBytes.length - 1] === 0x0a,
+    built.lines,
+  );
+  const candidateText = `${logText}${payload.toString('utf8')}`;
+  const candidateBytes = Buffer.concat([logBytes, payload]);
+  const candidate = extractClaudeNativeTurns(candidateText);
+  assertNativeAppendCandidate({
+    backend: 'Claude',
+    before,
+    candidate,
+    requested: input.turns,
+    written: built.written,
+  });
+  await input.persistPreparedAppend({
+    before,
+    beforeNativeStateDigest: claudeNativeStateDigest(logBytes),
+    candidateNativeStateDigest: claudeNativeStateDigest(candidateBytes),
+    turns: built.written,
+  });
   await appendJsonlLines(logPath, built.lines, input.signal);
-  return { turns: built.written };
+  return { sessionId: input.sessionId, turns: built.written };
 }
 
 // Pure transform (unit-test surface): existing log text -> JSON lines to append.
@@ -154,6 +186,9 @@ function isCompletionTemplateEntry(entry: JsonObject): boolean {
 
 function isAssistantTemplateEntry(entry: JsonObject): boolean {
   if (entry.type !== 'assistant' || entry.isSidechain === true || entry.isMeta === true || entry.isCompactSummary === true) {
+    return false;
+  }
+  if (isClaudeCodeApiErrorAssistant(entry)) {
     return false;
   }
   const message = entry.message;

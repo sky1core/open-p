@@ -99,6 +99,12 @@ export interface BackendRunOptions {
   readonly signal?: AbortSignal;
   readonly forceSignal?: AbortSignal;
   readonly killSignal?: AbortSignal;
+  // CLI-owned recovery barrier. Backends invoke it only after acquiring the canonical session lock
+  // and before launching an ordinary resumed native turn.
+  // Required at runtime for every resumed direct-backend execution. It stays optional in the
+  // shared type because first turns do not have pending seed state to settle; direct backends fail
+  // closed before native launch when `resume` is true and this callback is absent.
+  readonly settlePendingSeedAppend?: () => Promise<void>;
   readonly onIntermediateText?: (text: string, source: IntermediateTextSource) => void;
   readonly onIntermediateReasoning?: (
     text: string,

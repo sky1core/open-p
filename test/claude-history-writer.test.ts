@@ -6,17 +6,24 @@ import { dirname, join } from 'node:path';
 import test from 'node:test';
 import type { SeedWriteTurn } from '../src/core/backend.js';
 import { isAbortError } from '../src/core/abort.js';
-import { OpenPError } from '../src/core/errors.js';
+import { EXIT_CODES, OpenPError } from '../src/core/errors.js';
 import {
   appendClaudeCodeSessionHistory,
   buildClaudeCodeHistoryEntries,
 } from '../src/backends/claude/history-writer.js';
+import {
+  claudeNativeStateDigest,
+  extractClaudeNativeTurns,
+  readClaudeCodeNativeSession,
+} from '../src/backends/claude/native-reader.js';
 import { resolveClaudeCodeSessionLogPath } from '../src/backends/claude/session-log.js';
+import { installFileDriftOnNextSync } from './helpers/native-file-sync-fault.js';
 
 const GOLDEN = join(process.cwd(), 'test/fixtures/seed/redacted-claude-golden.jsonl');
 const BOOTSTRAP = join(process.cwd(), 'test/fixtures/seed/redacted-claude-bootstrap.jsonl');
 const FIXTURE_CWD = '/redacted/workspace';
 const NOW = Date.UTC(2026, 6, 14, 12, 0, 0);
+const persistPreparedAppend = async (): Promise<void> => undefined;
 const TURNS: readonly SeedWriteTurn[] = [
   { logicalId: 'turn-1', userText: 'U-one', assistantText: 'A-one', contentDigest: 'digest-1', sourceNativeIds: null },
   { logicalId: 'turn-2', userText: 'U-two', assistantText: 'A-two', contentDigest: 'digest-2', sourceNativeIds: null },
@@ -31,6 +38,16 @@ type Entry = Record<string, any>;
 
 function fixtureEntries(logText: string): Entry[] {
   return logText.split('\n').filter((l) => l.trim()).map((l) => JSON.parse(l));
+}
+
+function logForSession(logText: string, sessionId: string, cwd: string): string {
+  return fixtureEntries(logText).map((entry) => {
+    const copy = structuredClone(entry);
+    if (Object.prototype.hasOwnProperty.call(copy, 'sessionId')) copy.sessionId = sessionId;
+    if (Object.prototype.hasOwnProperty.call(copy, 'session_id')) copy.session_id = sessionId;
+    if (typeof copy.cwd === 'string') copy.cwd = cwd;
+    return JSON.stringify(copy);
+  }).join('\n') + '\n';
 }
 
 function lastUserTemplate(entries: Entry[]): Entry {
@@ -157,13 +174,28 @@ test('appendClaudeCodeSessionHistory appends to the resolved log without rewriti
   const configDir = await mkdtemp(join(tmpdir(), 'openp-claude-cfg-'));
   const logPath = resolveClaudeCodeSessionLogPath(sessionId, FIXTURE_CWD, configDir);
   await mkdir(dirname(logPath), { recursive: true });
-  const original = await readFile(GOLDEN);
+  const original = Buffer.from(logForSession(await readFile(GOLDEN, 'utf8'), sessionId, FIXTURE_CWD));
   await writeFile(logPath, original);
   const beforeSha = createHash('sha256').update(original).digest('hex');
+  let preparationCalls = 0;
+  let preparedCandidateDigest: string | null = null;
 
-  await appendClaudeCodeSessionHistory({ sessionId, cwd: FIXTURE_CWD, turns: TURNS, configDir });
+  await appendClaudeCodeSessionHistory({
+    sessionId,
+    cwd: FIXTURE_CWD,
+    turns: TURNS,
+    configDir,
+    persistPreparedAppend: async (prepared) => {
+      preparationCalls += 1;
+      preparedCandidateDigest = prepared.candidateNativeStateDigest;
+      assert.equal(prepared.turns.length, TURNS.length);
+      assert.deepEqual(await readFile(logPath), original, 'durability barrier must precede native mutation');
+    },
+  });
 
   const after = await readFile(logPath);
+  assert.equal(preparationCalls, 1);
+  assert.equal(claudeNativeStateDigest(after), preparedCandidateDigest);
   assert.equal(
     createHash('sha256').update(after.subarray(0, original.length)).digest('hex'),
     beforeSha,
@@ -176,6 +208,104 @@ test('appendClaudeCodeSessionHistory appends to the resolved log without rewriti
   assert.equal(appended[0]!.parentUuid, lastUuid(fixtureEntries(original.toString('utf8'))));
   assert.deepEqual(textEntries(appended).map(extractedText), EXPECTED_TEXT_ENTRIES.map((t) => t.text));
   assert.equal(completionEntries(appended).length, TURNS.length);
+});
+
+test('Claude production reader confirms a stable file-backed settlement snapshot', async () => {
+  const sessionId = randomUUID();
+  const configDir = await mkdtemp(join(tmpdir(), 'openp-claude-settlement-'));
+  const logPath = resolveClaudeCodeSessionLogPath(sessionId, FIXTURE_CWD, configDir);
+  await mkdir(dirname(logPath), { recursive: true });
+  const bytes = Buffer.from(logForSession(await readFile(GOLDEN, 'utf8'), sessionId, FIXTURE_CWD));
+  await writeFile(logPath, bytes);
+
+  const read = await readClaudeCodeNativeSession({
+    backend: 'claude',
+    sessionId,
+    cwd: FIXTURE_CWD,
+    configDir,
+    mode: 'settlement',
+  });
+
+  assert.equal(read.nativeStateDigest, claudeNativeStateDigest(bytes));
+  assert.equal(read.turns.length > 0, true);
+});
+
+test('Claude production reader rejects first-read drift only in settlement mode', async () => {
+  const sessionId = randomUUID();
+  const configDir = await mkdtemp(join(tmpdir(), 'openp-claude-settlement-drift-'));
+  const logPath = resolveClaudeCodeSessionLogPath(sessionId, FIXTURE_CWD, configDir);
+  await mkdir(dirname(logPath), { recursive: true });
+  const bytes = Buffer.from(logForSession(await readFile(GOLDEN, 'utf8'), sessionId, FIXTURE_CWD));
+  await writeFile(logPath, bytes);
+  const fault = await installFileDriftOnNextSync(logPath, Buffer.concat([bytes, Buffer.from('\n')]));
+  try {
+    await assert.doesNotReject(() => readClaudeCodeNativeSession({
+      backend: 'claude', sessionId, cwd: FIXTURE_CWD, configDir, mode: 'logical',
+    }));
+    assert.equal(fault.wasTriggered(), false);
+    await assert.rejects(
+      () => readClaudeCodeNativeSession({
+        backend: 'claude', sessionId, cwd: FIXTURE_CWD, configDir, mode: 'settlement',
+      }),
+      (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.protocolViolation &&
+        error.message.includes('changed during durability confirmation'),
+    );
+    assert.equal(fault.wasTriggered(), true);
+  } finally {
+    fault.restore();
+  }
+});
+
+test('appendClaudeCodeSessionHistory rejects a foreign in-record session before mutation', async () => {
+  const sessionId = randomUUID();
+  const configDir = await mkdtemp(join(tmpdir(), 'openp-claude-cfg-'));
+  const logPath = resolveClaudeCodeSessionLogPath(sessionId, FIXTURE_CWD, configDir);
+  await mkdir(dirname(logPath), { recursive: true });
+  const foreign = await readFile(GOLDEN);
+  await writeFile(logPath, foreign);
+
+  await assert.rejects(
+    () => appendClaudeCodeSessionHistory({ sessionId, cwd: FIXTURE_CWD, turns: TURNS, persistPreparedAppend, configDir }),
+    (error) => error instanceof OpenPError && error.exitCode === 40,
+  );
+  assert.deepEqual(await readFile(logPath), foreign);
+});
+
+test('appendClaudeCodeSessionHistory rejects incomplete or branch-changing target suffixes before mutation', async () => {
+  const originalFixture = await readFile(GOLDEN, 'utf8');
+  for (const variant of ['incomplete', 'sidechain-branch'] as const) {
+    const sessionId = randomUUID();
+    const configDir = await mkdtemp(join(tmpdir(), 'openp-claude-cfg-'));
+    const logPath = resolveClaudeCodeSessionLogPath(sessionId, FIXTURE_CWD, configDir);
+    await mkdir(dirname(logPath), { recursive: true });
+    const base = logForSession(originalFixture, sessionId, FIXTURE_CWD);
+    const baseTurns = extractClaudeNativeTurns(base);
+    const extra = {
+      type: 'user',
+      uuid: randomUUID(),
+      parentUuid: variant === 'incomplete'
+        ? lastUuid(fixtureEntries(base))
+        : baseTurns[0]!.nativeIds.completionId,
+      ...(variant === 'sidechain-branch' ? { isSidechain: true } : {}),
+      message: { role: 'user', content: 'unfinished target state' },
+      cwd: FIXTURE_CWD,
+      sessionId,
+    };
+    const original = Buffer.from(`${base.trimEnd()}\n${JSON.stringify(extra)}\n`);
+    await writeFile(logPath, original);
+
+    await assert.rejects(
+      () => appendClaudeCodeSessionHistory({
+        sessionId,
+        cwd: FIXTURE_CWD,
+        turns: TURNS.slice(0, 1),
+        persistPreparedAppend,
+        configDir,
+      }),
+      (error) => error instanceof OpenPError && error.exitCode === 40,
+    );
+    assert.deepEqual(await readFile(logPath), original);
+  }
 });
 
 test('missing user or assistant template is a protocol violation', () => {
@@ -252,6 +382,46 @@ test('prompt-id-linked local command transcripts are never selected as Claude us
   assert.equal(appendedUser.localCommandTemplatePoison, undefined);
 });
 
+test('provider-error assistant entries are never selected as Claude seed writer templates', async () => {
+  const logText = await readFile(GOLDEN, 'utf8');
+  const parent = lastUuid(fixtureEntries(logText));
+  const variants: readonly [string, Readonly<Record<string, unknown>>][] = [
+    ['flag', { isApiErrorMessage: true }],
+    ['status', { apiErrorStatus: 429 }],
+    ['error', { error: 'rate_limit' }],
+  ];
+  for (const [name, marker] of variants) {
+    const poisoned = [
+      logText.trimEnd(),
+      JSON.stringify({
+        type: 'assistant',
+        uuid: `provider-error-template-${name}`,
+        parentUuid: parent,
+        ...marker,
+        message: {
+          id: `provider-error-template-message-${name}`,
+          role: 'assistant',
+          content: [{ type: 'text', text: 'provider error notice' }],
+        },
+      }),
+    ].join('\n');
+
+    const built = buildClaudeCodeHistoryEntries(poisoned, TURNS.slice(0, 1), NOW);
+    const appended = built.lines.map((line) => JSON.parse(line) as Entry);
+    const assistant = appended[1]!;
+    assert.equal(assistant.type, 'assistant');
+    assert.equal(assistant.isApiErrorMessage, undefined);
+    assert.equal(assistant.apiErrorStatus, undefined);
+    assert.equal(assistant.error, undefined);
+
+    const readBack = extractClaudeNativeTurns(`${poisoned}\n${built.lines.join('\n')}\n`);
+    const suffix = readBack.at(-1)!;
+    assert.equal(suffix.userText, TURNS[0]!.userText);
+    assert.equal(suffix.assistantText, TURNS[0]!.assistantText);
+    assert.deepEqual(suffix.nativeIds, built.written[0]!.nativeIds);
+  }
+});
+
 test('unparseable lines are skipped, not rewritten or fatal', async () => {
   const logText = `not json\n${await readFile(GOLDEN, 'utf8')}\n{unterminated`;
   const built = buildClaudeCodeHistoryEntries(logText, TURNS, NOW);
@@ -264,7 +434,7 @@ test('unparseable lines are skipped, not rewritten or fatal', async () => {
 test('appendClaudeCodeSessionHistory reports a missing log as sessionLogNotFound', async () => {
   const configDir = await mkdtemp(join(tmpdir(), 'openp-claude-cfg-'));
   await assert.rejects(
-    () => appendClaudeCodeSessionHistory({ sessionId: randomUUID(), cwd: FIXTURE_CWD, turns: TURNS, configDir }),
+    () => appendClaudeCodeSessionHistory({ sessionId: randomUUID(), cwd: FIXTURE_CWD, turns: TURNS, persistPreparedAppend, configDir }),
     (error) => error instanceof OpenPError && error.exitCode === 41,
   );
 });
@@ -274,12 +444,12 @@ test('an aborted signal rejects before the write and leaves the log untouched', 
   const configDir = await mkdtemp(join(tmpdir(), 'openp-claude-cfg-'));
   const logPath = resolveClaudeCodeSessionLogPath(sessionId, FIXTURE_CWD, configDir);
   await mkdir(dirname(logPath), { recursive: true });
-  const original = await readFile(GOLDEN);
+  const original = Buffer.from(logForSession(await readFile(GOLDEN, 'utf8'), sessionId, FIXTURE_CWD));
   await writeFile(logPath, original);
   const controller = new AbortController();
   controller.abort();
   await assert.rejects(
-    () => appendClaudeCodeSessionHistory({ sessionId, cwd: FIXTURE_CWD, turns: TURNS, configDir, signal: controller.signal }),
+    () => appendClaudeCodeSessionHistory({ sessionId, cwd: FIXTURE_CWD, turns: TURNS, persistPreparedAppend, configDir, signal: controller.signal }),
     isAbortError,
   );
   assert.equal(

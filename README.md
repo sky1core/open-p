@@ -220,6 +220,22 @@ into a backend-neutral logical-turn IR; each target backend Writer converts that
 records. Backend-native logs are never parsed by another backend. The normal turn output envelope is
 not used; success is exactly one JSON line under `seed`.
 
+All native source/target routes use that same IR boundary; there are no pair-specific direct
+converters:
+
+| Source → Target | Claude | Codex | Kiro | OpenCode |
+|---|:---:|:---:|:---:|:---:|
+| Claude | ✓ | ✓ | ✓ | ✓ |
+| Codex | ✓ | ✓ | ✓ | ✓ |
+| Kiro | ✓ | ✓ | ✓ | ✓ |
+| OpenCode | ✓ | ✓ | ✓ | ✓ |
+
+Strict external IR v1 enters at the same logical-turn boundary and can create a session for any of
+the four targets.
+
+OpenCode native-session reading currently accepts only the verified `info.version == "1.17.11"`
+export format. Missing or different export versions fail closed instead of being guessed compatible.
+
 Create a new target session from a native source:
 
 ```bash
@@ -254,7 +270,8 @@ External IR v1:
 }
 ```
 
-`--input-ir` is create-only and cannot be combined with `--resume`. `--history` is not supported.
+The IR file must be valid UTF-8; malformed byte sequences are rejected before JSON parsing or
+document hashing. `--input-ir` is create-only and cannot be combined with `--resume`. `--history` is not supported.
 In create mode, `--model`, `--effort`, and `--timeout` apply to the target bootstrap turn. In append
 mode, those options are rejected.
 
@@ -267,6 +284,15 @@ Example success output:
 `status` is `created`, `updated`, or `noop`. If the source and target logical turn sequences have
 diverged, or a backend session contains compaction/rollback/revert state that cannot be converted
 safely, seeding fails closed without guessing a transcript.
+
+Before reporting success, `openp` re-reads the target through its native Reader and durably records
+the logical-to-native mapping. If an append is interrupted after the complete native suffix lands,
+the next seed access or ordinary resume settles that exact suffix without replaying it; partial or
+conflicting native state—including a trailing incomplete record hidden from the logical-turn view—
+fails closed instead of being repaired by inference. A pending v2 state marker blocks an older
+client from resuming across that settlement boundary. Backend transient import artifacts are tracked
+only by an opaque cleanup token (never a transcript or path), cleaned immediately when possible, and
+cleaned again during exact recovery before the pending state is retired.
 
 ## Timeout and Interrupt
 

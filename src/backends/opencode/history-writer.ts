@@ -1,14 +1,32 @@
-import { randomBytes } from 'node:crypto';
-import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import type { Stats } from 'node:fs';
+import { chmod, lstat, mkdir, open, realpath, rmdir, unlink } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve } from 'node:path';
-import { createAbortError, throwIfAborted } from '../../core/abort.js';
-import type { AppendSessionHistoryResult, NativeWrittenTurn, SeedWriteTurn } from '../../core/backend.js';
+import { createAbortError, isAbortError, throwIfAborted } from '../../core/abort.js';
+import type {
+  AppendSessionHistoryInput,
+  AppendSessionHistoryResult,
+  CleanupPreparedSessionHistoryAppendInput,
+  NativeWrittenTurn,
+  SeedWriteTurn,
+} from '../../core/backend.js';
 import { EXIT_CODES, OpenPError } from '../../core/errors.js';
+import { syncDirectory } from '../../core/fs-durability.js';
+import { assertNativeAppendCandidate } from '../../core/native-append-preflight.js';
+import { isSafeSessionId } from '../../core/session-id.js';
 import { resolveOpenPStateRoot } from '../../core/state-root.js';
+import { isCanonicalUuidV4 } from '../../core/uuid.js';
 import { resolveOpenCodeBin } from './bin.js';
 import { buildOpenCodeHistoryEnv } from './env.js';
 import { runOpenCodeExec, type OpenCodeExecResult } from './exec-runner.js';
+import {
+  assertOpenCodeExportNativeIds,
+  assertOpenCodeExportSessionIdentity,
+  extractOpenCodeNativeTurns,
+  hasPendingOpenCodeToolCall,
+  openCodeNativeStateDigest,
+} from './native-reader.js';
+import { parseOpenCodeNativeId } from './native-id.js';
 import { buildLocalhostOnlySandboxCommand } from './sandbox.js';
 
 // The `Imported session: <id>` line OpenCode prints to stdout after `opencode import <file>`.
@@ -17,18 +35,19 @@ const IMPORTED_SESSION_RE = /^Imported session:\s*(\S+)\s*$/;
 // Base62 alphabet for the random tail of `msg_`/`prt_` ids.
 const BASE62 = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
 
-// Native OpenCode ids are exactly `msg_`/`prt_` + 12 lowercase-hex chars (a time segment that
-// ascends with creation time) + 14 base62 chars. OpenCode sorts messages by id, so seeded ids must
-// carry segments larger than every existing message/part id or the session's message order breaks
-// on resume (live-verified in the 20260714-201500-opencode-id-ordering reference). Only ids
-// matching the full native shape count as ordering candidates: a near-native id (12-hex head but a
-// missing/short/non-base62 tail) is malformed and must not seed the segment counter.
-const NATIVE_ID_RE = /^(?:msg|prt)_([0-9a-f]{12})[0-9A-Za-z]{14}$/;
+// Native OpenCode ids are exactly `msg_`/`prt_` + 12 lowercase-hex chars (an allocation segment)
+// + 14 base62 chars. Seeded ids must carry segments larger than every existing message/part id or
+// an immediate resumed turn can fail before a model call in observed OpenCode behavior. This native-id continuation rule is independent
+// from the separate `info.time.created` export-ordering rule. Only ids matching the full native
+// shape count as allocation candidates: a near-native id (12-hex head but a missing/short/non-base62
+// tail) is malformed and must not seed the segment counter.
 const ID_SEGMENT_HEX_LENGTH = 12;
 const ID_SUFFIX_LENGTH = 14;
 // Largest value a native 12-hex segment can hold (48 bits); one more hex digit would break the
-// native id shape and with it opencode's id-based message ordering.
+// native id shape and with it OpenCode's native-id continuation contract.
 const MAX_ID_SEGMENT = 0xffffffffffffn;
+const OPENCODE_IMPORT_FILENAME = 'import.json';
+const SYSTEM_TEMP_ROOT = '/tmp';
 
 interface JsonObject {
   [key: string]: unknown;
@@ -42,9 +61,13 @@ export async function appendOpenCodeSessionHistory(input: {
   readonly sessionId: string;
   readonly cwd: string;
   readonly turns: readonly SeedWriteTurn[];
+  readonly persistPreparedAppend: AppendSessionHistoryInput['persistPreparedAppend'];
   readonly signal?: AbortSignal;
 }): Promise<AppendSessionHistoryResult> {
   throwIfAborted(input.signal);
+  if (!isSafeSessionId(input.sessionId)) {
+    throw new OpenPError('OpenCode history append received an unsafe session id', EXIT_CODES.protocolViolation);
+  }
   const bin = resolveOpenCodeBin();
   const historyEnv = await buildOpenCodeHistoryEnv(input.cwd, process.env);
   const stateRoot = resolveOpenPStateRoot(input.cwd, process.env);
@@ -62,11 +85,26 @@ export async function appendOpenCodeSessionHistory(input: {
   });
   assertOpenCodeHistoryOk('export', exportResult, input.signal);
 
-  const built = buildOpenCodeImport(exportResult.stdout, input.turns);
+  const before = extractOpenCodeNativeTurns(exportResult.stdout, input.sessionId);
+  const built = prepareOpenCodeHistoryAppend(exportResult.stdout, input.turns, Date.now(), input.sessionId);
+  const cleanupToken = randomUUID();
+  await input.persistPreparedAppend({
+    before,
+    beforeNativeStateDigest: openCodeNativeStateDigest(exportResult.stdout),
+    candidateNativeStateDigest: openCodeNativeStateDigest(built.doc),
+    turns: built.written,
+    cleanupToken,
+  });
 
-  const temp = await createOpenCodeImportTempFile(built.doc, stateRoot, importTempRoot);
   let primaryError: unknown = null;
+  let cleanupSettled = false;
   try {
+    const temp = await createOpenCodeImportTempFile({
+      doc: built.doc,
+      sessionId: input.sessionId,
+      cleanupToken,
+      stateRoot,
+    });
     throwIfAborted(input.signal);
     const importCommand = buildLocalhostOnlySandboxCommand(bin, ['import', temp.path]);
     const importResult = await runOpenCodeExec({
@@ -86,49 +124,265 @@ export async function appendOpenCodeSessionHistory(input: {
         EXIT_CODES.protocolViolation,
       );
     }
-    return { turns: built.written };
+    try {
+      await cleanupOpenCodePreparedSessionHistoryAppend({
+        sessionId: input.sessionId,
+        cwd: input.cwd,
+        token: cleanupToken,
+      });
+      cleanupSettled = true;
+      return { sessionId: input.sessionId, turns: built.written };
+    } catch {
+      cleanupSettled = true;
+      return {
+        sessionId: input.sessionId,
+        turns: built.written,
+        postWriteCleanupFailure: {
+          message: 'OpenCode seed import document cleanup failed after native commit',
+        },
+      };
+    }
   } catch (error) {
     primaryError = error;
     throw error;
   } finally {
-    try {
-      await temp.cleanup();
-    } catch (cleanupError) {
-      if (primaryError === null) {
-        throw cleanupError;
+    if (!cleanupSettled) {
+      try {
+        await cleanupOpenCodePreparedSessionHistoryAppend({
+          sessionId: input.sessionId,
+          cwd: input.cwd,
+          token: cleanupToken,
+        });
+      } catch (cleanupError) {
+        if (primaryError === null) {
+          throw cleanupError;
+        }
+        throw combineOpenCodePrimaryAndCleanupFailure(primaryError, cleanupError);
       }
     }
   }
 }
 
-export async function createOpenCodeImportTempFile(
-  doc: string,
-  stateRoot: string,
-  requestedTempRoot: string = tmpdir(),
-): Promise<{
+export function prepareOpenCodeHistoryAppend(
+  exportJson: string,
+  turns: readonly SeedWriteTurn[],
+  nowMs: number,
+  expectedSessionId: string,
+): { readonly doc: string; readonly written: readonly NativeWrittenTurn[] } {
+  const before = extractOpenCodeNativeTurns(exportJson, expectedSessionId);
+  const built = buildOpenCodeImport(exportJson, turns, nowMs, expectedSessionId);
+  const candidate = extractOpenCodeNativeTurns(built.doc, expectedSessionId);
+  assertNativeAppendCandidate({
+    backend: 'OpenCode',
+    before,
+    candidate,
+    requested: turns,
+    written: built.written,
+  });
+  return built;
+}
+
+export async function createOpenCodeImportTempFile(input: {
+  readonly doc: string;
+  readonly sessionId: string;
+  readonly cleanupToken: string;
+  readonly stateRoot: string;
+}): Promise<{
   readonly path: string;
   readonly cleanup: () => Promise<void>;
 }> {
-  const tempRoot = await resolveOpenCodeImportTempRoot(stateRoot, requestedTempRoot);
-  const dir = await mkdtemp(join(tempRoot, 'openp-opencode-seed-'));
-  const path = join(dir, 'import.json');
+  assertOpenCodeCleanupIdentity(input.sessionId, input.cleanupToken);
+  const tempRoot = await resolveOpenCodeImportTempRoot(input.stateRoot);
+  const { dir, path } = openCodeImportTempPaths(tempRoot, input.sessionId, input.cleanupToken);
+  await mkdir(dir, { mode: 0o700 });
+  await chmod(dir, 0o700);
+  assertPrivateOpenCodeTempDirectory(await lstat(dir));
+  await syncDirectory(tempRoot);
+  const file = await open(path, 'wx', 0o600);
   try {
-    await writeFile(path, doc, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
-  } catch (error) {
-    await rm(dir, { force: true, recursive: true }).catch(() => undefined);
-    throw error;
+    await file.writeFile(input.doc, 'utf8');
+    await file.chmod(0o600);
+    await file.sync();
+  } finally {
+    await file.close();
   }
+  await syncDirectory(dir);
   return {
     path,
-    cleanup: () => rm(dir, { force: true, recursive: true }),
+    cleanup: () => removeOpenCodeImportTempFile(tempRoot, dir, path),
   };
+}
+
+// Cleanup re-derives the only allowed locator from the validated session id and UUID token. Core
+// calls this after native/provenance settlement, before retiring the pending marker and journal.
+export async function cleanupOpenCodePreparedSessionHistoryAppend(
+  input: CleanupPreparedSessionHistoryAppendInput,
+): Promise<void> {
+  throwIfAborted(input.signal);
+  assertOpenCodeCleanupIdentity(input.sessionId, input.token);
+  const stateRoot = resolveOpenPStateRoot(input.cwd, process.env);
+  const tempRoot = await resolveOpenCodeImportTempRoot(stateRoot);
+  const { dir, path } = openCodeImportTempPaths(tempRoot, input.sessionId, input.token);
+  await removeOpenCodeImportTempFile(tempRoot, dir, path);
+}
+
+async function removeOpenCodeImportTempFile(tempRoot: string, dir: string, path: string): Promise<void> {
+  let dirInfo;
+  try {
+    dirInfo = await lstat(dir);
+  } catch (error) {
+    if (isNotFoundError(error)) {
+      try {
+        // A previous attempt may have removed the locator before failing its parent fsync.
+        // Do not report cleanup settled until the absence is durable in the fixed temp root.
+        await syncDirectory(tempRoot);
+        return;
+      } catch (syncError) {
+        throw openCodeCleanupError(syncError);
+      }
+    }
+    throw openCodeCleanupError(error);
+  }
+  dirInfo = await normalizePrivateOpenCodeTempDirectory(dir, dirInfo);
+
+  try {
+    const fileInfo = await lstat(path);
+    const uid = currentUid();
+    const fileMode = fileInfo.mode & 0o777;
+    if (!fileInfo.isFile() || fileInfo.isSymbolicLink() || (fileMode & 0o177) !== 0 ||
+      (uid !== null && fileInfo.uid !== uid)) {
+      throw new OpenPError('OpenCode seed cleanup file failed validation', EXIT_CODES.protocolViolation);
+    }
+    await unlink(path);
+    await syncDirectory(dir);
+  } catch (error) {
+    if (!isNotFoundError(error)) {
+      throw openCodeCleanupError(error);
+    }
+    try {
+      await syncDirectory(dir);
+    } catch (syncError) {
+      throw openCodeCleanupError(syncError);
+    }
+  }
+  try {
+    await rmdir(dir);
+  } catch (error) {
+    if (!isNotFoundError(error)) {
+      throw openCodeCleanupError(error);
+    }
+  }
+  try {
+    // Also sync on the ENOENT retry path after an earlier successful rmdir.
+    await syncDirectory(tempRoot);
+  } catch (error) {
+    throw openCodeCleanupError(error);
+  }
+}
+
+function openCodeImportTempPaths(
+  tempRoot: string,
+  sessionId: string,
+  cleanupToken: string,
+): { readonly dir: string; readonly path: string } {
+  const sessionDigest = createHash('sha256').update(sessionId, 'utf8').digest('hex').slice(0, 32);
+  const dir = join(tempRoot, `openp-opencode-seed-${sessionDigest}-${cleanupToken}`);
+  return { dir, path: join(dir, OPENCODE_IMPORT_FILENAME) };
+}
+
+function assertOpenCodeCleanupIdentity(sessionId: string, cleanupToken: string): void {
+  if (!isSafeSessionId(sessionId)) {
+    throw new OpenPError('OpenCode seed cleanup received an unsafe session id', EXIT_CODES.protocolViolation);
+  }
+  if (!isCanonicalUuidV4(cleanupToken)) {
+    throw new OpenPError('OpenCode seed cleanup token must be a UUIDv4', EXIT_CODES.protocolViolation);
+  }
+}
+
+function assertPrivateOpenCodeTempDirectory(info: Stats, exactMode = true): void {
+  const uid = currentUid();
+  const mode = info.mode & 0o777;
+  const privateMode = exactMode ? mode === 0o700 : (mode & 0o077) === 0;
+  if (!info.isDirectory() || info.isSymbolicLink() || !privateMode ||
+    (uid !== null && info.uid !== uid)) {
+    throw new OpenPError('OpenCode seed cleanup directory failed validation', EXIT_CODES.protocolViolation);
+  }
+}
+
+async function normalizePrivateOpenCodeTempDirectory(path: string, info: Stats): Promise<Stats> {
+  assertPrivateOpenCodeTempDirectory(info, false);
+  if ((info.mode & 0o777) === 0o700) {
+    return info;
+  }
+  try {
+    await chmod(path, 0o700);
+    const normalized = await lstat(path);
+    assertPrivateOpenCodeTempDirectory(normalized);
+    return normalized;
+  } catch (error) {
+    throw openCodeCleanupError(error);
+  }
+}
+
+function openCodeCleanupError(error: unknown): OpenPError {
+  if (error instanceof OpenPError) {
+    return error;
+  }
+  return new OpenPError(
+    `OpenCode seed transient artifact cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
+    EXIT_CODES.protocolViolation,
+  );
+}
+
+function isNotFoundError(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error
+    && (error as { readonly code?: unknown }).code === 'ENOENT';
+}
+
+export function combineOpenCodePrimaryAndCleanupFailure(
+  primaryError: unknown,
+  cleanupError: unknown,
+): Error {
+  const message = `${primaryError instanceof Error ? primaryError.message : String(primaryError)}; ` +
+    `OpenCode seed import document cleanup also failed: ` +
+    `${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`;
+  if (isAbortError(primaryError)) {
+    return createAbortError(message, primaryError.interruptedReasoningContent);
+  }
+  if (primaryError instanceof OpenPError) {
+    return new OpenPError(message, primaryError.exitCode, {
+      reasonCode: primaryError.reasonCode,
+      details: {
+        ...primaryError.details,
+        cleanupFailed: true,
+      },
+    });
+  }
+  return new OpenPError(message, EXIT_CODES.backendStartFailed, {
+    details: { cleanupFailed: true },
+  });
 }
 
 export async function resolveOpenCodeImportTempRoot(
   stateRoot: string,
-  requestedTempRoot: string = tmpdir(),
 ): Promise<string> {
-  const tempRoot = await canonicalPath(requestedTempRoot);
+  const systemTempRoot = await canonicalPath(SYSTEM_TEMP_ROOT);
+  const uid = currentUid();
+  const tempRoot = join(systemTempRoot, `openp-opencode-seed-${uid ?? 'nouid'}`);
+  try {
+    await mkdir(tempRoot, { mode: 0o700 });
+    await chmod(tempRoot, 0o700);
+    await syncDirectory(systemTempRoot);
+  } catch (error) {
+    if (!isAlreadyExistsError(error)) {
+      throw error;
+    }
+  }
+  await assertOpenCodeImportTempRoot(tempRoot, stateRoot);
+  return tempRoot;
+}
+
+async function assertOpenCodeImportTempRoot(tempRoot: string, stateRoot: string): Promise<void> {
   const canonicalStateRoot = await canonicalPath(stateRoot);
   if (isPathInside(tempRoot, canonicalStateRoot)) {
     throw new OpenPError(
@@ -136,7 +390,17 @@ export async function resolveOpenCodeImportTempRoot(
       EXIT_CODES.protocolViolation,
     );
   }
-  return tempRoot;
+  let info;
+  try {
+    info = await lstat(tempRoot);
+  } catch (error) {
+    throw openCodeCleanupError(error);
+  }
+  try {
+    await normalizePrivateOpenCodeTempDirectory(tempRoot, info);
+  } catch {
+    throw new OpenPError('OpenCode seed temp root failed ownership/private-directory validation', EXIT_CODES.protocolViolation);
+  }
 }
 
 async function canonicalPath(path: string): Promise<string> {
@@ -152,6 +416,15 @@ function isPathInside(path: string, parent: string): boolean {
   return child === '' || (!child.startsWith('..') && !isAbsolute(child));
 }
 
+function currentUid(): number | null {
+  return typeof process.getuid === 'function' ? process.getuid() : null;
+}
+
+function isAlreadyExistsError(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error
+    && (error as { readonly code?: unknown }).code === 'EEXIST';
+}
+
 // Pure transform (unit-test surface): an `opencode export` JSON string plus the caller's turns ->
 // an `opencode import` document JSON string. Existing messages are preserved verbatim and the new
 // text-only messages are appended. The document-level `info.id` (the upsert key) is never changed;
@@ -162,14 +435,16 @@ export function buildOpenCodeImportDoc(
   exportJson: string,
   turns: readonly SeedWriteTurn[],
   nowMs: number = Date.now(),
+  expectedSessionId?: string,
 ): string {
-  return buildOpenCodeImport(exportJson, turns, nowMs).doc;
+  return buildOpenCodeImport(exportJson, turns, nowMs, expectedSessionId).doc;
 }
 
 export function buildOpenCodeImport(
   exportJson: string,
   turns: readonly SeedWriteTurn[],
   nowMs: number = Date.now(),
+  expectedSessionId?: string,
 ): { readonly doc: string; readonly written: readonly NativeWrittenTurn[] } {
   let doc: unknown;
   try {
@@ -180,6 +455,8 @@ export function buildOpenCodeImport(
   if (!isJsonObject(doc) || !Array.isArray(doc.messages)) {
     throw new OpenPError('OpenCode export output has no messages array', EXIT_CODES.protocolViolation);
   }
+  assertOpenCodeExportNativeIds(doc);
+  assertOpenCodeExportSessionIdentity(doc, expectedSessionId);
 
   const messages = doc.messages;
   const userTemplate = findLastTextMessage(messages, 'user');
@@ -195,7 +472,15 @@ export function buildOpenCodeImport(
   // parents onto the freshly appended message before it.
   let prevMessageId = requireMessageId(messages[messages.length - 1]);
   const nextSeedId = createSeedIdAllocator(messages);
-  let created = nowMs;
+  const appendedMessageCount = turns.length * 2;
+  const existingMaxTime = maxExistingMessageTime(messages);
+  let created = nowMs - appendedMessageCount;
+  if (appendedMessageCount > 0 && existingMaxTime !== null && created <= existingMaxTime) {
+    throw new OpenPError(
+      'OpenCode export leaves no non-future timestamp range for seeded messages',
+      EXIT_CODES.protocolViolation,
+    );
+  }
   const appended: JsonObject[] = [];
   const written: NativeWrittenTurn[] = [];
   for (const turn of turns) {
@@ -206,11 +491,11 @@ export function buildOpenCodeImport(
     userMessage.parts = [buildTextPart(userTemplate, turn.userText, userMessageId, nextSeedId('prt_'), { start: created })];
     appended.push(userMessage);
     prevMessageId = userMessageId;
-    created += 3000;
+    created += 1;
 
     const assistantMessage = structuredClone(assistantTemplate);
     const assistantMessageId = nextSeedId('msg_');
-    const completed = created + 1000;
+    const completed = created + 1;
     assistantMessage.info.id = assistantMessageId;
     assistantMessage.info.time = { created, completed };
     assistantMessage.info.parentID = prevMessageId;
@@ -231,11 +516,27 @@ export function buildOpenCodeImport(
         completionId: assistantMessageId,
       },
     });
-    created += 3000;
+    created += 1;
   }
 
   doc.messages = [...messages, ...appended];
   return { doc: JSON.stringify(doc), written };
+}
+
+function maxExistingMessageTime(messages: readonly unknown[]): number | null {
+  let max: number | null = null;
+  for (const message of messages) {
+    if (!isJsonObject(message) || !isJsonObject(message.info) || !isJsonObject(message.info.time)) {
+      continue;
+    }
+    for (const key of ['created', 'completed'] as const) {
+      const value = message.info.time[key];
+      if (typeof value === 'number' && Number.isFinite(value) && (max === null || value > max)) {
+        max = value;
+      }
+    }
+  }
+  return max;
 }
 
 // A message carrying `info` and at least one `{type:"text", text:string}` part.
@@ -250,7 +551,10 @@ function findLastTextMessage(messages: unknown[], role: 'user' | 'assistant'): O
     if (!isJsonObject(message) || !isJsonObject(message.info) || message.info.role !== role) {
       continue;
     }
-    if (!Array.isArray(message.parts) || !message.parts.some(isTextPart)) {
+    if (!Array.isArray(message.parts) || !message.parts.some(isPortableTextPart)) {
+      continue;
+    }
+    if (role === 'assistant' && !isSuccessfulAssistantTemplate(message)) {
       continue;
     }
     return message as OpenCodeTemplateMessage;
@@ -265,8 +569,13 @@ function buildTextPart(
   partId: string,
   freshTime: JsonObject,
 ): JsonObject {
-  const textPart = template.parts.find(isTextPart)!;
+  const textPart = template.parts.find(isPortableTextPart)!;
   const part: JsonObject = { ...structuredClone(textPart), id: partId, text, messageID: messageId };
+  // Synthetic and ignored text is backend-owned context, not caller/final-answer evidence. A seed
+  // append must always create an ordinary portable text part even when a nearby native template
+  // carries one of those flags.
+  delete part.synthetic;
+  delete part.ignored;
   // Assistant text parts natively carry `time: {start, end}` (user text parts carry none). A stale
   // template timestamp must not survive into a seeded part, so when the template has a time key it
   // is regenerated from the seeded message's own info.time; when it has none, none is created.
@@ -303,15 +612,12 @@ function createSeedIdAllocator(messages: unknown[]): (prefix: 'msg_' | 'prt_') =
 
 function maxIdSegment(messages: unknown[]): bigint | null {
   let max: bigint | null = null;
-  const consider = (id: unknown): void => {
-    if (typeof id !== 'string') {
-      return;
+  const consider = (id: unknown, kind: 'msg' | 'prt'): void => {
+    const parsed = parseOpenCodeNativeId(id, kind);
+    if (!parsed) {
+      throw new OpenPError('OpenCode export contains a malformed native id', EXIT_CODES.protocolViolation);
     }
-    const match = id.match(NATIVE_ID_RE);
-    if (!match) {
-      return;
-    }
-    const segment = BigInt(`0x${match[1]!}`);
+    const segment = parsed.segment;
     if (max === null || segment > max) {
       max = segment;
     }
@@ -321,12 +627,12 @@ function maxIdSegment(messages: unknown[]): bigint | null {
       continue;
     }
     if (isJsonObject(message.info)) {
-      consider(message.info.id);
+      consider(message.info.id, 'msg');
     }
     if (Array.isArray(message.parts)) {
       for (const part of message.parts) {
         if (isJsonObject(part)) {
-          consider(part.id);
+          consider(part.id, 'prt');
         }
       }
     }
@@ -393,8 +699,19 @@ function requireMessageId(message: unknown): string {
   throw new OpenPError('OpenCode export message is missing an id', EXIT_CODES.protocolViolation);
 }
 
-function isTextPart(part: unknown): part is JsonObject {
-  return isJsonObject(part) && part.type === 'text' && typeof part.text === 'string';
+function isPortableTextPart(part: unknown): part is JsonObject {
+  return isJsonObject(part) && part.type === 'text' && typeof part.text === 'string' &&
+    part.synthetic !== true && part.ignored !== true;
+}
+
+function isSuccessfulAssistantTemplate(message: JsonObject): boolean {
+  const info = message.info as JsonObject;
+  return !Object.prototype.hasOwnProperty.call(info, 'error') &&
+    typeof info.finish === 'string' && info.finish.length > 0 &&
+    !['tool-calls', 'unknown', 'content-filter', 'error'].includes(info.finish) &&
+    isJsonObject(info.time) && typeof info.time.completed === 'number' &&
+    Number.isFinite(info.time.completed) && info.time.completed >= 0 &&
+    !hasPendingOpenCodeToolCall(message);
 }
 
 function isJsonObject(value: unknown): value is JsonObject {

@@ -16,6 +16,7 @@ import {
   normalizeNativeReadWithProvenance,
   planSeedAppend,
   withAppendedProvenanceEntries,
+  type SeedProvenanceState,
 } from '../src/core/seed-provenance.js';
 import { loadExternalSeedIrFile } from '../src/core/seed-ir.js';
 
@@ -85,15 +86,28 @@ test('external IR parses strict completed user/assistant pairs and namespaces id
 });
 
 test('external IR rejects unknown keys, empty text, duplicate ids, and non-pair shapes', () => {
-  rejects(() => parseExternalSeedIrJson('not json', '/tmp/ir.json'));
-  rejects(() => parseExternalSeedIrJson('[1,2,3]', '/tmp/ir.json'));
-  rejects(() => parseExternalSeedIrJson('{"schemaVersion":1,"turns":[]}', '/tmp/ir.json'));
-  rejects(() => parseExternalSeedIrJson('{"schemaVersion":2,"turns":[{"id":"x","user":{"text":"u"},"assistant":{"text":"a"}}]}', '/tmp/ir.json'));
-  rejects(() => parseExternalSeedIrJson('{"schemaVersion":1,"turns":[{"id":"x","user":{"text":"u"},"assistant":{"text":"a"}}],"extra":1}', '/tmp/ir.json'));
-  rejects(() => parseExternalSeedIrJson('{"schemaVersion":1,"turns":[{"id":"x","user":{"text":"u"},"assistant":{"text":"a"},"extra":1}]}', '/tmp/ir.json'));
-  rejects(() => parseExternalSeedIrJson('{"schemaVersion":1,"turns":[{"id":"x","user":{"text":""},"assistant":{"text":"a"}}]}', '/tmp/ir.json'));
-  rejects(() => parseExternalSeedIrJson('{"schemaVersion":1,"turns":[{"id":"x","user":{"text":"u"},"assistant":{"text":"a"}},{"id":"x","user":{"text":"u2"},"assistant":{"text":"a2"}}]}', '/tmp/ir.json'));
-  rejects(() => parseExternalSeedIrJson('{"schemaVersion":1,"turns":[{"id":"x","role":"user","text":"u"}]}', '/tmp/ir.json'));
+  const malformed = [
+    'not json',
+    '[1,2,3]',
+    '{"schemaVersion":1,"turns":[]}',
+    '{"schemaVersion":2,"turns":[{"id":"x","user":{"text":"u"},"assistant":{"text":"a"}}]}',
+    '{"schemaVersion":1,"turns":[{"id":"x","user":{"text":"u"},"assistant":{"text":"a"}}],"extra":1}',
+    '{"schemaVersion":1,"turns":[{"id":"x","user":{"text":"u"},"assistant":{"text":"a"},"extra":1}]}',
+    '{"schemaVersion":1,"turns":[{"id":"","user":{"text":"u"},"assistant":{"text":"a"}}]}',
+    '{"schemaVersion":1,"turns":[{"id":1,"user":{"text":"u"},"assistant":{"text":"a"}}]}',
+    '{"schemaVersion":1,"turns":[{"id":"x","user":null,"assistant":{"text":"a"}}]}',
+    '{"schemaVersion":1,"turns":[{"id":"x","user":{"text":"u","extra":true},"assistant":{"text":"a"}}]}',
+    '{"schemaVersion":1,"turns":[{"id":"x","user":{"text":1},"assistant":{"text":"a"}}]}',
+    '{"schemaVersion":1,"turns":[{"id":"x","user":{"text":"u"},"assistant":[]}]}',
+    '{"schemaVersion":1,"turns":[{"id":"x","user":{"text":"u"},"assistant":{"text":"a","extra":true}}]}',
+    '{"schemaVersion":1,"turns":[{"id":"x","user":{"text":"u"},"assistant":{"text":""}}]}',
+    '{"schemaVersion":1,"turns":[{"id":"x","user":{"text":"u"},"assistant":{"text":1}}]}',
+    '{"schemaVersion":1,"turns":[{"id":"x","user":{"text":"u"},"assistant":{"text":"a"}},{"id":"x","user":{"text":"u2"},"assistant":{"text":"a2"}}]}',
+    '{"schemaVersion":1,"turns":[{"id":"x","role":"user","text":"u"}]}',
+  ];
+  for (const text of malformed) {
+    rejects(() => parseExternalSeedIrJson(text, '/tmp/ir.json'));
+  }
 });
 
 test('loadExternalSeedIrFile reads and validates a strict IR file', async () => {
@@ -106,6 +120,21 @@ test('loadExternalSeedIrFile reads and validates a strict IR file', async () => 
     () => loadExternalSeedIrFile(join(dir, 'missing.json')),
     (error) => error instanceof OpenPError && error.exitCode === 2,
   );
+});
+
+test('loadExternalSeedIrFile rejects malformed UTF-8 instead of merging distinct raw documents', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-seed-ir-invalid-utf8-'));
+  const prefix = Buffer.from('{"schemaVersion":1,"turns":[{"id":"one","user":{"text":"', 'utf8');
+  const suffix = Buffer.from('"},"assistant":{"text":"noted"}}]}', 'utf8');
+
+  for (const byte of [0x80, 0x81]) {
+    const path = join(dir, `ir-${byte.toString(16)}.json`);
+    await writeFile(path, Buffer.concat([prefix, Buffer.from([byte]), suffix]));
+    await assert.rejects(
+      () => loadExternalSeedIrFile(path),
+      (error) => error instanceof OpenPError && error.exitCode === 2,
+    );
+  }
 });
 
 test('native logical ids use native structure so repeated identical text stays distinct', () => {
@@ -204,6 +233,95 @@ test('provenance rejects a target mapping missing after native rollback', () => 
   );
 });
 
+test('provenance enforces one-to-one ordered logical and target mappings', () => {
+  const sourceRead = read('claude', 'A', [
+    { prefix: 'a1', userText: 'u1', assistantText: 'a1' },
+    { prefix: 'a2', userText: 'u2', assistantText: 'a2' },
+  ]);
+  const source = logicalTurnsFromNative(sourceRead);
+  const state = withAppendedProvenanceEntries(createInitialProvenanceState({
+    backend: 'codex',
+    sessionId: 'B',
+    bootstrap: [],
+  }), {
+    targetBackend: 'codex',
+    targetSessionId: 'B',
+    sourceRefs: nativeSourceRefs('claude', 'A', source),
+    written: source.map((turn, index) => written(turn.logicalId, turn.contentDigest, `b${index + 1}`)),
+  });
+  const targetRead = read('codex', 'B', [
+    { prefix: 'b1', userText: 'u1', assistantText: 'a1' },
+    { prefix: 'b2', userText: 'u2', assistantText: 'a2' },
+  ]);
+
+  const duplicateLogicalId: SeedProvenanceState = {
+    ...state,
+    entries: [state.entries[0]!, { ...state.entries[1]!, logicalId: state.entries[0]!.logicalId }],
+  };
+  rejects(() => normalizeNativeReadWithProvenance(targetRead, duplicateLogicalId), 40);
+
+  const duplicateTarget: SeedProvenanceState = {
+    ...state,
+    entries: [state.entries[0]!, {
+      ...state.entries[1]!,
+      target: { ...state.entries[1]!.target, nativeIds: state.entries[0]!.target.nativeIds },
+    }],
+  };
+  rejects(() => normalizeNativeReadWithProvenance(targetRead, duplicateTarget), 40);
+
+  const forgedSameSessionSource: SeedProvenanceState = {
+    ...state,
+    entries: [{
+      ...state.entries[0]!,
+      source: { kind: 'native', backend: 'codex', sessionId: 'B', nativeIds: ids('b2') },
+    }, state.entries[1]!],
+  };
+  rejects(() => normalizeNativeReadWithProvenance(targetRead, forgedSameSessionSource), 40);
+
+  const reversedTargetRead = read('codex', 'B', [
+    { prefix: 'b2', userText: 'u2', assistantText: 'a2' },
+    { prefix: 'b1', userText: 'u1', assistantText: 'a1' },
+  ]);
+  rejects(() => normalizeNativeReadWithProvenance(reversedTargetRead, state), 40);
+
+  const bootstrapOverlap: SeedProvenanceState = { ...state, bootstrap: [ids('b1')] };
+  rejects(() => normalizeNativeReadWithProvenance(targetRead, bootstrapOverlap), 40);
+});
+
+test('provenance requires every recorded bootstrap mapping to remain present', () => {
+  const state = createInitialProvenanceState({
+    backend: 'codex',
+    sessionId: 'B',
+    bootstrap: [ids('bootstrap')],
+  });
+  rejects(() => normalizeNativeReadWithProvenance(read('codex', 'B', []), state), 40);
+});
+
+test('provenance requires bootstrap mappings to precede every seeded target mapping', () => {
+  const source = logicalTurnsFromNative(read('claude', 'A', [{
+    prefix: 'a1',
+    userText: 'source user',
+    assistantText: 'source answer',
+  }]));
+  const state = withAppendedProvenanceEntries(createInitialProvenanceState({
+    backend: 'codex',
+    sessionId: 'B',
+    bootstrap: [ids('bootstrap')],
+  }), {
+    targetBackend: 'codex',
+    targetSessionId: 'B',
+    bootstrap: [ids('bootstrap')],
+    sourceRefs: nativeSourceRefs('claude', 'A', source),
+    written: [written(source[0]!.logicalId, source[0]!.contentDigest, 'seeded')],
+  });
+  const reordered = read('codex', 'B', [
+    { prefix: 'seeded', userText: 'source user', assistantText: 'source answer' },
+    { prefix: 'bootstrap' },
+  ]);
+
+  rejects(() => normalizeNativeReadWithProvenance(reordered, state), 40);
+});
+
 test('append planning allows only equal target or strict source suffix', () => {
   const source = logicalTurnsFromNative(read('claude', 'A', [{ prefix: 'a1' }, { prefix: 'a2' }, { prefix: 'a3' }]));
   assert.equal(planSeedAppend(source.slice(0, 2), source.slice(0, 2)).status, 'noop');
@@ -212,4 +330,18 @@ test('append planning allows only equal target or strict source suffix', () => {
   assert.deepEqual(append.missing.map((turn) => turn.logicalId), [source[2]!.logicalId]);
   rejects(() => planSeedAppend(source.slice(0, 2), source), 40);
   rejects(() => planSeedAppend(source, [source[0]!, source[2]!]), 40);
+});
+
+test('append planning rejects same logical id with different content digest', () => {
+  const source = logicalTurnsFromNative(read('claude', 'A', [
+    { prefix: 'a1', userText: 'user', assistantText: 'answer' },
+    { prefix: 'a2', userText: 'next', assistantText: 'answer next' },
+  ]));
+  const changedPrefix = {
+    ...source[0]!,
+    assistantText: 'changed answer',
+    contentDigest: contentDigest(source[0]!.userText, 'changed answer'),
+  };
+
+  rejects(() => planSeedAppend(source, [changedPrefix]), 40);
 });

@@ -22,6 +22,7 @@ export interface CodexConfiguredBackendInstance {
 }
 
 const CONFIGURED_INSTANCE_BACKENDS = new Set<string>(['claude', 'codex']);
+const TOP_LEVEL_COMMANDS = new Set<string>(['auth-status', 'seed']);
 
 export function resolveConfiguredBackendInstancesPath(env: NodeJS.ProcessEnv = process.env): string {
   const base = resolveXdgConfigHome(env.XDG_CONFIG_HOME);
@@ -111,6 +112,9 @@ function parseConfiguredInstances(
     }
     if (options.builtInBackendIds.has(id)) {
       throw usageError(options.path, `instance id must not collide with built-in backend id: ${id}`);
+    }
+    if (TOP_LEVEL_COMMANDS.has(id)) {
+      throw usageError(options.path, `instance id must not collide with top-level command: ${id}`);
     }
 
     const config = asRecord(rawConfig);

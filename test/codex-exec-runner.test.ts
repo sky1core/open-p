@@ -205,7 +205,9 @@ test('runCodexExec force kills a process that ignores graceful interruption on a
     timeoutMs: 30000,
     signal: ac.signal,
     interruptGraceMs: 50,
-    terminateGraceMs: 50,
+    // Give the fixture's synchronous SIGTERM handler enough event-loop time even when the full
+    // serial suite is under load; the separate kill phase is still asserted below.
+    terminateGraceMs: 250,
     onStdoutLine: scheduleAbortAfterReady(ac, 0),
   });
 
