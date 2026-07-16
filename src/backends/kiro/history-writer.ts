@@ -265,7 +265,20 @@ async function removeControlledSeedTempDirectory(
     const fileInfo = await lstat(tmpPath);
     const uid = typeof process.getuid === 'function' ? process.getuid() : null;
     const fileMode = fileInfo.mode & 0o777;
-    const companionMode = (await stat(companionPath)).mode & 0o777;
+    let companionMode: number;
+    try {
+      companionMode = (await stat(companionPath)).mode & 0o777;
+    } catch (companionError) {
+      if (isNotFoundError(companionError)) {
+        // The temp file exists, so its ENOENT branch below must not classify a missing companion
+        // as temp-file absence: without the companion its mode reference cannot be validated.
+        throw new OpenPError(
+          `${backend} seed cleanup cannot validate the retained temp file because the session companion metadata file is missing`,
+          EXIT_CODES.protocolViolation,
+        );
+      }
+      throw companionError;
+    }
     const privatePreChmodMode = (fileMode & 0o177) === 0;
     if (!fileInfo.isFile() || fileInfo.isSymbolicLink() ||
       (fileMode !== companionMode && !privatePreChmodMode) ||

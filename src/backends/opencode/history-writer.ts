@@ -468,8 +468,9 @@ export function buildOpenCodeImport(
     );
   }
 
-  // A leading assistant turn parents onto the last existing message; otherwise each assistant
-  // parents onto the freshly appended message before it.
+  // Each appended assistant parents onto the user message appended just before it; appended user
+  // messages keep their template's parent linkage. The initial value here is overwritten before its
+  // first read — the call is kept for its validation that the last existing message carries an id.
   let prevMessageId = requireMessageId(messages[messages.length - 1]);
   const nextSeedId = createSeedIdAllocator(messages);
   const appendedMessageCount = turns.length * 2;

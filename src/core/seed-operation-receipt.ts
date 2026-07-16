@@ -666,35 +666,6 @@ function parseNativeIds(value: unknown, path: string): NativeTurnIds {
   return ids;
 }
 
-function parseSourceRef(value: unknown, path: string): SeedProvenanceSource {
-  const object = asObject(value);
-  if (object?.kind === 'native') {
-    const native = exactObject(value, ['kind', 'backend', 'sessionId', 'nativeIds']);
-    if (!native || !nonEmptyString(native.backend) || !nonEmptyString(native.sessionId) ||
-      !isSafeSessionId(native.sessionId)) {
-      throw stateError(`invalid seed operation receipt: ${path}`);
-    }
-    return {
-      kind: 'native',
-      backend: native.backend,
-      sessionId: native.sessionId,
-      nativeIds: parseNativeIds(native.nativeIds, path),
-    };
-  }
-  if (object?.kind === 'external-ir') {
-    const external = exactObject(value, ['kind', 'documentDigest', 'externalIdDigest']);
-    if (!external || !isSha256(external.documentDigest) || !isSha256(external.externalIdDigest)) {
-      throw stateError(`invalid seed operation receipt: ${path}`);
-    }
-    return {
-      kind: 'external-ir',
-      documentDigest: external.documentDigest as string,
-      externalIdDigest: external.externalIdDigest as string,
-    };
-  }
-  throw stateError(`invalid seed operation receipt: ${path}`);
-}
-
 function parseIndeterminateReason(value: unknown, path: string): 'creating-owner-ended-before-target-id' {
   if (value !== 'creating-owner-ended-before-target-id') {
     throw stateError(`invalid seed operation receipt: ${path}`);

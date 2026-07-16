@@ -87,7 +87,7 @@ export async function commitAppendTransaction(input: {
 }
 
 // An empty file needs no separator. A non-empty file needs a leading newline only when its last
-// byte is not already a line feed. ENOENT propagates to the caller (mapped to sessionLogNotFound).
+// byte is not already a line feed. ENOENT propagates to the caller unclassified.
 async function inspectFileEnd(path: string): Promise<{ readonly size: number; readonly endsWithNewline: boolean }> {
   const stats = await stat(path);
   if (stats.size === 0) {

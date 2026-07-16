@@ -2062,12 +2062,14 @@ test('persistent turn preserves explicit reasoning over answer draft when aborte
   const process = new PersistentClaudeCodeProcess(sessionId, signature(), dir, session, logPath, logPath, 0);
   const controller = new AbortController();
 
-  setTimeout(() => controller.abort(), 1_200);
   try {
     await assert.rejects(
       () => process.sendTurn('hello', {
         timeoutMs: 5_000,
         signal: controller.signal,
+        // Deterministic abort point: this callback fires only after the turn poller has recorded
+        // the logged reasoning as the interrupted draft, so the abort can never race past it.
+        onIntermediateReasoning: () => controller.abort(),
       }),
       (error) => {
         assert.equal((error as { readonly code?: unknown }).code, 'ABORT_ERR');

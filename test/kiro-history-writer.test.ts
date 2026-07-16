@@ -505,6 +505,31 @@ test('Kiro cleanup validates a retained temp file mode and symlink before unlink
   });
 });
 
+test('Kiro cleanup fails a retained temp file whose companion mode reference is missing', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'openp-kiro-cleanup-no-companion-home-'));
+  await withHome(home, async () => {
+    const sessionId = randomUUID();
+    const cleanupToken = randomUUID();
+    const logPath = resolveKiroSessionLogPath(sessionId, { HOME: home })!;
+    const tempDir = join(dirname(logPath), `.openp-seed-${cleanupToken}`);
+    const tempFile = join(tempDir, 'companion.tmp');
+    await mkdir(tempDir, { recursive: true, mode: 0o700 });
+    await writeFile(tempFile, 'retained companion', { mode: 0o600 });
+
+    await assert.rejects(
+      () => cleanupKiroPreparedSessionHistoryAppend({
+        sessionId,
+        cwd: FIXTURE_CWD,
+        token: cleanupToken,
+      }),
+      (error) => error instanceof OpenPError && error.exitCode === 40 &&
+        error.message.includes('companion metadata file is missing'),
+      'a missing companion must not be classified as temp-file absence',
+    );
+    assert.equal(await readFile(tempFile, 'utf8'), 'retained companion');
+  });
+});
+
 test('Kiro cleanup retries an absent locator until its parent-directory sync can succeed', async () => {
   const home = await mkdtemp(join(tmpdir(), 'openp-kiro-cleanup-retry-home-'));
   await withHome(home, async () => {

@@ -357,16 +357,22 @@ function classifyPrompt(record: JsonObject): 'not-prompt' | 'caller' | 'tool-onl
   return toolOnly ? 'tool-only' : 'unsupported';
 }
 
+// Mirrors the live turn path (session-log.ts extractAssistantMessageText): every `text` block's
+// data is concatenated in content order; non-text blocks (toolUse etc.) carry no portable text.
+// Tool-use records typically carry an empty `text` block, so text evidence is the extracted
+// text being non-empty — matching the live path's `if (text)` — not text-block presence.
 function textFromKiroRecord(record: JsonObject): string {
   const data = isObject(record.data) ? record.data : null;
-  if (!data || !isSingleTextContent(data.content)) return '';
-  return textFromKiroContent(data.content);
-}
-
-function textFromKiroContent(content: unknown): string {
-  if (!isSingleTextContent(content)) return '';
-  const block = (content as JsonObject[])[0]!;
-  return block.data as string;
+  const content = Array.isArray(data?.content) ? data.content : [];
+  let text = '';
+  for (const block of content) {
+    if (!isObject(block) || block.kind !== 'text') continue;
+    if (typeof block.data !== 'string') {
+      throw new OpenPError('Kiro native record has a text content block without string data', EXIT_CODES.protocolViolation);
+    }
+    text += block.data;
+  }
+  return text;
 }
 
 function isSingleTextContent(content: unknown): boolean {

@@ -206,6 +206,27 @@ test('Claude reader rejects a completion uuid reused as an assistant message id'
   rejects(() => extractClaudeNativeTurns(records.map((entry) => JSON.stringify(entry)).join('\n')));
 });
 
+test('Claude reader rejects a text-bearing assistant record without message.id', async () => {
+  const logText = await readFile(join(FIXTURES, 'redacted-claude-golden.jsonl'), 'utf8');
+  const parent = lastUuid(logText);
+  const missingMessageId = [
+    {
+      type: 'user', uuid: 'missing-message-id-user', parentUuid: parent,
+      message: { role: 'user', content: 'prompt' },
+    },
+    {
+      type: 'assistant', uuid: 'missing-message-id-assistant', parentUuid: 'missing-message-id-user',
+      message: { role: 'assistant', content: [{ type: 'text', text: 'answer' }] },
+    },
+    {
+      type: 'system', subtype: 'turn_duration', uuid: 'missing-message-id-completion',
+      parentUuid: 'missing-message-id-assistant', durationMs: 1,
+    },
+  ].map((entry) => JSON.stringify(entry)).join('\n');
+
+  rejects(() => extractClaudeNativeTurns(`${logText}\n${missingMessageId}\n`));
+});
+
 test('Claude reader rejects compaction summaries and compact boundaries', async () => {
   const logText = await readFile(join(FIXTURES, 'redacted-claude-golden.jsonl'), 'utf8');
   rejects(() => extractClaudeNativeTurns(`${logText}\n${JSON.stringify({ type: 'system', subtype: 'compact_boundary', uuid: 'c' })}\n`));
@@ -999,6 +1020,218 @@ test('Kiro reader rejects a completed partial portable pair but excludes complet
     `${logText}\n${JSON.stringify(toolOnly)}\n`,
     JSON.stringify(toolCompanion),
   ).length, 2);
+});
+
+test('Kiro reader extracts text from mixed text/toolUse assistant messages like the live turn path', () => {
+  const records = [
+    {
+      version: 'v1', kind: 'Prompt',
+      data: {
+        message_id: 'mixed-prompt',
+        content: [{ kind: 'text', data: 'run the tool workflow' }],
+        meta: { timestamp: 1 },
+      },
+    },
+    {
+      version: 'v1', kind: 'AssistantMessage',
+      data: {
+        message_id: 'mixed-assistant-1',
+        content: [{ kind: 'text', data: 'A' }, { kind: 'toolUse', data: { name: 'fsRead' } }],
+      },
+    },
+    {
+      version: 'v1', kind: 'ToolResults',
+      data: { message_id: 'mixed-tool-results-1', content: [{ kind: 'toolResult', data: 'ok' }] },
+    },
+    {
+      version: 'v1', kind: 'AssistantMessage',
+      data: {
+        message_id: 'mixed-assistant-2',
+        content: [{ kind: 'text', data: 'B' }, { kind: 'toolUse', data: { name: 'fsWrite' } }],
+      },
+    },
+    {
+      version: 'v1', kind: 'ToolResults',
+      data: { message_id: 'mixed-tool-results-2', content: [{ kind: 'toolResult', data: 'ok' }] },
+    },
+    {
+      version: 'v1', kind: 'AssistantMessage',
+      data: { message_id: 'mixed-assistant-3', content: [{ kind: 'text', data: 'C' }] },
+    },
+  ];
+  const companion = {
+    session_state: {
+      version: 'v1',
+      conversation_metadata: {
+        user_turn_metadatas: [{
+          message_ids: [
+            'mixed-prompt', 'mixed-assistant-1', 'mixed-tool-results-1',
+            'mixed-assistant-2', 'mixed-tool-results-2', 'mixed-assistant-3',
+          ],
+          end_reason: 'UserTurnEnd',
+          result: { Ok: { id: 'mixed-completion' } },
+        }],
+      },
+    },
+  };
+  const turns = extractKiroNativeTurns(
+    records.map((record) => JSON.stringify(record)).join('\n') + '\n',
+    JSON.stringify(companion),
+  );
+  assert.equal(turns.length, 1);
+  assert.equal(turns[0]!.userText, 'run the tool workflow');
+  assert.equal(turns[0]!.assistantText, 'A\n\nB\n\nC');
+  assert.deepEqual(
+    turns[0]!.nativeIds.assistantIds,
+    ['mixed-assistant-1', 'mixed-assistant-2', 'mixed-assistant-3'],
+  );
+  assert.equal(turns[0]!.nativeIds.userId, 'mixed-prompt');
+  assert.equal(turns[0]!.nativeIds.completionId, 'mixed-completion');
+});
+
+test('Kiro reader excludes empty-text tool-use assistant messages like the live turn path', () => {
+  // Raw evidence shape: tool-use assistant messages carry
+  // an empty text block, and only the final answer message carries non-empty text.
+  const records = [
+    {
+      version: 'v1', kind: 'Prompt',
+      data: {
+        message_id: 'empty-text-prompt',
+        content: [{ kind: 'text', data: 'run the tool workflow' }],
+        meta: { timestamp: 1 },
+      },
+    },
+    {
+      version: 'v1', kind: 'AssistantMessage',
+      data: {
+        message_id: 'empty-text-assistant-1',
+        content: [{ kind: 'text', data: '' }, { kind: 'toolUse', data: { name: 'read' } }],
+      },
+    },
+    {
+      version: 'v1', kind: 'ToolResults',
+      data: { message_id: 'empty-text-tool-results-1', content: [{ kind: 'toolResult', data: 'ok' }] },
+    },
+    {
+      version: 'v1', kind: 'AssistantMessage',
+      data: {
+        message_id: 'empty-text-assistant-2',
+        content: [{ kind: 'text', data: '' }, { kind: 'toolUse', data: { name: 'write' } }],
+      },
+    },
+    {
+      version: 'v1', kind: 'ToolResults',
+      data: { message_id: 'empty-text-tool-results-2', content: [{ kind: 'toolResult', data: 'ok' }] },
+    },
+    {
+      version: 'v1', kind: 'AssistantMessage',
+      data: { message_id: 'empty-text-assistant-3', content: [{ kind: 'text', data: '답변' }] },
+    },
+  ];
+  const companion = {
+    session_state: {
+      version: 'v1',
+      conversation_metadata: {
+        user_turn_metadatas: [{
+          message_ids: [
+            'empty-text-prompt', 'empty-text-assistant-1', 'empty-text-tool-results-1',
+            'empty-text-assistant-2', 'empty-text-tool-results-2', 'empty-text-assistant-3',
+          ],
+          end_reason: 'UserTurnEnd',
+          result: { Ok: { id: 'empty-text-completion' } },
+        }],
+      },
+    },
+  };
+  const turns = extractKiroNativeTurns(
+    records.map((record) => JSON.stringify(record)).join('\n') + '\n',
+    JSON.stringify(companion),
+  );
+  assert.equal(turns.length, 1);
+  assert.equal(turns[0]!.assistantText, '답변');
+  assert.deepEqual(turns[0]!.nativeIds.assistantIds, ['empty-text-assistant-3']);
+});
+
+test('Kiro reader excludes tool-only completed metadata whose assistant carries an empty text block', async () => {
+  const logText = await readFile(join(FIXTURES, 'redacted-kiro-golden.jsonl'), 'utf8');
+  const companion = JSON.parse(validKiroCompanion(
+    logText,
+    await readFile(join(FIXTURES, 'redacted-kiro-golden.json'), 'utf8'),
+  ));
+  const toolOnlyRecords = [
+    {
+      version: 'v1', kind: 'AssistantMessage',
+      data: {
+        message_id: 'tool-only-empty-text-assistant',
+        content: [{ kind: 'text', data: '' }, { kind: 'toolUse', data: { name: 'read' } }],
+      },
+    },
+    {
+      version: 'v1', kind: 'ToolResults',
+      data: { message_id: 'tool-only-empty-text-results', content: [{ kind: 'toolResult', data: 'ok' }] },
+    },
+  ].map((record) => JSON.stringify(record)).join('\n');
+  companion.session_state.conversation_metadata.user_turn_metadatas.push({
+    message_ids: ['tool-only-empty-text-assistant', 'tool-only-empty-text-results'],
+    end_reason: 'UserTurnEnd',
+    result: { Ok: { id: 'tool-only-empty-text-completion' } },
+  });
+
+  assert.equal(extractKiroNativeTurns(
+    `${logText}\n${toolOnlyRecords}\n`,
+    JSON.stringify(companion),
+  ).length, 2);
+});
+
+test('Kiro reader rejects a text content block whose data is not a string', () => {
+  const records = [
+    {
+      version: 'v1', kind: 'Prompt',
+      data: {
+        message_id: 'malformed-prompt',
+        content: [{ kind: 'text', data: 'caller text' }],
+        meta: { timestamp: 1 },
+      },
+    },
+    {
+      version: 'v1', kind: 'AssistantMessage',
+      data: { message_id: 'valid-assistant', content: [{ kind: 'text', data: 'A' }] },
+    },
+    // Must reject instead of silently skipping the malformed record and extracting only 'A'.
+    {
+      version: 'v1', kind: 'AssistantMessage',
+      data: { message_id: 'malformed-assistant', content: [{ kind: 'text', data: 42 }] },
+    },
+  ];
+  const companion = {
+    session_state: {
+      version: 'v1',
+      conversation_metadata: {
+        user_turn_metadatas: [{
+          message_ids: ['malformed-prompt', 'valid-assistant', 'malformed-assistant'],
+          end_reason: 'UserTurnEnd',
+          result: { Ok: { id: 'malformed-completion' } },
+        }],
+      },
+    },
+  };
+  rejects(() => extractKiroNativeTurns(
+    records.map((record) => JSON.stringify(record)).join('\n') + '\n',
+    JSON.stringify(companion),
+  ));
+});
+
+test('Kiro reader rejects an unreferenced mixed assistant message with text content', async () => {
+  const logText = await readFile(join(FIXTURES, 'redacted-kiro-golden.jsonl'), 'utf8');
+  const companionText = validKiroCompanion(logText, await readFile(join(FIXTURES, 'redacted-kiro-golden.json'), 'utf8'));
+  const unprovenMixed = JSON.stringify({
+    version: 'v1', kind: 'AssistantMessage',
+    data: {
+      message_id: 'unproven-mixed-assistant',
+      content: [{ kind: 'text', data: 'not in companion' }, { kind: 'toolUse', data: { name: 'fsRead' } }],
+    },
+  });
+  rejects(() => extractKiroNativeTurns(`${logText}\n${unprovenMixed}\n`, companionText));
 });
 
 test('native JSONL readers reject valid JSON non-object records', async () => {

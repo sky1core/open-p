@@ -292,7 +292,7 @@ function nativeAssistantId(entry: JsonObject): string {
   if (isObject(message) && typeof message.id === 'string' && message.id.length > 0) {
     return message.id;
   }
-  return nativeEntryId(entry);
+  throw new OpenPError('Claude assistant record is missing message.id', EXIT_CODES.protocolViolation);
 }
 
 function nativeEntryId(entry: JsonObject): string {
