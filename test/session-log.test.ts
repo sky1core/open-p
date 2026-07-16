@@ -2626,8 +2626,15 @@ test('does not report session log idle while JSONL progress keeps arriving', asy
       content: 'hello',
     },
   }));
-  const intermediate: string[] = [];
   const idleDiagnostics: unknown[] = [];
+  // Deterministic sync point: the idle clock resets when the poller reads new bytes, and the
+  // idle check runs right after the isBackendAlive callback within the same poll iteration.
+  // Feeding progress from that callback pins every observed idle gap near holdMs while the
+  // holds structurally sum past the idle interval (5 * 400ms > 1500ms), so a broken progress
+  // reset would still fire the diagnostic without relying on wall-clock scheduling margins.
+  const idleIntervalMs = 1_500;
+  const holdMs = 400;
+  let step = 0;
 
   const pendingResult = waitForClaudeCodeTurnResult({
     sessionId: '11111111-1111-4111-8111-111111111111',
@@ -2635,45 +2642,39 @@ test('does not report session log idle while JSONL progress keeps arriving', asy
     timeoutMs: 10_000,
     initialOffset: 0,
     knownLogPath: logPath,
-    sessionLogIdleDiagnosticIntervalMs: 150,
-    isBackendAlive: async () => true,
-    onIntermediateText: (text) => intermediate.push(text),
+    sessionLogIdleDiagnosticIntervalMs: idleIntervalMs,
+    isBackendAlive: async () => {
+      step += 1;
+      if (step <= 5) {
+        await sleep(holdMs);
+        await appendFile(logPath, line({
+          type: 'assistant',
+          message: {
+            content: [{ type: 'text', text: `working ${step}` }],
+          },
+        }));
+      } else if (step === 6) {
+        await appendFile(logPath, [
+          line({
+            type: 'assistant',
+            message: {
+              content: [{ type: 'text', text: 'final' }],
+              stop_reason: 'end_turn',
+            },
+          }),
+          line({ type: 'system', subtype: 'turn_duration', durationMs: 12 }),
+        ].join(''));
+      }
+      return true;
+    },
     onSessionLogIdle: (diagnostic) => {
       idleDiagnostics.push(diagnostic);
     },
   });
 
-  await sleep(50);
-  await appendFile(logPath, line({
-    type: 'assistant',
-    message: {
-      content: [{ type: 'text', text: 'working 1' }],
-    },
-  }));
-  await waitUntil(() => intermediate.at(-1) === 'working 1');
-  await sleep(50);
-  await appendFile(logPath, line({
-    type: 'assistant',
-    message: {
-      content: [{ type: 'text', text: 'working 2' }],
-    },
-  }));
-  await waitUntil(() => intermediate.at(-1) === 'working 1\n\nworking 2');
-  await sleep(50);
-  await appendFile(logPath, [
-    line({
-      type: 'assistant',
-      message: {
-        content: [{ type: 'text', text: 'final' }],
-        stop_reason: 'end_turn',
-      },
-    }),
-    line({ type: 'system', subtype: 'turn_duration', durationMs: 12 }),
-  ].join(''));
-
   const result = await pendingResult;
 
-  assert.equal(result.text, 'working 1\n\nworking 2\n\nfinal');
+  assert.equal(result.text, 'working 1\n\nworking 2\n\nworking 3\n\nworking 4\n\nworking 5\n\nfinal');
   assert.deepEqual(idleDiagnostics, []);
 });
 

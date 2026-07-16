@@ -700,6 +700,205 @@ test('Codex reader rejects missing assistant ids and out-of-order portable lifec
   ].map((entry) => JSON.stringify(entry)).join('\n')).length, 1);
 });
 
+const CODEX_OLDFORMAT_SESSION_META = {
+  type: 'session_meta',
+  payload: { id: '019e0000-0000-7000-8000-000000000001', cli_version: '0.134.0', originator: 'codex_exec', source: 'exec' },
+};
+
+function codexOldFormatTurn(turnId: string, prompt: string, answers: readonly [string, string]) {
+  return {
+    started: { type: 'event_msg', payload: { type: 'task_started', turn_id: turnId } },
+    developerContext: {
+      type: 'response_item',
+      payload: {
+        type: 'message',
+        role: 'developer',
+        content: [
+          { type: 'input_text', text: 'synthetic developer preamble' },
+          { type: 'input_text', text: 'synthetic developer rules' },
+        ],
+      },
+    },
+    injectedInstructions: {
+      type: 'response_item',
+      payload: {
+        type: 'message',
+        role: 'user',
+        content: [
+          { type: 'input_text', text: 'synthetic caller instructions' },
+          { type: 'input_text', text: 'synthetic environment context' },
+        ],
+      },
+    },
+    turnContext: { type: 'turn_context', payload: { turn_id: turnId, cwd: '/synthetic' } },
+    callerUser: {
+      type: 'response_item',
+      payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: prompt }] },
+    },
+    callerMirror: { type: 'event_msg', payload: { type: 'user_message', message: prompt } },
+    reasoning: {
+      type: 'response_item',
+      payload: { type: 'reasoning', summary: [], content: null, encrypted_content: 'synthetic-opaque' },
+    },
+    agentMessage: { type: 'event_msg', payload: { type: 'agent_message', message: answers[0], phase: 'commentary' } },
+    answerOne: {
+      type: 'response_item',
+      payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: answers[0] }], phase: 'commentary' },
+    },
+    functionCall: {
+      type: 'response_item',
+      payload: { type: 'function_call', name: 'exec_command', arguments: '{}', call_id: 'call_oldformat_1' },
+    },
+    functionCallOutput: {
+      type: 'response_item',
+      payload: { type: 'function_call_output', call_id: 'call_oldformat_1', output: 'ok' },
+    },
+    answerTwo: {
+      type: 'response_item',
+      payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: answers[1] }], phase: 'final_answer' },
+    },
+    tokenCount: { type: 'event_msg', payload: { type: 'token_count' } },
+    complete: { type: 'event_msg', payload: { type: 'task_complete', turn_id: turnId } },
+  };
+}
+
+function codexOldFormatTurnRecords(turn: ReturnType<typeof codexOldFormatTurn>): object[] {
+  return [
+    turn.started, turn.developerContext, turn.injectedInstructions, turn.turnContext,
+    turn.callerUser, turn.callerMirror, turn.reasoning, turn.agentMessage, turn.answerOne,
+    turn.functionCall, turn.functionCallOutput, turn.answerTwo, turn.tokenCount, turn.complete,
+  ];
+}
+
+function codexPassthroughTurnRecords(turnId: string, prompt: string, answer: string, assistantId: string): object[] {
+  return [
+    { type: 'event_msg', payload: { type: 'task_started', turn_id: turnId } },
+    {
+      type: 'response_item',
+      payload: {
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_text', text: prompt }],
+        internal_chat_message_metadata_passthrough: { turn_id: turnId },
+      },
+    },
+    {
+      type: 'response_item',
+      payload: {
+        type: 'message',
+        role: 'assistant',
+        id: assistantId,
+        content: [{ type: 'output_text', text: answer }],
+        internal_chat_message_metadata_passthrough: { turn_id: turnId },
+      },
+    },
+    { type: 'event_msg', payload: { type: 'task_complete', turn_id: turnId } },
+  ];
+}
+
+test('Codex reader binds window-bound old-format records and synthesizes native ids', () => {
+  const turn = codexOldFormatTurn('T1', 'PROMPT-A', ['ANS-1', 'ANS-2']);
+  const turns = extractCodexNativeTurns(
+    [CODEX_OLDFORMAT_SESSION_META, ...codexOldFormatTurnRecords(turn)]
+      .map((entry) => JSON.stringify(entry)).join('\n'),
+  );
+  assert.equal(turns.length, 1);
+  assert.equal(turns[0]!.userText, 'PROMPT-A');
+  assert.equal(turns[0]!.assistantText, 'ANS-1\n\nANS-2');
+  assert.deepEqual(turns[0]!.nativeIds, {
+    userId: 'user:T1',
+    assistantIds: ['assistant:T1:1', 'assistant:T1:2'],
+    completionId: 'T1',
+  });
+});
+
+test('Codex reader ignores in-window single-block user records without an adjacent mirror', () => {
+  const turn = codexOldFormatTurn('T1', 'PROMPT-A', ['ANS-1', 'ANS-2']);
+  const injectedNotice = {
+    type: 'response_item',
+    payload: {
+      type: 'message',
+      role: 'user',
+      content: [{ type: 'input_text', text: '<turn_aborted>synthetic aborted-turn notice</turn_aborted>' }],
+    },
+  };
+  const turns = extractCodexNativeTurns(
+    [
+      CODEX_OLDFORMAT_SESSION_META,
+      turn.started, turn.callerUser, turn.callerMirror, turn.answerOne,
+      injectedNotice, turn.functionCall, turn.functionCallOutput,
+      turn.answerTwo, turn.complete,
+    ].map((entry) => JSON.stringify(entry)).join('\n'),
+  );
+  assert.equal(turns.length, 1);
+  assert.equal(turns[0]!.userText, 'PROMPT-A');
+  assert.equal(turns[0]!.assistantText, 'ANS-1\n\nANS-2');
+});
+
+test('Codex reader rejects a mirrored caller message outside a task lifecycle window', () => {
+  const turn = codexOldFormatTurn('T1', 'PROMPT-A', ['ANS-1', 'ANS-2']);
+  rejects(() => extractCodexNativeTurns(
+    [
+      CODEX_OLDFORMAT_SESSION_META,
+      turn.callerUser, turn.callerMirror,
+      ...codexPassthroughTurnRecords('T2', 'PROMPT-B', 'ANS-3', 'msg_newformat_a'),
+    ].map((entry) => JSON.stringify(entry)).join('\n'),
+  ));
+});
+
+test('Codex reader rejects window-bound assistant text outside a task lifecycle window', () => {
+  const turn = codexOldFormatTurn('T1', 'PROMPT-A', ['ANS-1', 'ANS-2']);
+  rejects(() => extractCodexNativeTurns(
+    [
+      CODEX_OLDFORMAT_SESSION_META,
+      turn.answerOne,
+      ...codexPassthroughTurnRecords('T2', 'PROMPT-B', 'ANS-3', 'msg_newformat_b'),
+    ].map((entry) => JSON.stringify(entry)).join('\n'),
+  ));
+});
+
+test('Codex reader rejects two mirrored caller messages inside one lifecycle window', () => {
+  const turn = codexOldFormatTurn('T1', 'PROMPT-A', ['ANS-1', 'ANS-2']);
+  const secondCaller = codexOldFormatTurn('T1', 'PROMPT-A2', ['ANS-1', 'ANS-2']);
+  assert.throws(
+    () => extractCodexNativeTurns(
+      [
+        CODEX_OLDFORMAT_SESSION_META,
+        turn.started, turn.callerUser, turn.callerMirror,
+        secondCaller.callerUser, secondCaller.callerMirror,
+        turn.answerOne, turn.answerTwo, turn.complete,
+      ].map((entry) => JSON.stringify(entry)).join('\n'),
+    ),
+    (error: unknown) => error instanceof OpenPError && error.exitCode === 40 &&
+      error.message.includes('multiple user messages for one turn id'),
+  );
+});
+
+test('Codex reader extracts mixed-generation rollouts with per-record binding', () => {
+  const oldTurn = codexOldFormatTurn('T1', 'PROMPT-A', ['ANS-1', 'ANS-2']);
+  const turns = extractCodexNativeTurns(
+    [
+      CODEX_OLDFORMAT_SESSION_META,
+      ...codexOldFormatTurnRecords(oldTurn),
+      ...codexPassthroughTurnRecords('T2', 'PROMPT-B', 'ANS-3', 'msg_newformat_c'),
+    ].map((entry) => JSON.stringify(entry)).join('\n'),
+  );
+  assert.equal(turns.length, 2);
+  assert.equal(turns[0]!.userText, 'PROMPT-A');
+  assert.deepEqual(turns[0]!.nativeIds, {
+    userId: 'user:T1',
+    assistantIds: ['assistant:T1:1', 'assistant:T1:2'],
+    completionId: 'T1',
+  });
+  assert.equal(turns[1]!.userText, 'PROMPT-B');
+  assert.equal(turns[1]!.assistantText, 'ANS-3');
+  assert.deepEqual(turns[1]!.nativeIds, {
+    userId: 'user:T2',
+    assistantIds: ['msg_newformat_c'],
+    completionId: 'T2',
+  });
+});
+
 test('Kiro reader requires JSONL plus companion completion metadata', async () => {
   const logText = await readFile(join(FIXTURES, 'redacted-kiro-golden.jsonl'), 'utf8');
   const companionText = validKiroCompanion(logText, await readFile(join(FIXTURES, 'redacted-kiro-golden.json'), 'utf8'));

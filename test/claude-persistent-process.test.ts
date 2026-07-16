@@ -801,6 +801,7 @@ class ScreenExtendsAfterRawJsonlSession implements PtySession {
 class JsonlThenStaleScreenSession implements PtySession {
   readonly id = 'jsonl-then-stale-screen-session';
   alive = true;
+  staleCaptureCount = 0;
   private lastWrite = '';
 
   constructor(private readonly logPath: string) {}
@@ -843,6 +844,7 @@ class JsonlThenStaleScreenSession implements PtySession {
   }
 
   async captureText(): Promise<string> {
+    this.staleCaptureCount += 1;
     return readyScreenWith(['⏺ stale']);
   }
 
@@ -1995,16 +1997,24 @@ test('persistent turn keeps newer JSONL draft when stale screen preview arrives 
   const process = new PersistentClaudeCodeProcess(sessionId, signature(), dir, session, logPath, logPath, 0);
   const controller = new AbortController();
   const intermediate: string[] = [];
+  let staleCapturesBeforeDraft = 0;
 
-  setTimeout(() => controller.abort(), 1_200);
   try {
     await assert.rejects(
       () => process.sendTurn('hello', {
         timeoutMs: 5_000,
         paceIntermediateEvents: true,
         signal: controller.signal,
+        // Deterministic abort point: the stale screen text is served through the pre-submit
+        // readiness capture (the only captureText surface during a turn), so by the time the
+        // JSONL draft has been published the stale preview has already arrived and must have
+        // lost. Aborting here cannot race ahead of the draft or of the stale capture.
         onIntermediateText: (text) => {
           intermediate.push(text);
+          if (text === 'jsonl newer and longer draft') {
+            staleCapturesBeforeDraft = session.staleCaptureCount;
+            controller.abort();
+          }
         },
       }),
       (error) => {
@@ -2016,6 +2026,7 @@ test('persistent turn keeps newer JSONL draft when stale screen preview arrives 
         return true;
       },
     );
+    assert.ok(staleCapturesBeforeDraft >= 1, 'stale screen capture must be served before the draft');
     assert.deepEqual(intermediate, ['jsonl newer and longer draft']);
   } finally {
     await process.shutdown();
@@ -2031,13 +2042,18 @@ test('persistent turn does not copy answer draft into interrupted reasoning cont
   const process = new PersistentClaudeCodeProcess(sessionId, signature(), dir, session, logPath, logPath, 0);
   const controller = new AbortController();
 
-  setTimeout(() => controller.abort(), 1_200);
   try {
     await assert.rejects(
       () => process.sendTurn('hello', {
         timeoutMs: 5_000,
         signal: controller.signal,
-        onIntermediateText: () => undefined,
+        // Deterministic abort point: the answer draft has been recorded by the time it is
+        // published, so aborting here always exercises the draft-present abort path.
+        onIntermediateText: (text) => {
+          if (text === 'jsonl newer and longer draft') {
+            controller.abort();
+          }
+        },
       }),
       (error) => {
         assert.equal((error as { readonly code?: unknown }).code, 'ABORT_ERR');

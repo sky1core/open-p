@@ -113,10 +113,14 @@ export function extractCodexNativeTurns(logText: string): readonly NativeSession
     }
   };
 
+  const entries: JsonObject[] = [];
   for (const line of logText.split(/\r?\n/)) {
     if (!line.trim()) continue;
-    const entry = parseLine(line);
-    if (!entry) continue;
+    entries.push(parseLine(line));
+  }
+
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index]!;
     rejectUnsupportedCodexSource(entry);
     const payload = isObject(entry.payload) ? entry.payload : null;
     if (!payload) continue;
@@ -172,8 +176,17 @@ export function extractCodexNativeTurns(logText: string): readonly NativeSession
     if (payload.role === 'user') {
       const text = readSingleText(payload.content, 'input_text');
       if (text === null) continue;
-      const turnId = readTurnId(payload);
-      if (!turnId) continue;
+      let turnId = readTurnId(payload);
+      if (!turnId) {
+        if (!isCallerMirrorRecord(entries[index + 1])) continue;
+        if (activeTurnId === null) {
+          throw new OpenPError(
+            'Codex source has a window-bound caller message outside a task lifecycle window',
+            EXIT_CODES.protocolViolation,
+          );
+        }
+        turnId = activeTurnId;
+      }
       rejectOverlappingPortableMessage(activeTurnId, turnId);
       rememberTurnId(turnId);
       const pending = ensureTurn(byTurnId, turnId);
@@ -190,8 +203,14 @@ export function extractCodexNativeTurns(logText: string): readonly NativeSession
     if (payload.role === 'assistant') {
       const text = readSingleText(payload.content, 'output_text');
       if (text === null || text.length === 0) continue;
-      const turnId = readTurnId(payload);
-      if (!turnId) continue;
+      const passthroughTurnId = readTurnId(payload);
+      const turnId = passthroughTurnId ?? activeTurnId;
+      if (turnId === null) {
+        throw new OpenPError(
+          'Codex source has a window-bound assistant message outside a task lifecycle window',
+          EXIT_CODES.protocolViolation,
+        );
+      }
       rejectOverlappingPortableMessage(activeTurnId, turnId);
       const pending = ensureTurn(byTurnId, turnId);
       if (pending.completed) {
@@ -201,7 +220,9 @@ export function extractCodexNativeTurns(logText: string): readonly NativeSession
         throw new OpenPError(`Codex source turn ${turnId} has assistant before portable user message`, EXIT_CODES.protocolViolation);
       }
       rememberTurnId(turnId);
-      pending.assistantIds.push(requireAssistantPayloadId(payload));
+      pending.assistantIds.push(passthroughTurnId !== null
+        ? requireAssistantPayloadId(payload)
+        : nativePayloadId(payload, `assistant:${turnId}:${pending.assistantIds.length + 1}`));
       pending.assistantText.push(text);
     }
   }
@@ -255,6 +276,12 @@ export function extractCodexNativeTurns(logText: string): readonly NativeSession
     });
   }
   return turns;
+}
+
+function isCallerMirrorRecord(entry: JsonObject | undefined): boolean {
+  if (!entry || entry.type !== 'event_msg') return false;
+  const payload = isObject(entry.payload) ? entry.payload : null;
+  return payload !== null && payload.type === 'user_message';
 }
 
 function rejectOverlappingPortableMessage(activeTurnId: string | null, turnId: string): void {
