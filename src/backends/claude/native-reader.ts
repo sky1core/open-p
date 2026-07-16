@@ -103,13 +103,29 @@ export async function assertClaudeNativeSessionIdentity(
 
 export function extractClaudeNativeTurns(logText: string): readonly NativeSessionTurn[] {
   const entries = parseEntries(logText);
-  const activeEntries = activeParentLineage(entries);
+  const indexByUuid = indexClaudeEntryUuids(entries);
   const turns: NativeSessionTurn[] = [];
+  const localCommandTranscriptPromptIds = new Set<string>();
+  // Each `system/compact_boundary` record starts a new compaction segment. Segments are extracted
+  // independently (per-segment active parent-lineage, per-segment pending state) and concatenated in
+  // file order, so a segment-trailing pending turn is dropped like EOF and never completed by the
+  // next segment's records.
+  for (const segment of compactionSegments(entries)) {
+    const activeEntries = activeParentLineage(entries, indexByUuid, segment);
+    collectSegmentPortableTurns(activeEntries, localCommandTranscriptPromptIds, turns);
+  }
+  return turns;
+}
+
+function collectSegmentPortableTurns(
+  activeEntries: readonly JsonObject[],
+  localCommandTranscriptPromptIds: Set<string>,
+  turns: NativeSessionTurn[],
+): void {
   let pendingUser: { id: string; text: string } | null = null;
   let assistantIds: string[] = [];
   let assistantText: string[] = [];
   let pendingInterrupted = false;
-  const localCommandTranscriptPromptIds = new Set<string>();
 
   const discard = (): void => {
     pendingUser = null;
@@ -170,7 +186,6 @@ export function extractClaudeNativeTurns(logText: string): readonly NativeSessio
       flush(nativeEntryId(entry));
     }
   }
-  return turns;
 }
 
 function parseEntries(logText: string): readonly JsonObject[] {
@@ -179,7 +194,6 @@ function parseEntries(logText: string): readonly JsonObject[] {
     if (!line.trim()) continue;
     const entry = parseLine(line);
     if (!entry) continue;
-    rejectUnsupportedClaudeSource(entry);
     rejectMissingClaudeStructuralId(entry);
     entries.push(entry);
   }
@@ -199,18 +213,57 @@ function isPortableTurnScope(entry: JsonObject): boolean {
   return entry.isSidechain !== true && entry.isMeta !== true && entry.isCompactSummary !== true;
 }
 
-function activeParentLineage(entries: readonly JsonObject[]): readonly JsonObject[] {
-  const byUuid = new Map<string, JsonObject>();
+interface CompactionSegment {
+  readonly start: number;
+  readonly end: number;
+}
+
+function isCompactBoundary(entry: JsonObject): boolean {
+  return entry.type === 'system' && entry.subtype === 'compact_boundary';
+}
+
+// A `system/compact_boundary` record is a compaction segment separator: it starts a new segment and
+// is that segment's root record (observed always with parentUuid null). Segment 0 starts at the file
+// head. A no-boundary log is a single segment covering the whole file, identical to the pre-segment
+// behavior.
+function compactionSegments(entries: readonly JsonObject[]): readonly CompactionSegment[] {
+  const starts = [0];
+  for (const [index, entry] of entries.entries()) {
+    if (index > 0 && isCompactBoundary(entry)) {
+      starts.push(index);
+    }
+  }
+  return starts.map((start, position) => ({
+    start,
+    end: position + 1 < starts.length ? starts[position + 1]! : entries.length,
+  }));
+}
+
+// The uuid index is file-global so a uuid duplicated anywhere — including across compaction
+// segments — stays a fail-closed identity violation and can never double-count a turn.
+function indexClaudeEntryUuids(entries: readonly JsonObject[]): ReadonlyMap<string, number> {
   const indexByUuid = new Map<string, number>();
-  let firstUuid: string | null = null;
-  let lastUuid: string | null = null;
   for (const [index, entry] of entries.entries()) {
     if (typeof entry.uuid === 'string' && entry.uuid.length > 0) {
-      if (byUuid.has(entry.uuid)) {
+      if (indexByUuid.has(entry.uuid)) {
         throw new OpenPError('Claude session log contains duplicate uuid entries', EXIT_CODES.protocolViolation);
       }
-      byUuid.set(entry.uuid, entry);
       indexByUuid.set(entry.uuid, index);
+    }
+  }
+  return indexByUuid;
+}
+
+function activeParentLineage(
+  entries: readonly JsonObject[],
+  indexByUuid: ReadonlyMap<string, number>,
+  segment: CompactionSegment,
+): readonly JsonObject[] {
+  let firstUuid: string | null = null;
+  let lastUuid: string | null = null;
+  for (let index = segment.start; index < segment.end; index += 1) {
+    const entry = entries[index]!;
+    if (typeof entry.uuid === 'string' && entry.uuid.length > 0) {
       firstUuid ??= entry.uuid;
       if (entry.isSidechain !== true) {
         lastUuid = entry.uuid;
@@ -226,7 +279,12 @@ function activeParentLineage(entries: readonly JsonObject[]): readonly JsonObjec
     if (active.has(cursor)) {
       throw new OpenPError('Claude session log parentUuid chain contains a cycle', EXIT_CODES.protocolViolation);
     }
-    const entry = byUuid.get(cursor);
+    // The walk stays inside the segment: a parentUuid resolving outside [start, end) is missing
+    // lineage, not a cross-segment link.
+    const cursorIndex = indexByUuid.get(cursor);
+    const entry = cursorIndex !== undefined && cursorIndex >= segment.start && cursorIndex < segment.end
+      ? entries[cursorIndex]
+      : undefined;
     if (!entry) {
       throw new OpenPError('Claude active session lineage references missing parentUuid', EXIT_CODES.protocolViolation);
     }
@@ -237,14 +295,20 @@ function activeParentLineage(entries: readonly JsonObject[]): readonly JsonObjec
     }
     if (parentUuid) {
       const parentIndex = indexByUuid.get(parentUuid);
-      const childIndex = indexByUuid.get(cursor)!;
-      if (parentIndex !== undefined && parentIndex >= childIndex) {
+      if (parentIndex !== undefined && parentIndex >= cursorIndex!) {
         throw new OpenPError('Claude active session lineage is not in append order', EXIT_CODES.protocolViolation);
       }
     }
     cursor = parentUuid;
   }
-  return entries.filter((entry) => typeof entry.uuid === 'string' && active.has(entry.uuid));
+  const activeEntries: JsonObject[] = [];
+  for (let index = segment.start; index < segment.end; index += 1) {
+    const entry = entries[index]!;
+    if (typeof entry.uuid === 'string' && active.has(entry.uuid)) {
+      activeEntries.push(entry);
+    }
+  }
+  return activeEntries;
 }
 
 function parentUuidOf(entry: JsonObject): string | null {
@@ -255,15 +319,6 @@ function parentUuidOf(entry: JsonObject): string | null {
     return entry.parentUuid;
   }
   throw new OpenPError('Claude active session lineage has an invalid parentUuid', EXIT_CODES.protocolViolation);
-}
-
-function rejectUnsupportedClaudeSource(entry: JsonObject): void {
-  if (entry.type === 'system' && entry.subtype === 'compact_boundary') {
-    throw new OpenPError('Claude compacted sessions are not supported for seed source conversion', EXIT_CODES.protocolViolation);
-  }
-  if (entry.isCompactSummary === true) {
-    throw new OpenPError('Claude compaction summaries are not portable seed turns', EXIT_CODES.protocolViolation);
-  }
 }
 
 function isCallerUser(entry: JsonObject, localCommandTranscriptPromptIds: ReadonlySet<string>): boolean {

@@ -308,6 +308,95 @@ test('appendClaudeCodeSessionHistory rejects incomplete or branch-changing targe
   }
 });
 
+// Before segment support, any compacted target was rejected with exit 40 at read time; this locks
+// that a compacted session is now an intended, safe seed append target.
+test('appendClaudeCodeSessionHistory seeds a compacted target and never clones the compaction summary', async () => {
+  const goldenText = await readFile(GOLDEN, 'utf8');
+  for (const variant of ['completed-turn-tail', 'summary-tail'] as const) {
+    const sessionId = randomUUID();
+    const configDir = await mkdtemp(join(tmpdir(), 'openp-claude-compacted-'));
+    const logPath = resolveClaudeCodeSessionLogPath(sessionId, FIXTURE_CWD, configDir);
+    await mkdir(dirname(logPath), { recursive: true });
+    const base = logForSession(goldenText, sessionId, FIXTURE_CWD);
+    const stamp = { cwd: FIXTURE_CWD, sessionId };
+    const compactionRecords: Entry[] = [
+      { type: 'system', subtype: 'compact_boundary', uuid: 'compact-1-boundary', parentUuid: null, ...stamp },
+      {
+        type: 'user', isCompactSummary: true, uuid: 'compact-1-summary', parentUuid: 'compact-1-boundary',
+        message: { role: 'user', content: 'COMPACT-SUMMARY: condensed history' }, ...stamp,
+      },
+      ...(variant === 'completed-turn-tail' ? [
+        {
+          type: 'user', uuid: 'post-compact-user', parentUuid: 'compact-1-summary',
+          message: { role: 'user', content: 'post-compact prompt' }, ...stamp,
+        },
+        {
+          type: 'assistant', uuid: 'post-compact-assistant', parentUuid: 'post-compact-user',
+          message: {
+            id: 'post-compact-message', role: 'assistant',
+            content: [{ type: 'text', text: 'POST-COMPACT-ANSWER' }],
+          },
+          ...stamp,
+        },
+        {
+          type: 'system', subtype: 'turn_duration', uuid: 'post-compact-completion',
+          parentUuid: 'post-compact-assistant', durationMs: 1, ...stamp,
+        },
+      ] : []),
+    ];
+    const original = Buffer.from(`${base.trimEnd()}\n${compactionRecords.map((e) => JSON.stringify(e)).join('\n')}\n`);
+    await writeFile(logPath, original);
+    const beforeTurns = extractClaudeNativeTurns(original.toString('utf8'));
+    assert.equal(beforeTurns.length, variant === 'completed-turn-tail' ? 3 : 2);
+
+    const result = await appendClaudeCodeSessionHistory({
+      sessionId, cwd: FIXTURE_CWD, turns: TURNS, persistPreparedAppend, configDir,
+    });
+    assert.equal(result.turns.length, TURNS.length);
+
+    const after = await readFile(logPath);
+    assert.equal(
+      createHash('sha256').update(after.subarray(0, original.length)).digest('hex'),
+      createHash('sha256').update(original).digest('hex'),
+      'compacted target prefix bytes must be immutable',
+    );
+    const originalLines = original.toString('utf8').trimEnd().split('\n');
+    const afterLines = after.toString('utf8').trimEnd().split('\n');
+    assert.equal(afterLines.length, originalLines.length + TURNS.length * 3);
+    const appended = afterLines.slice(originalLines.length).map((l) => JSON.parse(l) as Entry);
+
+    // The parent chain starts at the compacted log's last uuid-bearing entry (final segment).
+    assert.equal(
+      appended[0]!.parentUuid,
+      variant === 'completed-turn-tail' ? 'post-compact-completion' : 'compact-1-summary',
+    );
+    // The isCompactSummary user is never a clone template: no appended entry carries the summary
+    // flag or the summary text. In the summary-tail variant the summary is the last user-type entry,
+    // so this is only satisfiable by cloning the pre-boundary caller template.
+    for (const entry of appended) {
+      assert.notEqual(entry.isCompactSummary, true);
+      assert.ok(!JSON.stringify(entry).includes('COMPACT-SUMMARY'), 'summary content must never be cloned');
+    }
+    assert.deepEqual(textEntries(appended).map(extractedText), EXPECTED_TEXT_ENTRIES.map((t) => t.text));
+    assert.equal(completionEntries(appended).length, TURNS.length);
+
+    // Round-trip: the production read recovers the pre-existing turns plus exactly the seeded turns.
+    const readBack = await readClaudeCodeNativeSession({
+      backend: 'claude', sessionId, cwd: FIXTURE_CWD, configDir,
+    });
+    assert.equal(readBack.turns.length, beforeTurns.length + TURNS.length);
+    assert.deepEqual(
+      readBack.turns.slice(beforeTurns.length).map((turn) => [turn.userText, turn.assistantText]),
+      TURNS.map((turn) => [turn.userText, turn.assistantText]),
+    );
+    assert.deepEqual(
+      readBack.turns.slice(beforeTurns.length).map((turn) => turn.nativeIds),
+      result.turns.map((turn) => turn.nativeIds),
+    );
+    assert.ok(!JSON.stringify(readBack.turns).includes('COMPACT-SUMMARY'));
+  }
+});
+
 test('missing user or assistant template is a protocol violation', () => {
   const noUser = JSON.stringify({
     type: 'assistant', uuid: randomUUID(), message: { role: 'assistant', content: [{ type: 'text', text: 'hi' }] },

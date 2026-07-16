@@ -227,10 +227,195 @@ test('Claude reader rejects a text-bearing assistant record without message.id',
   rejects(() => extractClaudeNativeTurns(`${logText}\n${missingMessageId}\n`));
 });
 
-test('Claude reader rejects compaction summaries and compact boundaries', async () => {
+function claudeCompactionBoundaryRecords(prefix: string, summaryText: string): object[] {
+  return [
+    { type: 'system', subtype: 'compact_boundary', uuid: `${prefix}-boundary`, parentUuid: null },
+    {
+      type: 'user', isCompactSummary: true, uuid: `${prefix}-summary`, parentUuid: `${prefix}-boundary`,
+      message: { role: 'user', content: summaryText },
+    },
+  ];
+}
+
+function claudeCompletedTurnRecords(prefix: string, parentUuid: string, prompt: string, answer: string): object[] {
+  return [
+    { type: 'user', uuid: `${prefix}-user`, parentUuid, message: { role: 'user', content: prompt } },
+    {
+      type: 'assistant', uuid: `${prefix}-assistant`, parentUuid: `${prefix}-user`,
+      message: { id: `${prefix}-message`, role: 'assistant', content: [{ type: 'text', text: answer }] },
+    },
+    {
+      type: 'system', subtype: 'turn_duration', uuid: `${prefix}-completion`,
+      parentUuid: `${prefix}-assistant`, durationMs: 1,
+    },
+  ];
+}
+
+test('Claude reader recovers completed turns across a compact boundary and never emits the summary', async () => {
   const logText = await readFile(join(FIXTURES, 'redacted-claude-golden.jsonl'), 'utf8');
-  rejects(() => extractClaudeNativeTurns(`${logText}\n${JSON.stringify({ type: 'system', subtype: 'compact_boundary', uuid: 'c' })}\n`));
-  rejects(() => extractClaudeNativeTurns(`${logText}\n${JSON.stringify({ type: 'user', isCompactSummary: true, uuid: 'c', message: { content: 'summary' } })}\n`));
+  const compacted = [
+    ...claudeCompactionBoundaryRecords('compact-1', 'COMPACT-SUMMARY: earlier turns condensed'),
+    ...claudeCompletedTurnRecords('post-compact-1', 'compact-1-summary', 'third prompt', 'THIRD-ANSWER'),
+    ...claudeCompletedTurnRecords('post-compact-2', 'post-compact-1-completion', 'fourth prompt', 'FOURTH-ANSWER'),
+  ].map((entry) => JSON.stringify(entry)).join('\n');
+
+  const turns = extractClaudeNativeTurns(`${logText}\n${compacted}\n`);
+  assert.equal(turns.length, 4);
+  assert.deepEqual(
+    turns.map((turn) => turn.assistantText),
+    ['REMEMBERED', 'BLUEFIN-7', 'THIRD-ANSWER', 'FOURTH-ANSWER'],
+  );
+  assert.equal(turns[2]!.userText, 'third prompt');
+  assert.equal(turns[3]!.userText, 'fourth prompt');
+  assert.equal(turns[2]!.nativeIds.userId, 'post-compact-1-user');
+  assert.deepEqual(turns[2]!.nativeIds.assistantIds, ['post-compact-1-message']);
+  assert.equal(turns[2]!.nativeIds.completionId, 'post-compact-1-completion');
+  assert.ok(!JSON.stringify(turns).includes('COMPACT-SUMMARY'), 'compaction summary content must never appear in any turn');
+});
+
+test('Claude reader recovers turns from every segment across multiple compact boundaries in file order', async () => {
+  const logText = await readFile(join(FIXTURES, 'redacted-claude-golden.jsonl'), 'utf8');
+  const compacted = [
+    ...claudeCompactionBoundaryRecords('compact-1', 'COMPACT-SUMMARY-ONE'),
+    ...claudeCompletedTurnRecords('segment-1', 'compact-1-summary', 'third prompt', 'THIRD-ANSWER'),
+    ...claudeCompactionBoundaryRecords('compact-2', 'COMPACT-SUMMARY-TWO'),
+    ...claudeCompletedTurnRecords('segment-2', 'compact-2-summary', 'fourth prompt', 'FOURTH-ANSWER'),
+  ].map((entry) => JSON.stringify(entry)).join('\n');
+
+  const turns = extractClaudeNativeTurns(`${logText}\n${compacted}\n`);
+  assert.equal(turns.length, 4);
+  assert.deepEqual(
+    turns.map((turn) => [turn.userText, turn.assistantText]).slice(2),
+    [['third prompt', 'THIRD-ANSWER'], ['fourth prompt', 'FOURTH-ANSWER']],
+  );
+  assert.deepEqual(
+    turns.map((turn) => turn.assistantText),
+    ['REMEMBERED', 'BLUEFIN-7', 'THIRD-ANSWER', 'FOURTH-ANSWER'],
+  );
+  assert.ok(!JSON.stringify(turns).includes('COMPACT-SUMMARY'), 'no segment may emit a compaction summary');
+});
+
+test('Claude reader extracts only the active branch inside a compacted segment', async () => {
+  const logText = await readFile(join(FIXTURES, 'redacted-claude-golden.jsonl'), 'utf8');
+  const compacted = [
+    ...claudeCompactionBoundaryRecords('compact-1', 'COMPACT-SUMMARY'),
+    { type: 'user', uuid: 'rewound-user', parentUuid: 'compact-1-summary', message: { role: 'user', content: 'branched prompt' } },
+    {
+      type: 'assistant', uuid: 'abandoned-assistant', parentUuid: 'rewound-user',
+      message: { id: 'abandoned-message', role: 'assistant', content: [{ type: 'text', text: 'ABANDONED-ANSWER' }] },
+    },
+    {
+      type: 'system', subtype: 'turn_duration', uuid: 'abandoned-completion',
+      parentUuid: 'abandoned-assistant', durationMs: 1,
+    },
+    {
+      type: 'assistant', uuid: 'active-assistant', parentUuid: 'rewound-user',
+      message: { id: 'active-message', role: 'assistant', content: [{ type: 'text', text: 'ACTIVE-ANSWER' }] },
+    },
+    {
+      type: 'system', subtype: 'turn_duration', uuid: 'active-completion',
+      parentUuid: 'active-assistant', durationMs: 1,
+    },
+  ].map((entry) => JSON.stringify(entry)).join('\n');
+
+  const turns = extractClaudeNativeTurns(`${logText}\n${compacted}\n`);
+  assert.equal(turns.length, 3);
+  assert.equal(turns[2]!.userText, 'branched prompt');
+  assert.equal(turns[2]!.assistantText, 'ACTIVE-ANSWER');
+  assert.deepEqual(turns[2]!.nativeIds.assistantIds, ['active-message']);
+  assert.equal(turns[2]!.nativeIds.completionId, 'active-completion');
+  assert.ok(!JSON.stringify(turns).includes('ABANDONED-ANSWER'), 'abandoned branch turns must not be recovered');
+});
+
+test('Claude reader drops a segment-trailing incomplete turn at a compact boundary', async () => {
+  const logText = await readFile(join(FIXTURES, 'redacted-claude-golden.jsonl'), 'utf8');
+  const compacted = [
+    { type: 'user', uuid: 'pending-user', parentUuid: lastUuid(logText), message: { role: 'user', content: 'PENDING-PROMPT' } },
+    {
+      type: 'assistant', uuid: 'pending-assistant', parentUuid: 'pending-user',
+      message: { id: 'pending-message', role: 'assistant', content: [{ type: 'text', text: 'PENDING-ANSWER' }] },
+    },
+    ...claudeCompactionBoundaryRecords('compact-1', 'COMPACT-SUMMARY'),
+    ...claudeCompletedTurnRecords('post-compact-1', 'compact-1-summary', 'third prompt', 'THIRD-ANSWER'),
+  ].map((entry) => JSON.stringify(entry)).join('\n');
+
+  const turns = extractClaudeNativeTurns(`${logText}\n${compacted}\n`);
+  assert.equal(turns.length, 3);
+  assert.deepEqual(turns.map((turn) => turn.assistantText), ['REMEMBERED', 'BLUEFIN-7', 'THIRD-ANSWER']);
+  assert.ok(!JSON.stringify(turns).includes('PENDING-'), 'a segment-trailing incomplete turn must be dropped, not completed');
+});
+
+// On the pre-segment reader these inputs never reached the lineage/uuid checks (any compact_boundary
+// was rejected outright), so discrimination is carried by the current-code pass/fail expectations.
+test('Claude reader fails closed when a compacted segment record chains outside its segment', async () => {
+  const logText = await readFile(join(FIXTURES, 'redacted-claude-golden.jsonl'), 'utf8');
+
+  // Backward escape: a post-compaction turn whose parentUuid points at a pre-boundary record. The
+  // segment-scoped walk must treat the out-of-segment parent as missing lineage (exit 40), locking
+  // the spec clause "staying within the segment".
+  const backwardEscape = [
+    ...claudeCompactionBoundaryRecords('compact-1', 'COMPACT-SUMMARY'),
+    ...claudeCompletedTurnRecords('escaped', lastUuid(logText), 'escaped prompt', 'ESCAPED-ANSWER'),
+  ].map((entry) => JSON.stringify(entry)).join('\n');
+  rejects(() => extractClaudeNativeTurns(`${logText}\n${backwardEscape}\n`));
+
+  // Forward escape: a segment record whose parentUuid points into a later segment.
+  const forwardEscape = [
+    ...claudeCompactionBoundaryRecords('compact-1', 'COMPACT-SUMMARY-ONE'),
+    ...claudeCompletedTurnRecords('forward', 'compact-2-summary', 'forward prompt', 'FORWARD-ANSWER'),
+    ...claudeCompactionBoundaryRecords('compact-2', 'COMPACT-SUMMARY-TWO'),
+    ...claudeCompletedTurnRecords('segment-2', 'compact-2-summary', 'later prompt', 'LATER-ANSWER'),
+  ].map((entry) => JSON.stringify(entry)).join('\n');
+  rejects(() => extractClaudeNativeTurns(`${logText}\n${forwardEscape}\n`));
+});
+
+test('Claude reader rejects a uuid duplicated across compaction segments', async () => {
+  const logText = await readFile(join(FIXTURES, 'redacted-claude-golden.jsonl'), 'utf8');
+  // A post-compaction record replaying a pre-boundary uuid (a hypothetical preserved-record replay)
+  // must stay a fail-closed identity violation so the same turn can never be counted twice.
+  const duplicatedUuid = lastUuid(logText);
+  const compacted = [
+    ...claudeCompactionBoundaryRecords('compact-1', 'COMPACT-SUMMARY'),
+    { type: 'user', uuid: duplicatedUuid, parentUuid: 'compact-1-summary', message: { role: 'user', content: 'replayed prompt' } },
+    {
+      type: 'assistant', uuid: 'replayed-assistant', parentUuid: duplicatedUuid,
+      message: { id: 'replayed-message', role: 'assistant', content: [{ type: 'text', text: 'REPLAYED-ANSWER' }] },
+    },
+    {
+      type: 'system', subtype: 'turn_duration', uuid: 'replayed-completion',
+      parentUuid: 'replayed-assistant', durationMs: 1,
+    },
+  ].map((entry) => JSON.stringify(entry)).join('\n');
+  rejects(() => extractClaudeNativeTurns(`${logText}\n${compacted}\n`));
+});
+
+test('Claude reader still fails closed on a non-trailing incomplete turn inside a compacted segment', async () => {
+  const logText = await readFile(join(FIXTURES, 'redacted-claude-golden.jsonl'), 'utf8');
+  const control = [
+    ...claudeCompactionBoundaryRecords('compact-1', 'COMPACT-SUMMARY'),
+    ...claudeCompletedTurnRecords('post-compact-1', 'compact-1-summary', 'third prompt', 'THIRD-ANSWER'),
+  ].map((entry) => JSON.stringify(entry)).join('\n');
+  assert.equal(extractClaudeNativeTurns(`${logText}\n${control}\n`).length, 3);
+
+  const malformed = [
+    ...claudeCompactionBoundaryRecords('compact-1', 'COMPACT-SUMMARY'),
+    { type: 'user', uuid: 'incomplete-user', parentUuid: 'compact-1-summary', message: { role: 'user', content: 'first' } },
+    {
+      type: 'assistant', uuid: 'incomplete-assistant', parentUuid: 'incomplete-user',
+      message: { id: 'incomplete-message', role: 'assistant', content: [{ type: 'text', text: 'answer' }] },
+    },
+    { type: 'user', uuid: 'following-user', parentUuid: 'incomplete-assistant', message: { role: 'user', content: 'second' } },
+    {
+      type: 'assistant', uuid: 'following-assistant', parentUuid: 'following-user',
+      message: { id: 'following-message', role: 'assistant', content: [{ type: 'text', text: 'answer 2' }] },
+    },
+    {
+      type: 'system', subtype: 'turn_duration', uuid: 'following-completion',
+      parentUuid: 'following-assistant', durationMs: 10,
+    },
+  ].map((entry) => JSON.stringify(entry)).join('\n');
+
+  rejects(() => extractClaudeNativeTurns(`${logText}\n${malformed}\n`));
 });
 
 test('Claude reader excludes prompt-id-linked local command transcript records', async () => {
