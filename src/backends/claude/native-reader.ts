@@ -160,12 +160,13 @@ function collectSegmentPortableTurns(
   for (const entry of activeEntries) {
     rememberLocalCommandTranscriptPromptId(localCommandTranscriptPromptIds, entry);
     if (isCallerUser(entry, localCommandTranscriptPromptIds)) {
-      if (pendingUser && !pendingInterrupted) {
-        throw new OpenPError(
-          'Claude source contains a non-trailing turn without a completion boundary',
-          EXIT_CODES.protocolViolation,
-        );
-      }
+      // A new caller user before this turn's `system/turn_duration` means the user interrupted and
+      // resubmitted before the previous turn completed. That pending turn has no completion boundary
+      // id, so it can never be a portable turn: discard it and any partial assistant text, and
+      // continue from the new caller user. Structural corruption is already caught by the active
+      // parent-lineage append-order/single-root checks, not here. This relies on the observed
+      // pattern that an interrupted turn carries no `system/turn_duration`; a stale/late completion
+      // record inserted after the next caller user has not been observed in the corpus.
       discard();
       pendingUser = { id: nativeEntryId(entry), text: (entry.message as JsonObject).content as string };
       continue;

@@ -271,41 +271,90 @@ test('appendClaudeCodeSessionHistory rejects a foreign in-record session before 
   assert.deepEqual(await readFile(logPath), foreign);
 });
 
-test('appendClaudeCodeSessionHistory rejects incomplete or branch-changing target suffixes before mutation', async () => {
-  const originalFixture = await readFile(GOLDEN, 'utf8');
-  for (const variant of ['incomplete', 'sidechain-branch'] as const) {
-    const sessionId = randomUUID();
-    const configDir = await mkdtemp(join(tmpdir(), 'openp-claude-cfg-'));
-    const logPath = resolveClaudeCodeSessionLogPath(sessionId, FIXTURE_CWD, configDir);
-    await mkdir(dirname(logPath), { recursive: true });
-    const base = logForSession(originalFixture, sessionId, FIXTURE_CWD);
-    const baseTurns = extractClaudeNativeTurns(base);
-    const extra = {
-      type: 'user',
-      uuid: randomUUID(),
-      parentUuid: variant === 'incomplete'
-        ? lastUuid(fixtureEntries(base))
-        : baseTurns[0]!.nativeIds.completionId,
-      ...(variant === 'sidechain-branch' ? { isSidechain: true } : {}),
-      message: { role: 'user', content: 'unfinished target state' },
-      cwd: FIXTURE_CWD,
-      sessionId,
-    };
-    const original = Buffer.from(`${base.trimEnd()}\n${JSON.stringify(extra)}\n`);
-    await writeFile(logPath, original);
+// Revised reader contract: a trailing caller user without a completion boundary is an interrupted
+// turn and is dropped on read, so seeding past it is now accepted (the pre-drop writer rejected this
+// target with exit 40 through the candidate read). The interrupted record must stay dropped — it is
+// never promoted to a completed turn by the appended suffix.
+test('appendClaudeCodeSessionHistory seeds past an interrupted trailing user without emitting it', async () => {
+  const sessionId = randomUUID();
+  const configDir = await mkdtemp(join(tmpdir(), 'openp-claude-cfg-'));
+  const logPath = resolveClaudeCodeSessionLogPath(sessionId, FIXTURE_CWD, configDir);
+  await mkdir(dirname(logPath), { recursive: true });
+  const base = logForSession(await readFile(GOLDEN, 'utf8'), sessionId, FIXTURE_CWD);
+  const interrupted = {
+    type: 'user',
+    uuid: randomUUID(),
+    parentUuid: lastUuid(fixtureEntries(base)),
+    message: { role: 'user', content: 'INTERRUPTED-TARGET-PROMPT' },
+    cwd: FIXTURE_CWD,
+    sessionId,
+  };
+  const original = Buffer.from(`${base.trimEnd()}\n${JSON.stringify(interrupted)}\n`);
+  await writeFile(logPath, original);
+  assert.equal(extractClaudeNativeTurns(original.toString('utf8')).length, 2);
 
-    await assert.rejects(
-      () => appendClaudeCodeSessionHistory({
-        sessionId,
-        cwd: FIXTURE_CWD,
-        turns: TURNS.slice(0, 1),
-        persistPreparedAppend,
-        configDir,
-      }),
-      (error) => error instanceof OpenPError && error.exitCode === 40,
-    );
-    assert.deepEqual(await readFile(logPath), original);
-  }
+  const result = await appendClaudeCodeSessionHistory({
+    sessionId,
+    cwd: FIXTURE_CWD,
+    turns: TURNS.slice(0, 1),
+    persistPreparedAppend,
+    configDir,
+  });
+  assert.equal(result.turns.length, 1);
+
+  const after = await readFile(logPath);
+  assert.equal(
+    createHash('sha256').update(after.subarray(0, original.length)).digest('hex'),
+    createHash('sha256').update(original).digest('hex'),
+    'target prefix bytes must be immutable',
+  );
+  const originalLines = original.toString('utf8').trimEnd().split('\n');
+  const afterLines = after.toString('utf8').trimEnd().split('\n');
+  assert.equal(afterLines.length, originalLines.length + 3);
+  const appended = afterLines.slice(originalLines.length).map((l) => JSON.parse(l) as Entry);
+  assert.equal(appended[0]!.parentUuid, interrupted.uuid, 'the chain continues after the interrupted record');
+
+  const readBack = extractClaudeNativeTurns(after.toString('utf8'));
+  assert.equal(readBack.length, 3);
+  assert.equal(readBack.at(-1)!.userText, TURNS[0]!.userText);
+  assert.equal(readBack.at(-1)!.assistantText, TURNS[0]!.assistantText);
+  assert.deepEqual(readBack.at(-1)!.nativeIds, result.turns[0]!.nativeIds);
+  assert.ok(
+    !JSON.stringify(readBack).includes('INTERRUPTED-TARGET-PROMPT'),
+    'the interrupted turn must stay dropped after seeding, never promoted to a completed turn',
+  );
+});
+
+test('appendClaudeCodeSessionHistory rejects a branch-changing sidechain target suffix before mutation', async () => {
+  const sessionId = randomUUID();
+  const configDir = await mkdtemp(join(tmpdir(), 'openp-claude-cfg-'));
+  const logPath = resolveClaudeCodeSessionLogPath(sessionId, FIXTURE_CWD, configDir);
+  await mkdir(dirname(logPath), { recursive: true });
+  const base = logForSession(await readFile(GOLDEN, 'utf8'), sessionId, FIXTURE_CWD);
+  const baseTurns = extractClaudeNativeTurns(base);
+  const extra = {
+    type: 'user',
+    uuid: randomUUID(),
+    parentUuid: baseTurns[0]!.nativeIds.completionId,
+    isSidechain: true,
+    message: { role: 'user', content: 'unfinished target state' },
+    cwd: FIXTURE_CWD,
+    sessionId,
+  };
+  const original = Buffer.from(`${base.trimEnd()}\n${JSON.stringify(extra)}\n`);
+  await writeFile(logPath, original);
+
+  await assert.rejects(
+    () => appendClaudeCodeSessionHistory({
+      sessionId,
+      cwd: FIXTURE_CWD,
+      turns: TURNS.slice(0, 1),
+      persistPreparedAppend,
+      configDir,
+    }),
+    (error) => error instanceof OpenPError && error.exitCode === 40,
+  );
+  assert.deepEqual(await readFile(logPath), original);
 });
 
 // Before segment support, any compacted target was rejected with exit 40 at read time; this locks

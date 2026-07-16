@@ -389,22 +389,21 @@ test('Claude reader rejects a uuid duplicated across compaction segments', async
   rejects(() => extractClaudeNativeTurns(`${logText}\n${compacted}\n`));
 });
 
-test('Claude reader still fails closed on a non-trailing incomplete turn inside a compacted segment', async () => {
+test('Claude reader drops an interrupted turn inside a compacted segment and keeps the following completed turn', async () => {
   const logText = await readFile(join(FIXTURES, 'redacted-claude-golden.jsonl'), 'utf8');
-  const control = [
+  // A caller user before the pending turn's completion record marks the pending turn as interrupted
+  // (user resubmitted before turn_duration): it is dropped, never promoted, and reading continues.
+  const compacted = [
     ...claudeCompactionBoundaryRecords('compact-1', 'COMPACT-SUMMARY'),
-    ...claudeCompletedTurnRecords('post-compact-1', 'compact-1-summary', 'third prompt', 'THIRD-ANSWER'),
-  ].map((entry) => JSON.stringify(entry)).join('\n');
-  assert.equal(extractClaudeNativeTurns(`${logText}\n${control}\n`).length, 3);
-
-  const malformed = [
-    ...claudeCompactionBoundaryRecords('compact-1', 'COMPACT-SUMMARY'),
-    { type: 'user', uuid: 'incomplete-user', parentUuid: 'compact-1-summary', message: { role: 'user', content: 'first' } },
     {
-      type: 'assistant', uuid: 'incomplete-assistant', parentUuid: 'incomplete-user',
-      message: { id: 'incomplete-message', role: 'assistant', content: [{ type: 'text', text: 'answer' }] },
+      type: 'user', uuid: 'interrupted-user', parentUuid: 'compact-1-summary',
+      message: { role: 'user', content: 'INTERRUPTED-PROMPT' },
     },
-    { type: 'user', uuid: 'following-user', parentUuid: 'incomplete-assistant', message: { role: 'user', content: 'second' } },
+    {
+      type: 'assistant', uuid: 'interrupted-assistant', parentUuid: 'interrupted-user',
+      message: { id: 'interrupted-message', role: 'assistant', content: [{ type: 'text', text: 'INTERRUPTED-PARTIAL-ANSWER' }] },
+    },
+    { type: 'user', uuid: 'following-user', parentUuid: 'interrupted-assistant', message: { role: 'user', content: 'second' } },
     {
       type: 'assistant', uuid: 'following-assistant', parentUuid: 'following-user',
       message: { id: 'following-message', role: 'assistant', content: [{ type: 'text', text: 'answer 2' }] },
@@ -415,7 +414,19 @@ test('Claude reader still fails closed on a non-trailing incomplete turn inside 
     },
   ].map((entry) => JSON.stringify(entry)).join('\n');
 
-  rejects(() => extractClaudeNativeTurns(`${logText}\n${malformed}\n`));
+  const turns = extractClaudeNativeTurns(`${logText}\n${compacted}\n`);
+  assert.equal(turns.length, 3);
+  assert.equal(turns[2]!.userText, 'second');
+  assert.equal(turns[2]!.assistantText, 'answer 2');
+  assert.deepEqual(turns[2]!.nativeIds, {
+    userId: 'following-user',
+    assistantIds: ['following-message'],
+    completionId: 'following-completion',
+  });
+  const serialized = JSON.stringify(turns);
+  assert.ok(!serialized.includes('INTERRUPTED-PROMPT'), 'interrupted caller text must never be emitted');
+  assert.ok(!serialized.includes('INTERRUPTED-PARTIAL-ANSWER'), 'partial assistant text of an interrupted turn must never be emitted');
+  assert.ok(!serialized.includes('COMPACT-SUMMARY'), 'the compaction summary must never be emitted');
 });
 
 test('Claude reader excludes prompt-id-linked local command transcript records', async () => {
@@ -528,25 +539,25 @@ test('Claude reader drops an entire provider-error interrupted turn', async () =
   assert.equal(turns.some((turn) => turn.assistantText.includes('partial answer') || turn.assistantText.includes('rate limit notice')), false);
 });
 
-test('Claude reader rejects a non-trailing turn without a completion boundary', async () => {
+test('Claude reader drops an interrupted turn and continues from the next caller user', async () => {
   const logText = await readFile(join(FIXTURES, 'redacted-claude-golden.jsonl'), 'utf8');
   const parent = lastUuid(logText);
-  const malformed = [
+  const interrupted = [
     {
-      type: 'user', uuid: 'missing-completion-user', parentUuid: parent,
-      message: { role: 'user', content: 'first' },
+      type: 'user', uuid: 'interrupted-user', parentUuid: parent,
+      message: { role: 'user', content: 'INTERRUPTED-PROMPT' },
     },
     {
-      type: 'assistant', uuid: 'missing-completion-assistant', parentUuid: 'missing-completion-user',
-      message: { id: 'missing-completion-message', role: 'assistant', content: [{ type: 'text', text: 'answer' }] },
+      type: 'assistant', uuid: 'interrupted-assistant', parentUuid: 'interrupted-user',
+      message: { id: 'interrupted-message', role: 'assistant', content: [{ type: 'text', text: 'INTERRUPTED-PARTIAL-ANSWER' }] },
     },
     {
-      type: 'user', uuid: 'following-user', parentUuid: 'missing-completion-assistant',
-      message: { role: 'user', content: 'second' },
+      type: 'user', uuid: 'following-user', parentUuid: 'interrupted-assistant',
+      message: { role: 'user', content: 'second prompt' },
     },
     {
       type: 'assistant', uuid: 'following-assistant', parentUuid: 'following-user',
-      message: { id: 'following-message', role: 'assistant', content: [{ type: 'text', text: 'answer 2' }] },
+      message: { id: 'following-message', role: 'assistant', content: [{ type: 'text', text: 'SECOND-ANSWER' }] },
     },
     {
       type: 'system', subtype: 'turn_duration', uuid: 'following-completion',
@@ -554,7 +565,16 @@ test('Claude reader rejects a non-trailing turn without a completion boundary', 
     },
   ].map((entry) => JSON.stringify(entry)).join('\n');
 
-  rejects(() => extractClaudeNativeTurns(`${logText}\n${malformed}\n`));
+  const turns = extractClaudeNativeTurns(`${logText}\n${interrupted}\n`);
+  assert.equal(turns.length, 3);
+  assert.deepEqual(turns.map((turn) => turn.assistantText), ['REMEMBERED', 'BLUEFIN-7', 'SECOND-ANSWER']);
+  assert.equal(turns[2]!.userText, 'second prompt');
+  assert.deepEqual(turns[2]!.nativeIds, {
+    userId: 'following-user',
+    assistantIds: ['following-message'],
+    completionId: 'following-completion',
+  });
+  assert.ok(!JSON.stringify(turns).includes('INTERRUPTED-'), 'interrupted turn text must never be emitted');
 });
 
 test('Claude reader rejects malformed parent lineage without truncating or looping', async () => {
