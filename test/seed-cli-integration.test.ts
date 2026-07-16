@@ -47,7 +47,9 @@ function detectOpenCodeSeedable(): boolean {
     return false;
   }
   try {
-    const sandbox = spawnSync('/usr/bin/sandbox-exec', ['-p', '(version 1)', '/usr/bin/true'], { stdio: 'ignore' });
+    // Seatbelt default-denies exec, so a bare '(version 1)' probe fails on every machine; probe with
+    // the same allow-default base the production localhost-only profile uses.
+    const sandbox = spawnSync('/usr/bin/sandbox-exec', ['-p', '(version 1) (allow default)', '/usr/bin/true'], { stdio: 'ignore' });
     return sandbox.status === 0 && spawnSync('opencode', ['--version'], { stdio: 'ignore' }).status === 0;
   } catch {
     return false;
