@@ -79,7 +79,8 @@ async function writeToTarget(target: BackendId, turns: readonly SeedWriteTurn[])
     case 'codex': {
       const log = await readFile(join(FIXTURES, 'redacted-codex-golden.jsonl'), 'utf8');
       const result = buildCodexHistoryEntries(log, turns, Date.UTC(2026, 6, 14, 12, 0, 0));
-      assert.equal(result.lines.length, turns.length * 4);
+      // Five lines per turn: task_started, user, user_message mirror, assistant, task_complete.
+      assert.equal(result.lines.length, turns.length * 5);
       const readBack = extractCodexNativeTurns(`${log.trimEnd()}\n${result.lines.join('\n')}\n`);
       return { written: result.written, readBack };
     }

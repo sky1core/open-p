@@ -11,7 +11,7 @@ import {
   appendCodexSessionHistory,
   buildCodexHistoryEntries,
 } from '../src/backends/codex/history-writer.js';
-import { codexNativeStateDigest, readCodexNativeSession } from '../src/backends/codex/native-reader.js';
+import { codexNativeStateDigest, extractCodexNativeTurns, readCodexNativeSession } from '../src/backends/codex/native-reader.js';
 import { uuidv7 } from '../src/backends/codex/uuidv7.js';
 import { installFileDriftOnNextSync } from './helpers/native-file-sync-fault.js';
 
@@ -118,17 +118,19 @@ for (const [label, path] of [['golden', GOLDEN], ['bootstrap', BOOTSTRAP]] as co
 
     const built = buildCodexHistoryEntries(logText, TURNS, NOW);
     const lines = built.lines;
-    assert.equal(lines.length, TURNS.length * 4);
+    assert.equal(lines.length, TURNS.length * 5);
     assert.equal(built.written.length, TURNS.length);
     const appended = lines.map((l) => JSON.parse(l) as Entry);
 
-    // Native sequence and content reconstruction: task_started, user, assistant, task_complete per turn.
+    // Native sequence and content reconstruction per turn:
+    // task_started, user, user_message mirror, assistant, task_complete.
     TURNS.forEach((turn, turnIndex) => {
-      const base = turnIndex * 4;
+      const base = turnIndex * 5;
       const startedEntry = appended[base]!;
       const userEntry = appended[base + 1]!;
-      const assistantEntry = appended[base + 2]!;
-      const completedEntry = appended[base + 3]!;
+      const mirrorEntry = appended[base + 2]!;
+      const assistantEntry = appended[base + 3]!;
+      const completedEntry = appended[base + 4]!;
       assert.equal(startedEntry.type, 'event_msg');
       assert.equal(startedEntry.payload.type, 'task_started');
       assert.equal(userEntry.type, 'response_item');
@@ -136,6 +138,10 @@ for (const [label, path] of [['golden', GOLDEN], ['bootstrap', BOOTSTRAP]] as co
       assert.equal(userEntry.payload.type, 'message');
       assert.equal(userEntry.payload.content.length, 1);
       assert.equal(codexText(userEntry), turn.userText);
+      // The caller-evidence mirror directly follows the user record and carries the fixed shape:
+      // no payload id and no turn_id, so it can never masquerade as a portable native id.
+      assert.equal(mirrorEntry.type, 'event_msg');
+      assert.deepEqual(mirrorEntry.payload, { type: 'user_message', message: turn.userText });
       assert.equal(assistantEntry.type, 'response_item');
       assert.equal(assistantEntry.payload.role, 'assistant');
       assert.equal(assistantEntry.payload.type, 'message');
@@ -181,18 +187,30 @@ for (const [label, path] of [['golden', GOLDEN], ['bootstrap', BOOTSTRAP]] as co
       assert.equal(Object.prototype.hasOwnProperty.call(entry.payload, 'id'), false);
     }
 
-    // Timestamps follow Codex turn boundaries: start/user share the start, assistant/complete share completion.
+    // Timestamps follow Codex turn boundaries: start/user/mirror share the start, assistant/complete
+    // share completion.
     TURNS.forEach((_turn, turnIndex) => {
-      const base = turnIndex * 4;
+      const base = turnIndex * 5;
       assert.equal(appended[base]!.timestamp, new Date(NOW + turnIndex * 2).toISOString());
       assert.equal(appended[base + 1]!.timestamp, new Date(NOW + turnIndex * 2).toISOString());
-      assert.equal(appended[base + 2]!.timestamp, new Date(NOW + turnIndex * 2 + 1).toISOString());
+      assert.equal(appended[base + 2]!.timestamp, new Date(NOW + turnIndex * 2).toISOString());
       assert.equal(appended[base + 3]!.timestamp, new Date(NOW + turnIndex * 2 + 1).toISOString());
+      assert.equal(appended[base + 4]!.timestamp, new Date(NOW + turnIndex * 2 + 1).toISOString());
     });
 
     // Round-trip: re-extracted texts equal the input turns.
     assert.deepEqual(responseItems(appended).map(codexText), EXPECTED_TEXT_ENTRIES.map((t) => t.text));
     assert.deepEqual(built.written.map((turn) => turn.logicalId), TURNS.map((turn) => turn.logicalId));
+
+    // Reader round-trip: the seeded turns come back as portable turns with the caller's exact
+    // texts, and the mirror never surfaces as an extra user or assistant text.
+    const fixtureTurns = extractCodexNativeTurns(logText);
+    const reread = extractCodexNativeTurns(`${logText.trimEnd()}\n${lines.join('\n')}\n`);
+    assert.equal(reread.length, fixtureTurns.length + TURNS.length);
+    const rereadSuffix = reread.slice(fixtureTurns.length);
+    assert.deepEqual(rereadSuffix.map((turn) => turn.userText), TURNS.map((turn) => turn.userText));
+    assert.deepEqual(rereadSuffix.map((turn) => turn.assistantText), TURNS.map((turn) => turn.assistantText));
+    assert.deepEqual(rereadSuffix.map((turn) => turn.nativeIds), built.written.map((turn) => turn.nativeIds));
   });
 }
 
@@ -200,14 +218,15 @@ test('each pair gets a fresh turn id shared by user and assistant', async () => 
   const logText = await readFile(GOLDEN, 'utf8');
   const appended = buildCodexHistoryEntries(logText, TURNS, NOW).lines.map((l) => JSON.parse(l) as Entry);
   for (let turnIndex = 0; turnIndex < TURNS.length; turnIndex += 1) {
-    const base = turnIndex * 4;
+    const base = turnIndex * 5;
     const turnId = eventTurnIdOf(appended[base]!);
     assert.equal(turnIdOf(appended[base + 1]!), turnId);
-    assert.equal(turnIdOf(appended[base + 2]!), turnId);
-    assert.equal(eventTurnIdOf(appended[base + 3]!), turnId);
+    // The user_message mirror at base + 2 carries no turn_id; the fresh id binds the pair around it.
+    assert.equal(turnIdOf(appended[base + 3]!), turnId);
+    assert.equal(eventTurnIdOf(appended[base + 4]!), turnId);
     assert.match(turnId, UUIDV7_RE);
   }
-  assert.notEqual(eventTurnIdOf(appended[0]!), eventTurnIdOf(appended[4]!));
+  assert.notEqual(eventTurnIdOf(appended[0]!), eventTurnIdOf(appended[5]!));
 });
 
 test('user template payload ids are removed instead of being cloned into seeded turns', async () => {
@@ -255,9 +274,16 @@ test('appendCodexSessionHistory appends to the resolved log without rewriting th
   assert.equal(sha256(after.subarray(0, original.length)), beforeSha, 'existing bytes (instructions head included) must be immutable');
   const originalLines = original.toString('utf8').trimEnd().split('\n');
   const afterLines = after.toString('utf8').trimEnd().split('\n');
-  assert.equal(afterLines.length, originalLines.length + TURNS.length * 4);
+  assert.equal(afterLines.length, originalLines.length + TURNS.length * 5);
   const appended = afterLines.slice(originalLines.length).map((l) => JSON.parse(l) as Entry);
   assert.deepEqual(responseItems(appended).map(codexText), EXPECTED_TEXT_ENTRIES.map((t) => t.text));
+  // Every appended user record is immediately mirrored as caller evidence.
+  appended.forEach((entry, index) => {
+    if (entry.type !== 'response_item' || entry.payload.role !== 'user') return;
+    const next = appended[index + 1]!;
+    assert.equal(next.type, 'event_msg');
+    assert.deepEqual(next.payload, { type: 'user_message', message: codexText(entry) });
+  });
 });
 
 test('Codex production reader confirms a stable file-backed settlement snapshot', async () => {
@@ -318,7 +344,7 @@ test('appendCodexSessionHistory rejects a foreign session_meta before mutation',
   assert.deepEqual(await readFile(logPath), foreign);
 });
 
-test('appendCodexSessionHistory rejects a trailing incomplete lifecycle before mutation', async () => {
+test('appendCodexSessionHistory appends after a trailing user-only open window', async () => {
   const homeDir = await mkdtemp(join(tmpdir(), 'openp-codex-home-'));
   const sessionId = randomUUID();
   const logPath = join(homeDir, 'sessions', '2026', '07', '14', `rollout-2026-07-14T00-00-00-${sessionId}.jsonl`);
@@ -336,9 +362,82 @@ test('appendCodexSessionHistory rejects a trailing incomplete lifecycle before m
         internal_chat_message_metadata_passthrough: { turn_id: danglingTurnId },
       },
     },
+    // A real interrupted caller still has its user_message mirror; only the assistant is missing.
+    { type: 'event_msg', payload: { type: 'user_message', message: 'unfinished target state' } },
   ].map((entry) => JSON.stringify(entry)).join('\n')}\n`);
   await writeFile(logPath, original);
 
+  const result = await appendCodexSessionHistory({
+    sessionId,
+    cwd: FIXTURE_CWD,
+    turns: TURNS.slice(0, 1),
+    persistPreparedAppend,
+    homeDir,
+  });
+  assert.equal(result.sessionId, sessionId);
+  assert.equal(result.turns.length, 1);
+  assert.equal(result.turns[0]!.logicalId, TURNS[0]!.logicalId);
+
+  const after = await readFile(logPath);
+  assert.deepEqual(after.subarray(0, original.length), original, 'dangling open window bytes must be preserved as an exact prefix');
+  const appended = after.subarray(original.length).toString('utf8').trimEnd().split('\n')
+    .map((l) => JSON.parse(l) as Entry);
+  assert.equal(appended.length, 5);
+  assert.equal(appended[0]!.payload.type, 'task_started');
+  assert.equal(appended[1]!.payload.role, 'user');
+  assert.deepEqual(appended[2]!.payload, { type: 'user_message', message: TURNS[0]!.userText });
+  assert.equal(appended[3]!.payload.role, 'assistant');
+  assert.equal(appended[4]!.payload.type, 'task_complete');
+  // No false completion: the seeded turn carries the caller's text, not the dangling user text,
+  // and its lifecycle uses a fresh turn id, not the dangling one.
+  assert.equal(codexText(appended[1]!), TURNS[0]!.userText);
+  assert.equal(codexText(appended[3]!), TURNS[0]!.assistantText);
+  assert.notEqual(eventTurnIdOf(appended[0]!), danglingTurnId);
+
+  const read = await readCodexNativeSession({ backend: 'codex', sessionId, homeDir });
+  assert.equal(read.turns.length, 3);
+  assert.equal(read.turns[2]!.userText, TURNS[0]!.userText);
+  assert.ok(read.turns.every((turn) => turn.userText !== 'unfinished target state'),
+    'the dangling user-only window must never surface as a completed turn');
+});
+
+test('appendCodexSessionHistory rejects a trailing user+assistant open window before mutation', async () => {
+  const homeDir = await mkdtemp(join(tmpdir(), 'openp-codex-home-'));
+  const sessionId = randomUUID();
+  const logPath = join(homeDir, 'sessions', '2026', '07', '14', `rollout-2026-07-14T00-00-00-${sessionId}.jsonl`);
+  await mkdir(dirname(logPath), { recursive: true });
+  const base = logForSession(await readFile(GOLDEN, 'utf8'), sessionId);
+  const danglingTurnId = uuidv7(NOW + 100_000);
+  const original = Buffer.from(`${base.trimEnd()}\n${[
+    { type: 'event_msg', payload: { type: 'task_started', turn_id: danglingTurnId } },
+    {
+      type: 'response_item',
+      payload: {
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_text', text: 'unfinished target state' }],
+        internal_chat_message_metadata_passthrough: { turn_id: danglingTurnId },
+      },
+    },
+    // A real interrupted caller still has its user_message mirror, so closing this window would
+    // promote a caller-visible turn the caller never requested.
+    { type: 'event_msg', payload: { type: 'user_message', message: 'unfinished target state' } },
+    {
+      type: 'response_item',
+      payload: {
+        type: 'message',
+        role: 'assistant',
+        id: 'msg_0123456789abcdef0123456789abcdef',
+        content: [{ type: 'output_text', text: 'half-written answer' }],
+        internal_chat_message_metadata_passthrough: { turn_id: danglingTurnId },
+      },
+    },
+  ].map((entry) => JSON.stringify(entry)).join('\n')}\n`);
+  await writeFile(logPath, original);
+
+  // The appended task_started would implicitly close the dangling window and promote it into a
+  // completed portable turn the caller never requested; the append preflight fails closed before
+  // any mutation because the candidate no longer preserves the logical prefix.
   await assert.rejects(
     () => appendCodexSessionHistory({
       sessionId,
@@ -369,7 +468,7 @@ test('missing user or assistant template is a protocol violation', () => {
 test('unparseable lines are skipped, not rewritten or fatal', async () => {
   const logText = `not json\n${await readFile(GOLDEN, 'utf8')}\n{unterminated`;
   const built = buildCodexHistoryEntries(logText, TURNS, NOW);
-  assert.equal(built.lines.length, TURNS.length * 4);
+  assert.equal(built.lines.length, TURNS.length * 5);
   const appended = built.lines.map((l) => JSON.parse(l) as Entry);
   assert.deepEqual(responseItems(appended).map(codexText), EXPECTED_TEXT_ENTRIES.map((t) => t.text));
 });

@@ -19,7 +19,8 @@ interface JsonObject {
 
 // Resolves the Codex rollout log (honoring instance homeDir), then appends the caller's turns as
 // native task lifecycle events and `response_item` messages cloned from the log's own last
-// task/user/assistant/completion entries (runtime golden). Existing session_meta, instructions,
+// task/user/assistant/completion entries (runtime golden), plus an `event_msg user_message` mirror
+// right after each user record (the Reader's caller evidence). Existing session_meta, instructions,
 // world_state, and event_msg records are never rewritten.
 export async function appendCodexSessionHistory(input: {
   readonly sessionId: string;
@@ -129,9 +130,18 @@ export function buildCodexHistoryEntries(
     const assistantEntry = buildCodexAssistantEntry(assistantTemplate!, turn.assistantText, assistantTimestamp, turnId);
     const startedEntry = buildCodexTaskStartedEntry(taskStartedTemplate!, userTimestamp, turnId);
     const completedEntry = buildCodexTaskCompleteEntry(taskCompleteTemplate!, assistantTimestamp, turnId, turn.assistantText);
+    // The event_msg user_message mirror immediately after the user record is the caller evidence
+    // the Reader requires; without it the seeded user is treated as an injected record. Fixed
+    // shape (no id/turn_id): the mirror is diagnostic caller evidence, not a portable native id.
+    const mirrorEntry = {
+      timestamp: userTimestamp,
+      type: 'event_msg',
+      payload: { type: 'user_message', message: turn.userText },
+    };
     const assistantId = ((assistantEntry.payload as JsonObject).id as string);
     lines.push(JSON.stringify(startedEntry));
     lines.push(JSON.stringify(userEntry));
+    lines.push(JSON.stringify(mirrorEntry));
     lines.push(JSON.stringify(assistantEntry));
     lines.push(JSON.stringify(completedEntry));
     written.push({

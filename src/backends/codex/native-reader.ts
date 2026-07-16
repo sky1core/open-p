@@ -15,6 +15,7 @@ interface JsonObject {
 interface PendingCodexTurn {
   started: boolean;
   completed: boolean;
+  aborted: boolean;
   userId: string | null;
   userText: string | null;
   assistantIds: string[];
@@ -99,10 +100,12 @@ export function assertCodexNativeSessionIdentity(logText: string, expectedSessio
   }
 }
 
+// Turn windows open at task_started(T) and close at the first of task_complete(T), turn_aborted(T),
+// the next task_started, or end of file. task_complete is not required for completion: Codex omits
+// it for a minority of otherwise-completed turns, so a window closed by the next task_started is a
+// normally-completed turn. The completion boundary id is always T from task_started.
 export function extractCodexNativeTurns(logText: string): readonly NativeSessionTurn[] {
   const byTurnId = new Map<string, PendingCodexTurn>();
-  const startedTurnIds = new Set<string>();
-  const completedTurnIds = new Set<string>();
   const order: string[] = [];
   const orderedTurnIds = new Set<string>();
   let activeTurnId: string | null = null;
@@ -111,6 +114,13 @@ export function extractCodexNativeTurns(logText: string): readonly NativeSession
       orderedTurnIds.add(turnId);
       order.push(turnId);
     }
+  };
+  const closeActiveWindowAsCompleted = (): void => {
+    if (activeTurnId === null) return;
+    const pending = ensureTurn(byTurnId, activeTurnId);
+    pending.completed = true;
+    pending.completionId = activeTurnId;
+    activeTurnId = null;
   };
 
   const entries: JsonObject[] = [];
@@ -121,29 +131,32 @@ export function extractCodexNativeTurns(logText: string): readonly NativeSession
 
   for (let index = 0; index < entries.length; index += 1) {
     const entry = entries[index]!;
+    // Compaction summaries (`replacement_history`) are never read as source turns; the completed
+    // original turns around the marker stay portable.
+    if (entry.type === 'compacted') continue;
     rejectUnsupportedCodexSource(entry);
     const payload = isObject(entry.payload) ? entry.payload : null;
     if (!payload) continue;
+    if (payload.type === 'context_compacted') continue;
     if (entry.type === 'event_msg' && payload.type === 'task_started') {
       const turnId = requireLifecycleTurnId(payload, 'task_started');
+      if (activeTurnId !== null && activeTurnId !== turnId) {
+        closeActiveWindowAsCompleted();
+      }
       const pending = ensureTurn(byTurnId, turnId);
+      if (pending.aborted) {
+        throw new OpenPError(`Codex source has events after turn_aborted for ${turnId}`, EXIT_CODES.protocolViolation);
+      }
       if (pending.completed) {
         throw new OpenPError(`Codex source has events after task_complete for ${turnId}`, EXIT_CODES.protocolViolation);
       }
       if (pending.started) {
         throw new OpenPError(`Codex source has duplicate task_started for ${turnId}`, EXIT_CODES.protocolViolation);
       }
-      if (activeTurnId !== null) {
-        throw new OpenPError(
-          `Codex source overlaps task lifecycle ${activeTurnId} with ${turnId}`,
-          EXIT_CODES.protocolViolation,
-        );
-      }
       if (pending.userText !== null || pending.assistantText.length > 0) {
         throw new OpenPError(`Codex source turn ${turnId} has portable messages before task_started`, EXIT_CODES.protocolViolation);
       }
       rememberTurnId(turnId);
-      startedTurnIds.add(turnId);
       pending.started = true;
       activeTurnId = turnId;
       continue;
@@ -160,13 +173,17 @@ export function extractCodexNativeTurns(logText: string): readonly NativeSession
       if (activeTurnId !== turnId) {
         throw new OpenPError(`Codex source task_complete does not own the active lifecycle`, EXIT_CODES.protocolViolation);
       }
-      if (pending.userText === null || pending.assistantText.length === 0) {
-        throw new OpenPError(`Codex source turn ${turnId} completed before portable user/assistant messages`, EXIT_CODES.protocolViolation);
-      }
       rememberTurnId(turnId);
-      completedTurnIds.add(turnId);
-      pending.completed = true;
-      pending.completionId = turnId;
+      closeActiveWindowAsCompleted();
+      continue;
+    }
+    if (entry.type === 'event_msg' && payload.type === 'turn_aborted') {
+      const turnId = requireLifecycleTurnId(payload, 'turn_aborted');
+      const pending = ensureTurn(byTurnId, turnId);
+      if (activeTurnId !== turnId || !pending.started) {
+        throw new OpenPError(`Codex source turn_aborted does not own the active lifecycle`, EXIT_CODES.protocolViolation);
+      }
+      pending.aborted = true;
       activeTurnId = null;
       continue;
     }
@@ -176,12 +193,16 @@ export function extractCodexNativeTurns(logText: string): readonly NativeSession
     if (payload.role === 'user') {
       const text = readSingleText(payload.content, 'input_text');
       if (text === null) continue;
+      // A caller user carries a user_message mirror in both record generations. Injected records
+      // (environment_context, AGENTS.md instructions, codex_internal_context, subagent notices)
+      // also carry a passthrough turn_id but have no mirror, so passthrough alone must not qualify
+      // a caller.
+      if (!isCallerMirrorRecord(entries[index + 1])) continue;
       let turnId = readTurnId(payload);
       if (!turnId) {
-        if (!isCallerMirrorRecord(entries[index + 1])) continue;
         if (activeTurnId === null) {
           throw new OpenPError(
-            'Codex source has a window-bound caller message outside a task lifecycle window',
+            'Codex source has a caller message outside a task lifecycle window',
             EXIT_CODES.protocolViolation,
           );
         }
@@ -190,11 +211,17 @@ export function extractCodexNativeTurns(logText: string): readonly NativeSession
       rejectOverlappingPortableMessage(activeTurnId, turnId);
       rememberTurnId(turnId);
       const pending = ensureTurn(byTurnId, turnId);
+      if (pending.aborted) {
+        throw new OpenPError(`Codex source has events after turn_aborted for ${turnId}`, EXIT_CODES.protocolViolation);
+      }
       if (pending.completed) {
         throw new OpenPError(`Codex source has events after task_complete for ${turnId}`, EXIT_CODES.protocolViolation);
       }
       if (pending.userText !== null) {
         throw new OpenPError('Codex source has multiple user messages for one turn id', EXIT_CODES.protocolViolation);
+      }
+      if (pending.assistantText.length > 0) {
+        throw new OpenPError(`Codex source turn ${turnId} has assistant before portable user message`, EXIT_CODES.protocolViolation);
       }
       pending.userId = nativePayloadId(payload, `user:${turnId}`);
       pending.userText = text;
@@ -213,11 +240,11 @@ export function extractCodexNativeTurns(logText: string): readonly NativeSession
       }
       rejectOverlappingPortableMessage(activeTurnId, turnId);
       const pending = ensureTurn(byTurnId, turnId);
+      if (pending.aborted) {
+        throw new OpenPError(`Codex source has events after turn_aborted for ${turnId}`, EXIT_CODES.protocolViolation);
+      }
       if (pending.completed) {
         throw new OpenPError(`Codex source has events after task_complete for ${turnId}`, EXIT_CODES.protocolViolation);
-      }
-      if (pending.userText === null) {
-        throw new OpenPError(`Codex source turn ${turnId} has assistant before portable user message`, EXIT_CODES.protocolViolation);
       }
       rememberTurnId(turnId);
       pending.assistantIds.push(passthroughTurnId !== null
@@ -229,34 +256,26 @@ export function extractCodexNativeTurns(logText: string): readonly NativeSession
 
   const turns: NativeSessionTurn[] = [];
   for (const [index, turnId] of order.entries()) {
-    const pending = byTurnId.get(turnId);
-    if (!pending) {
-      const trailingWithoutCompletion = index === order.length - 1 && !completedTurnIds.has(turnId);
-      if (trailingWithoutCompletion) {
-        continue;
-      }
+    const pending = byTurnId.get(turnId)!;
+    // turn_aborted-closed windows are dropped: their content is an interrupted turn.
+    if (pending.aborted) continue;
+    if (!pending.completed) {
+      // The trailing open window (or a trailing passthrough fragment) at end of file is dropped.
+      if (index === order.length - 1) continue;
       throw new OpenPError(
-        `Codex source turn ${turnId} has lifecycle evidence without portable message structure`,
+        `Codex source turn ${turnId} has malformed or non-trailing incomplete lifecycle state`,
         EXIT_CODES.protocolViolation,
       );
     }
-    const complete = startedTurnIds.has(turnId) && completedTurnIds.has(turnId) &&
-      pending.userText !== null && pending.userText.length > 0 &&
-      pending.userId !== null && pending.assistantText.length > 0 && pending.completionId !== null;
-    if (!complete) {
-      const trailingWithoutCompletion = index === order.length - 1 && !completedTurnIds.has(turnId);
-      if (!trailingWithoutCompletion) {
-        throw new OpenPError(
-          `Codex source turn ${turnId} has malformed or non-trailing incomplete lifecycle state`,
-          EXIT_CODES.protocolViolation,
-        );
-      }
-      continue;
-    }
     const userText = pending.userText;
     const userId = pending.userId;
+    // A completed window without both a caller user message and assistant output (for example a
+    // developer-only or tool-only turn) is not a portable turn and is skipped; the file continues.
+    if (userText === null || userText.length === 0 || userId === null || pending.assistantText.length === 0) {
+      continue;
+    }
     const completionId = pending.completionId;
-    if (userText === null || userId === null || completionId === null) {
+    if (completionId === null) {
       throw new OpenPError(`Codex source turn ${turnId} has no completion id`, EXIT_CODES.protocolViolation);
     }
     if (pending.assistantIds.includes(completionId)) {
@@ -301,6 +320,7 @@ function ensureTurn(map: Map<string, PendingCodexTurn>, turnId: string): Pending
   const created: PendingCodexTurn = {
     started: false,
     completed: false,
+    aborted: false,
     userId: null,
     userText: null,
     assistantIds: [],
@@ -311,21 +331,20 @@ function ensureTurn(map: Map<string, PendingCodexTurn>, turnId: string): Pending
   return created;
 }
 
-function requireLifecycleTurnId(payload: JsonObject, type: 'task_started' | 'task_complete'): string {
+function requireLifecycleTurnId(payload: JsonObject, type: 'task_started' | 'task_complete' | 'turn_aborted'): string {
   if (typeof payload.turn_id === 'string' && payload.turn_id.length > 0) {
     return payload.turn_id;
   }
   throw new OpenPError(`Codex ${type} event is missing turn_id`, EXIT_CODES.protocolViolation);
 }
 
+// thread_rolled_back invalidates prior turns, so the file is not safely recoverable and the
+// conversion fails closed. Compaction markers are handled (skipped) by the extraction loop.
 function rejectUnsupportedCodexSource(entry: JsonObject): void {
-  if (entry.type === 'compacted') {
-    throw new OpenPError('Codex compacted rollouts are not supported for seed source conversion', EXIT_CODES.protocolViolation);
-  }
   const payload = isObject(entry.payload) ? entry.payload : null;
   if (!payload) return;
-  if (payload.type === 'context_compacted' || payload.type === 'turn_aborted' || payload.type === 'thread_rolled_back') {
-    throw new OpenPError(`Codex ${String(payload.type)} rollouts are not supported for seed source conversion`, EXIT_CODES.protocolViolation);
+  if (payload.type === 'thread_rolled_back') {
+    throw new OpenPError('Codex thread_rolled_back rollouts are not supported for seed source conversion', EXIT_CODES.protocolViolation);
   }
 }
 
