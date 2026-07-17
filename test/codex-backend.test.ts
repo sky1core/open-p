@@ -12,11 +12,17 @@ import { EXIT_CODES, OpenPError } from '../src/core/errors.js';
 const FIXTURES = join(import.meta.dirname, 'fixtures', 'codex');
 const FAKE_CODEX_SESSION_ID = '22222222-2222-4222-8222-222222222222';
 
+// A caller turn boundary as Codex writes it: the `response_item` user record immediately followed
+// by its `event_msg user_message` mirror. Both records are required — the mirror alone is not
+// caller evidence.
 function codexUserTurn(message = 'prompt'): string {
-  return JSON.stringify({
-    type: 'event_msg',
-    payload: { type: 'user_message', message },
-  });
+  return [
+    JSON.stringify({
+      type: 'response_item',
+      payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: message }] },
+    }),
+    JSON.stringify({ type: 'event_msg', payload: { type: 'user_message', message } }),
+  ].join('\n');
 }
 
 function withFakeBin(name: string, fn: () => Promise<void>): () => Promise<void> {

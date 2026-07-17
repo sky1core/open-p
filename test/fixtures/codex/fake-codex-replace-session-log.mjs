@@ -13,6 +13,10 @@ await rename(oldLogPath, `${oldLogPath}.moved`).catch(() => undefined);
 await mkdir(dirname(newLogPath), { recursive: true });
 
 const replacementEvents = [
+  {
+    type: 'response_item',
+    payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'replacement prompt' }] },
+  },
   { type: 'event_msg', payload: { type: 'user_message', message: 'replacement prompt' } },
   {
     type: 'event_msg',

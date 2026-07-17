@@ -16,11 +16,24 @@ import { createCodexBackendProvider } from '../src/backends/codex/index.js';
 import { EXIT_CODES, OpenPError } from '../src/core/errors.js';
 import { formatWorkerTurnResult } from '../src/core/output.js';
 
-function codexUserTurn(): string {
-  return JSON.stringify({
-    type: 'event_msg',
-    payload: { type: 'user_message', message: 'prompt' },
-  });
+// A caller turn boundary as Codex writes it: the `response_item` user record immediately followed
+// by its `event_msg user_message` mirror. Both records are required — the mirror alone is not
+// caller evidence.
+function codexUserTurn(message = 'prompt', passthroughTurnId?: string): string {
+  return [
+    JSON.stringify({
+      type: 'response_item',
+      payload: {
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_text', text: message }],
+        ...(passthroughTurnId
+          ? { internal_chat_message_metadata_passthrough: { turn_id: passthroughTurnId } }
+          : {}),
+      },
+    }),
+    JSON.stringify({ type: 'event_msg', payload: { type: 'user_message', message } }),
+  ].join('\n');
 }
 
 function readCodexSessionLogFixture(name: string): string {
@@ -1129,4 +1142,273 @@ test('extractSessionLogResult rejects multiple active turn boundaries', () => {
       error.reasonCode === 'multiple_turn_boundaries' &&
       error.message.includes('Codex session log contains multiple active turn boundaries'),
   );
+});
+
+const OWN_TURN = '019f0000-0000-7000-8000-000000000001';
+const OTHER_TURN = '019f0000-0000-7000-8000-000000000002';
+
+function taskStarted(turnId: string): string {
+  return JSON.stringify({ type: 'event_msg', payload: { type: 'task_started', turn_id: turnId } });
+}
+
+function taskComplete(turnId: string): string {
+  return JSON.stringify({ type: 'event_msg', payload: { type: 'task_complete', turn_id: turnId } });
+}
+
+// A user record Codex injects into the transcript (environment context, AGENTS.md instructions).
+// It carries a passthrough turn_id but no `user_message` mirror, so it is not caller evidence.
+function injectedUserRecord(text: string, passthroughTurnId?: string): string {
+  return JSON.stringify({
+    type: 'response_item',
+    payload: {
+      type: 'message',
+      role: 'user',
+      content: [{ type: 'input_text', text }],
+      ...(passthroughTurnId
+        ? { internal_chat_message_metadata_passthrough: { turn_id: passthroughTurnId } }
+        : {}),
+    },
+  });
+}
+
+function assistantMessage(text: string, phase: string, passthroughTurnId?: string): string {
+  return JSON.stringify({
+    type: 'response_item',
+    payload: {
+      type: 'message',
+      role: 'assistant',
+      phase,
+      content: [{ type: 'output_text', text }],
+      ...(passthroughTurnId
+        ? { internal_chat_message_metadata_passthrough: { turn_id: passthroughTurnId } }
+        : {}),
+    },
+  });
+}
+
+// Design test 1: another controller opens a turn while this turn is still running, so both turns'
+// records interleave in the segment. The other turn's caller is that turn's boundary, not this
+// one's, so the segment still has exactly one active turn boundary.
+test('extractSessionLogResult accepts a concurrent turn caller and returns this turn answer', () => {
+  const log = [
+    taskStarted(OWN_TURN),
+    codexUserTurn('own prompt', OWN_TURN),
+    assistantMessage('own progress', 'commentary', OWN_TURN),
+    taskStarted(OTHER_TURN),
+    codexUserTurn('concurrent prompt', OTHER_TURN),
+    assistantMessage('concurrent progress', 'commentary', OTHER_TURN),
+    assistantMessage('own interleaved progress', 'commentary', OWN_TURN),
+    assistantMessage('concurrent turn answer', 'final_answer', OTHER_TURN),
+    taskComplete(OTHER_TURN),
+    assistantMessage('own turn answer', 'final_answer', OWN_TURN),
+    taskComplete(OWN_TURN),
+  ].join('\n');
+
+  const result = extractSessionLogResult(log);
+  assert.equal(result.content, 'own turn answer');
+  assert.equal(result.hasCompletionEvidence, true);
+});
+
+// Design test 2: two callers bound to this same turn are a split prompt submission, which the
+// input-submission protocol still rejects.
+test('extractSessionLogResult rejects two callers bound to the same turn', () => {
+  const log = [
+    taskStarted(OWN_TURN),
+    codexUserTurn('first half', OWN_TURN),
+    codexUserTurn('second half', OWN_TURN),
+    assistantMessage('own turn answer', 'final_answer', OWN_TURN),
+    taskComplete(OWN_TURN),
+  ].join('\n');
+
+  assert.throws(
+    () => extractSessionLogResult(log),
+    (error) => error instanceof OpenPError &&
+      error.exitCode === EXIT_CODES.protocolViolation &&
+      error.reasonCode === 'multiple_turn_boundaries',
+  );
+});
+
+// Design test 3: a `user_message` mirror with no preceding user record is not caller evidence.
+test('extractSessionLogResult rejects a segment whose only user evidence is an orphan mirror', () => {
+  const log = [
+    taskStarted(OWN_TURN),
+    JSON.stringify({ type: 'event_msg', payload: { type: 'user_message', message: 'orphan mirror' } }),
+    assistantMessage('own turn answer', 'final_answer', OWN_TURN),
+    taskComplete(OWN_TURN),
+  ].join('\n');
+
+  assert.throws(
+    () => extractSessionLogResult(log),
+    (error) => error instanceof OpenPError &&
+      error.exitCode === EXIT_CODES.protocolViolation &&
+      error.reasonCode === 'missing_turn_boundary',
+  );
+});
+
+// Design test 4: a window-bound (pre-passthrough) caller with no passthrough binds to the open
+// task_started window, so the segment still resolves its own active turn boundary.
+test('extractSessionLogResult attributes a window-bound caller without passthrough by open window', () => {
+  const log = [
+    taskStarted(OWN_TURN),
+    codexUserTurn('own prompt'),
+    assistantMessage('own progress', 'commentary'),
+    assistantMessage('own turn answer', 'final_answer'),
+    taskComplete(OWN_TURN),
+  ].join('\n');
+
+  const result = extractSessionLogResult(log);
+  assert.equal(result.content, 'own turn answer');
+  assert.equal(result.hasCompletionEvidence, true);
+});
+
+// A concurrent segment whose output records carry no turn evidence (window-bound generation) is not
+// resolvable. Open-window position is not output evidence, so this keeps failing exactly as it does
+// on the released contract rather than answering from a guess.
+test('extractSessionLogResult fails closed on a concurrent segment with window-bound output', () => {
+  const log = [
+    taskStarted(OWN_TURN),
+    codexUserTurn('own prompt'),
+    assistantMessage('own progress', 'commentary'),
+    taskStarted(OTHER_TURN),
+    codexUserTurn('concurrent prompt'),
+    assistantMessage('concurrent turn answer', 'final_answer'),
+    taskComplete(OTHER_TURN),
+    assistantMessage('own turn answer', 'final_answer'),
+    taskComplete(OWN_TURN),
+  ].join('\n');
+
+  assert.throws(
+    () => extractSessionLogResult(log),
+    (error) => error instanceof OpenPError &&
+      error.exitCode === EXIT_CODES.protocolViolation &&
+      error.reasonCode === 'multiple_turn_boundaries' &&
+      error.message.includes('Codex session log contains multiple active turn boundaries'),
+  );
+});
+
+// An `event_msg agent_message` with no mirror partner carries no turn id at all. Inside a concurrent
+// segment it is not resolvable and must fail closed.
+test('extractSessionLogResult fails closed on a concurrent segment with an orphan agent_message', () => {
+  const log = [
+    taskStarted(OWN_TURN),
+    codexUserTurn('own prompt', OWN_TURN),
+    taskStarted(OTHER_TURN),
+    codexUserTurn('concurrent prompt', OTHER_TURN),
+    JSON.stringify({ type: 'event_msg', payload: { type: 'agent_message', message: 'orphan progress', phase: 'commentary' } }),
+    assistantMessage('own turn answer', 'final_answer', OWN_TURN),
+    taskComplete(OWN_TURN),
+  ].join('\n');
+
+  assert.throws(
+    () => extractSessionLogResult(log),
+    (error) => error instanceof OpenPError &&
+      error.exitCode === EXIT_CODES.protocolViolation &&
+      error.reasonCode === 'multiple_turn_boundaries',
+  );
+});
+
+// Boundary guard: a segment with a single caller turn is untouched. Every output is this turn's, so
+// records without turn evidence stay in the result and no attribution check applies.
+test('extractSessionLogResult leaves a single-caller-turn segment untouched despite unbound output', () => {
+  const log = [
+    taskStarted(OWN_TURN),
+    codexUserTurn('own prompt', OWN_TURN),
+    JSON.stringify({ type: 'event_msg', payload: { type: 'agent_message', message: 'orphan progress', phase: 'commentary' } }),
+    JSON.stringify({ type: 'response_item', payload: { type: 'reasoning', summary: [{ text: 'unbound reasoning' }] } }),
+    assistantMessage('own turn answer', 'final_answer'),
+    taskComplete(OWN_TURN),
+  ].join('\n');
+
+  const result = extractSessionLogResult(log);
+  assert.equal(result.content, 'own turn answer');
+  assert.equal(result.reasoningContent, 'unbound reasoning');
+  assert.equal(result.commentaryEvents.length, 2);
+});
+
+// The ordering risk the boundary fix alone would leave: the concurrent turn's final answer lands
+// after this turn's answer but before this turn's task_complete. Selecting the last final answer in
+// the segment would silently return the wrong turn's answer.
+test('extractSessionLogResult keeps this turn answer when a concurrent final answer lands last', () => {
+  const log = [
+    taskStarted(OWN_TURN),
+    codexUserTurn('own prompt', OWN_TURN),
+    taskStarted(OTHER_TURN),
+    codexUserTurn('concurrent prompt', OTHER_TURN),
+    assistantMessage('own turn answer', 'final_answer', OWN_TURN),
+    assistantMessage('concurrent turn answer', 'final_answer', OTHER_TURN),
+    taskComplete(OTHER_TURN),
+    taskComplete(OWN_TURN),
+  ].join('\n');
+
+  const result = extractSessionLogResult(log);
+  assert.equal(result.content, 'own turn answer');
+  assert.notEqual(result.content, 'concurrent turn answer');
+});
+
+// Concurrent turn reasoning and tool artifacts are that turn's output and must not enter this
+// turn's reasoning or commentary either.
+test('extractSessionLogResult keeps concurrent turn reasoning and tools out of this turn output', () => {
+  const passthrough = (turnId: string) => ({ internal_chat_message_metadata_passthrough: { turn_id: turnId } });
+  const log = [
+    taskStarted(OWN_TURN),
+    codexUserTurn('own prompt', OWN_TURN),
+    JSON.stringify({ type: 'response_item', payload: { type: 'reasoning', summary: [{ text: 'own reasoning' }], ...passthrough(OWN_TURN) } }),
+    JSON.stringify({ type: 'response_item', payload: { type: 'function_call', call_id: 'call_own', name: 'own_tool', arguments: '{}', ...passthrough(OWN_TURN) } }),
+    taskStarted(OTHER_TURN),
+    codexUserTurn('concurrent prompt', OTHER_TURN),
+    JSON.stringify({ type: 'response_item', payload: { type: 'reasoning', summary: [{ text: 'concurrent reasoning' }], ...passthrough(OTHER_TURN) } }),
+    JSON.stringify({ type: 'response_item', payload: { type: 'function_call', call_id: 'call_other', name: 'concurrent_tool', arguments: '{}', ...passthrough(OTHER_TURN) } }),
+    assistantMessage('concurrent turn answer', 'final_answer', OTHER_TURN),
+    taskComplete(OTHER_TURN),
+    assistantMessage('own turn answer', 'final_answer', OWN_TURN),
+    taskComplete(OWN_TURN),
+  ].join('\n');
+
+  const result = extractSessionLogResult(log);
+  assert.equal(result.content, 'own turn answer');
+  assert.equal(result.reasoningContent, 'own reasoning');
+  const toolNames = result.commentaryEvents
+    .flatMap((event) => (event.message.content as any[]))
+    .filter((block) => block?.type === 'tool_use')
+    .map((block) => block.name);
+  assert.deepEqual(toolNames, ['own_tool']);
+});
+
+// Design test 5: injected user records carry a passthrough turn_id but no mirror, so passthrough
+// alone must not qualify a caller.
+test('extractSessionLogResult does not count mirror-less injected user records as callers', () => {
+  const log = [
+    taskStarted(OWN_TURN),
+    injectedUserRecord('<environment_context>\n  <cwd>/redacted/workspace</cwd>\n</environment_context>', OWN_TURN),
+    codexUserTurn('own prompt', OWN_TURN),
+    injectedUserRecord('# AGENTS.md instructions for /redacted/workspace', OWN_TURN),
+    assistantMessage('own turn answer', 'final_answer', OWN_TURN),
+    taskComplete(OWN_TURN),
+  ].join('\n');
+
+  const result = extractSessionLogResult(log);
+  assert.equal(result.content, 'own turn answer');
+});
+
+// Design test 6: regression for the observed run-path failures. Redacted from
+// ~/.codex/sessions/2026/06/30/rollout-...-019f14d8-....jsonl records 9261-9866, where a second
+// controller opened turn 019f56a0-8… while openp's turn 019f5693-a… was still running. Before the
+// turn-attribution fix this segment failed with exit 40 multiple_turn_boundaries.
+test('extractSessionLogResult recovers the openp turn from a redacted concurrent-turn segment', () => {
+  const result = extractSessionLogResult(
+    readCodexSessionLogFixture('redacted-session-log-concurrent-turns.jsonl'),
+  );
+  assert.equal(result.content, 'redacted own turn final answer');
+  assert.notEqual(result.content, 'redacted concurrent turn final answer');
+  assert.equal(result.hasCompletionEvidence, true);
+  assert.equal(result.model, 'codex-test-model');
+  assert.deepEqual(result.usage, { inputTokens: 200, outputTokens: 40, cacheReadInputTokens: 1000 });
+
+  // No text from the concurrently running turn 019f56a0-8… reaches this turn's output.
+  const texts = result.commentaryEvents.map((event) => (event.message.content as any[])[0]?.text);
+  assert.deepEqual(texts, [
+    'redacted own turn progress message',
+    'redacted own turn interleaved message',
+    'redacted own turn final answer',
+  ]);
 });

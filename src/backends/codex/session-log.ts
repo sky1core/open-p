@@ -6,7 +6,7 @@ import { ARTIFACT_REJECTION_REASONS, EXIT_CODES, OpenPError } from '../../core/e
 import { isSafeSessionId } from '../../core/session-id.js';
 import type { AssistantEventSnapshot } from '../../core/types.js';
 import { buildAssistantAnswerSnapshot, buildAssistantSnapshot, buildCodexToolSnapshot } from './jsonl-parser.js';
-import { CodexNativeAssistantClassifier } from './native-assistant.js';
+import { type CodexNativeAssistantClassification, CodexNativeAssistantClassifier } from './native-assistant.js';
 
 export interface CodexSessionDiagnostics {
   readonly model: string | null;
@@ -199,8 +199,192 @@ async function readCodexSessionLogResultAtPath(
   return extractSessionLogResult(raw);
 }
 
+interface CodexLogEntry {
+  readonly event: Record<string, unknown>;
+  readonly type: string | undefined;
+  readonly payload: Record<string, unknown> | null;
+}
+
+function parseSessionLogEntries(rawLog: string): CodexLogEntry[] {
+  const entries: CodexLogEntry[] = [];
+  for (const rawLine of rawLog.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    let event: Record<string, unknown>;
+    try {
+      event = JSON.parse(line) as Record<string, unknown>;
+    } catch {
+      throw new OpenPError(
+        'Codex session log contains malformed JSONL',
+        EXIT_CODES.protocolViolation,
+        ARTIFACT_REJECTION_REASONS.unsupportedArtifactShape,
+      );
+    }
+    entries.push({ event, type: event.type as string | undefined, payload: asObject(event.payload) });
+  }
+  return entries;
+}
+
+function isCallerMirrorRecord(entry: CodexLogEntry | undefined): boolean {
+  return entry !== undefined && entry.type === 'event_msg' && entry.payload?.type === 'user_message';
+}
+
+function readPassthroughTurnId(payload: Record<string, unknown>): string | null {
+  const passthrough = asObject(payload.internal_chat_message_metadata_passthrough);
+  if (passthrough && typeof passthrough.turn_id === 'string' && passthrough.turn_id.length > 0) {
+    return passthrough.turn_id;
+  }
+  return null;
+}
+
+function readLifecycleTurnId(payload: Record<string, unknown>): string | null {
+  return typeof payload.turn_id === 'string' && payload.turn_id.length > 0 ? payload.turn_id : null;
+}
+
+interface CodexSegmentAttribution {
+  readonly ownTurnCallerCount: number;
+  // Records whose output belongs to a concurrently running other turn. Only ever populated for
+  // concurrent segments; empty for the single-caller-turn segments that are the common case.
+  readonly foreignRecordIndexes: ReadonlySet<number>;
+}
+
+// Active-turn boundary counting and, for concurrent segments only, output attribution.
+//
+// A caller is a `response_item` user message whose immediately following record is its
+// `event_msg user_message` mirror (SPEC "Active turn segment"). Injected transcript records
+// (`<environment_context>`, `# AGENTS.md instructions`, ...) carry a passthrough `turn_id` but no
+// mirror, so they are not callers. Each caller binds to its passthrough `turn_id`, else to the top
+// of the open-window stack (`task_started` .. `task_complete`/`turn_aborted`), which is `null` for
+// the implicit first `codex exec` window that has no `task_started`. The segment starts at the
+// offset captured immediately before openp submits, so its first caller is openp's own prompt; only
+// callers bound to that same turn are this turn's boundaries. A concurrently running other turn's
+// caller is that turn's boundary, not this one's.
+//
+// When a second controller opened its own turn inside this segment, this turn's output must not
+// absorb that turn's output. Output records are bound to a turn only by evidence carried on the
+// record: a passthrough `turn_id`, an `event_msg agent_message`'s mirror partner passthrough, or an
+// `event_msg` tool artifact's lifecycle `turn_id`. Open-window position is not used as output
+// evidence: measured against passthrough ground truth over the 2026-06..07 corpus it misbinds real
+// records (16 disagreements while more than one window is open, including this turn's own
+// interleaved message while another turn's window is on top). A concurrent segment holding any
+// output record without that evidence is therefore not resolvable and keeps failing exactly as it
+// does today, rather than guessing and answering from the wrong turn.
+function analyzeSegmentAttribution(
+  entries: readonly CodexLogEntry[],
+  classifications: readonly CodexNativeAssistantClassification[],
+): CodexSegmentAttribution {
+  const openWindowStack: string[] = [];
+  const callerTurnKeys = new Set<string | null>();
+  let ownTurnKey: string | null = null;
+  let ownTurnKeyResolved = false;
+  let ownTurnCallerCount = 0;
+  const outputTurnByIndex = new Map<number, string | null>();
+  const unattributableOutputIndexes: number[] = [];
+
+  for (let index = 0; index < entries.length; index += 1) {
+    const { type, payload } = entries[index]!;
+    if (!payload) continue;
+
+    if (type === 'event_msg' && payload.type === 'task_started') {
+      const lifecycleTurnId = readLifecycleTurnId(payload);
+      if (lifecycleTurnId) openWindowStack.push(lifecycleTurnId);
+      continue;
+    }
+    if (type === 'event_msg' && (payload.type === 'task_complete' || payload.type === 'turn_aborted')) {
+      const lifecycleTurnId = readLifecycleTurnId(payload);
+      if (lifecycleTurnId) {
+        const at = openWindowStack.lastIndexOf(lifecycleTurnId);
+        if (at !== -1) openWindowStack.splice(at, 1);
+      }
+      continue;
+    }
+
+    if (type === 'response_item' && payload.type === 'message' && payload.role === 'user') {
+      if (!isCallerMirrorRecord(entries[index + 1])) continue;
+      const turnKey = readPassthroughTurnId(payload)
+        ?? (openWindowStack.length > 0 ? openWindowStack[openWindowStack.length - 1]! : null);
+      if (!ownTurnKeyResolved) {
+        ownTurnKey = turnKey;
+        ownTurnKeyResolved = true;
+      }
+      callerTurnKeys.add(turnKey);
+      if (turnKey === ownTurnKey) ownTurnCallerCount += 1;
+      continue;
+    }
+
+    const outputTurn = readOutputRecordTurn(entries, classifications, index);
+    if (outputTurn === undefined) continue;
+    if (outputTurn === null) unattributableOutputIndexes.push(index);
+    else outputTurnByIndex.set(index, outputTurn);
+  }
+
+  if (callerTurnKeys.size <= 1) {
+    // Single caller turn: every output in the segment is this turn's, so nothing is filtered and no
+    // attribution evidence is required.
+    return { ownTurnCallerCount, foreignRecordIndexes: new Set() };
+  }
+
+  if (unattributableOutputIndexes.length > 0) {
+    throw new OpenPError(
+      'Codex session log contains multiple active turn boundaries',
+      EXIT_CODES.protocolViolation,
+      ARTIFACT_REJECTION_REASONS.multipleTurnBoundaries,
+    );
+  }
+
+  const foreignRecordIndexes = new Set<number>();
+  for (const [index, turnKey] of outputTurnByIndex) {
+    if (turnKey !== ownTurnKey) foreignRecordIndexes.add(index);
+  }
+  return { ownTurnCallerCount, foreignRecordIndexes };
+}
+
+// The turn a record's output belongs to: `undefined` when the record produces no output, `null`
+// when it produces output that carries no turn evidence.
+function readOutputRecordTurn(
+  entries: readonly CodexLogEntry[],
+  classifications: readonly CodexNativeAssistantClassification[],
+  index: number,
+): string | null | undefined {
+  const { type, payload } = entries[index]!;
+  if (!payload) return undefined;
+  const classification = classifications[index]!;
+
+  if (classification.assistant?.source === 'event_msg') {
+    // An `event_msg agent_message` carries no turn id of its own. When its adjacent
+    // `response_item` mirror is the record that carries the passthrough, that mirror is dropped as
+    // a duplicate and this record is the surviving artifact, so it binds to its partner's turn.
+    const mirrorIndex = index + 1;
+    if (!classifications[mirrorIndex]?.mirrored) return null;
+    return readPassthroughTurnId(entries[mirrorIndex]!.payload!);
+  }
+  if (classification.assistant?.source === 'response_item') {
+    if (classification.mirrored) return undefined;
+    return readPassthroughTurnId(payload);
+  }
+
+  if (type === 'response_item') {
+    if (payload.type === 'reasoning') {
+      return extractSummaryText(payload) ? readPassthroughTurnId(payload) : undefined;
+    }
+    if (payload.type === 'message') return undefined;
+    return buildCodexToolSnapshot(payload) ? readPassthroughTurnId(payload) : undefined;
+  }
+  if (type === 'event_msg') {
+    return buildCodexToolSnapshot(payload, type) ? readLifecycleTurnId(payload) : undefined;
+  }
+  if (type === 'item.started' || type === 'item.completed') {
+    const item = asObject(entries[index]!.event.item);
+    if (!item) return undefined;
+    const producesOutput = (item.type === 'agent_message' && typeof item.text === 'string' && item.text.trim())
+      || buildCodexToolSnapshot(item, type) !== null;
+    return producesOutput ? null : undefined;
+  }
+  return undefined;
+}
+
 export function extractSessionLogResult(rawLog: string): CodexSessionLogResult {
-  const lines = rawLog.split(/\r?\n/);
+  const entries = parseSessionLogEntries(rawLog);
 
   let content: string | null = null;
   let sessionId: string | null = null;
@@ -211,8 +395,12 @@ export function extractSessionLogResult(rawLog: string): CodexSessionLogResult {
   let currentTurnModel: string | null = null;
   let latestTokenCount: CodexSessionDiagnostics | null = null;
   let hasCompletionEvidence = false;
-  let callerUserTurnCount = 0;
+  // Classify once so the attribution pre-pass and the extraction loop below make identical
+  // mirror decisions from the same classifier state.
   const assistantClassifier = new CodexNativeAssistantClassifier();
+  const classifications = entries.map((entry) => assistantClassifier.classify(entry.event));
+  const attribution = analyzeSegmentAttribution(entries, classifications);
+  const callerUserTurnCount = attribution.ownTurnCallerCount;
   let assistantEventSequence = 0;
   const nextAssistantEventId = (nativeId: unknown): string => {
     if (typeof nativeId === 'string' && nativeId.trim()) {
@@ -228,24 +416,12 @@ export function extractSessionLogResult(rawLog: string): CodexSessionLogResult {
     commentaryEvents.push(buildAssistantSnapshot(text, String(phase), nextAssistantEventId(nativeId)));
   };
 
-  for (const rawLine of lines) {
-    const line = rawLine.trim();
-    if (!line) continue;
-
-    let event: Record<string, unknown>;
-    try {
-      event = JSON.parse(line) as Record<string, unknown>;
-    } catch {
-      throw new OpenPError(
-        'Codex session log contains malformed JSONL',
-        EXIT_CODES.protocolViolation,
-        ARTIFACT_REJECTION_REASONS.unsupportedArtifactShape,
-      );
-    }
-
-    const type = event.type as string | undefined;
-    const payload = asObject(event.payload);
-    const assistantClassification = assistantClassifier.classify(event);
+  for (let index = 0; index < entries.length; index += 1) {
+    const { event, type, payload } = entries[index]!;
+    // Output of a concurrently running other turn is not this turn's result. Only ever non-empty
+    // for concurrent segments, and only holds records whose sole effect is producing output.
+    if (attribution.foreignRecordIndexes.has(index)) continue;
+    const assistantClassification = classifications[index]!;
 
     if (type === 'turn_context') {
       currentTurnModel = payload && typeof payload.model === 'string' && payload.model.trim()
@@ -317,9 +493,6 @@ export function extractSessionLogResult(rawLog: string): CodexSessionLogResult {
 
     if (type === 'event_msg') {
       if (!payload) continue;
-      if (payload.type === 'user_message') {
-        callerUserTurnCount += 1;
-      }
       if (payload.type === 'agent_message') {
         const assistant = assistantClassification.assistant;
         if (assistant?.source === 'event_msg') {

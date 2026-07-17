@@ -16,6 +16,10 @@ function emitStdout(event) {
 
 const events = [
   { type: 'turn_context', payload: { model: 'codex-current-model' } },
+  {
+    type: 'response_item',
+    payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'resume prompt' }] },
+  },
   { type: 'event_msg', payload: { type: 'user_message', message: 'resume prompt' } },
   {
     type: 'response_item',

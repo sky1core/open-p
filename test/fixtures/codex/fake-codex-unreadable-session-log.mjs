@@ -9,6 +9,10 @@ const logDir = join(codexHome, 'sessions', '2026', '05', '23');
 const logPath = join(logDir, `rollout-${sessionId}.jsonl`);
 
 const events = [
+  {
+    type: 'response_item',
+    payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'resume prompt' }] },
+  },
   { type: 'event_msg', payload: { type: 'user_message', message: 'resume prompt' } },
   {
     type: 'turn.completed',

@@ -14,6 +14,7 @@ LOG_PATH="$SESSION_DIR/rollout-$SESSION_ID.jsonl"
 mkdir -p "$SESSION_DIR"
 {
   echo '{"type":"turn_context","payload":{"model":"codex-test-model"}}'
+  echo '{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}}'
   echo '{"type":"event_msg","payload":{"type":"user_message","message":"hello"}}'
   echo '{"type":"response_item","payload":{"type":"reasoning","summary":[{"text":"Thinking about it..."}],"content":null}}'
   echo '{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":200,"cached_input_tokens":100,"output_tokens":40},"last_token_usage":{"input_tokens":200,"cached_input_tokens":100,"output_tokens":40},"model_context_window":200000}}}'

@@ -16,6 +16,10 @@ const logPath = join(logDir, `rollout-${sessionId}.jsonl`);
 const event = (value) => JSON.stringify(value);
 appendFileSync(logPath, [
   event({ type: 'turn_context', payload: { model: 'codex-no-final-model' } }),
+  event({
+    type: 'response_item',
+    payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'current prompt' }] },
+  }),
   event({ type: 'event_msg', payload: { type: 'user_message', message: 'current prompt' } }),
   event({
     type: 'event_msg',

@@ -25,6 +25,10 @@ await writeFile(logPath, '', 'utf8');
 emitStdout({ type: 'thread.started', thread_id: SESSION_ID });
 
 await appendLog({ type: 'turn_context', payload: { model: 'codex-log-model' } });
+await appendLog({
+  type: 'response_item',
+  payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hello' }] },
+});
 await appendLog({ type: 'event_msg', payload: { type: 'user_message', message: 'hello' } });
 await sleep(100);
 await appendLog({

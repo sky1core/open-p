@@ -21,6 +21,10 @@ if (lastMessagePath) {
 }
 
 appendLog({ type: 'turn_context', payload: { model: 'codex-mirror-model' } });
+appendLog({
+  type: 'response_item',
+  payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hello' }] },
+});
 appendLog({ type: 'event_msg', payload: { type: 'user_message', message: 'hello' } });
 
 writeStdout({ type: 'thread.started', thread_id: SESSION_ID });
