@@ -401,7 +401,7 @@ test('appendCodexSessionHistory appends after a trailing user-only open window',
     'the dangling user-only window must never surface as a completed turn');
 });
 
-test('appendCodexSessionHistory rejects a trailing user+assistant open window before mutation', async () => {
+test('appendCodexSessionHistory appends after a trailing user+assistant open window it recovers as a turn', async () => {
   const homeDir = await mkdtemp(join(tmpdir(), 'openp-codex-home-'));
   const sessionId = randomUUID();
   const logPath = join(homeDir, 'sessions', '2026', '07', '14', `rollout-2026-07-14T00-00-00-${sessionId}.jsonl`);
@@ -419,8 +419,7 @@ test('appendCodexSessionHistory rejects a trailing user+assistant open window be
         internal_chat_message_metadata_passthrough: { turn_id: danglingTurnId },
       },
     },
-    // A real interrupted caller still has its user_message mirror, so closing this window would
-    // promote a caller-visible turn the caller never requested.
+    // A real interrupted caller still has its user_message mirror.
     { type: 'event_msg', payload: { type: 'user_message', message: 'unfinished target state' } },
     {
       type: 'response_item',
@@ -435,20 +434,26 @@ test('appendCodexSessionHistory rejects a trailing user+assistant open window be
   ].map((entry) => JSON.stringify(entry)).join('\n')}\n`);
   await writeFile(logPath, original);
 
-  // The appended task_started would implicitly close the dangling window and promote it into a
-  // completed portable turn the caller never requested; the append preflight fails closed before
-  // any mutation because the candidate no longer preserves the logical prefix.
-  await assert.rejects(
-    () => appendCodexSessionHistory({
-      sessionId,
-      cwd: FIXTURE_CWD,
-      turns: TURNS.slice(0, 1),
-      persistPreparedAppend,
-      homeDir,
-    }),
-    (error) => error instanceof OpenPError && error.exitCode === 40,
-  );
-  assert.deepEqual(await readFile(logPath), original);
+  // A trailing open window that ends on an assistant message is a completed turn under the
+  // reader's trailing rule (exec omits the final task_complete), so it is present identically in
+  // the before and candidate views and the append preserves the logical prefix.
+  const result = await appendCodexSessionHistory({
+    sessionId,
+    cwd: FIXTURE_CWD,
+    turns: TURNS.slice(0, 1),
+    persistPreparedAppend,
+    homeDir,
+  });
+  assert.equal(result.turns.length, 1);
+
+  const after = await readFile(logPath);
+  assert.deepEqual(after.subarray(0, original.length), original, 'dangling open window bytes must be preserved as an exact prefix');
+  const read = await readCodexNativeSession({ backend: 'codex', sessionId, homeDir });
+  assert.equal(read.turns.length, 4);
+  assert.equal(read.turns[2]!.userText, 'unfinished target state');
+  assert.equal(read.turns[2]!.assistantText, 'half-written answer');
+  assert.equal(read.turns[2]!.nativeIds.completionId, danglingTurnId);
+  assert.equal(read.turns[3]!.userText, TURNS[0]!.userText);
 });
 
 test('missing user or assistant template is a protocol violation', () => {

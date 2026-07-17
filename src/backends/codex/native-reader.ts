@@ -21,6 +21,14 @@ interface PendingCodexTurn {
   assistantIds: string[];
   assistantText: string[];
   completionId: string | null;
+  // Index of the turn's own task_started record; null for implicit windows without one.
+  taskStartedIndex: number | null;
+  // Index of the last record attributed to this turn (lifecycle start, portable messages, and
+  // non-message response_items).
+  lastRecordIndex: number | null;
+  // Whether the last attributed substantive record is an assistant message (trailing-completion
+  // evidence for an open window at end of file).
+  tailIsAssistantMessage: boolean;
 }
 
 export async function readCodexNativeSession(input: {
@@ -71,56 +79,69 @@ async function confirmStableCodexNativeFile(path: string, before: Buffer): Promi
   }
 }
 
+// The first session_meta record carries the file's own identity and must match the requested
+// session. `payload.id` is the authoritative identity: the 2026-06..07 full census (3,438
+// rollouts) observed it on 3,438/3,438 first metas, always equal to the filename session id.
+// `payload.session_id` is thread-lineage metadata, not this rollout's identity — absent 2,039,
+// equal to `id` 925, different from `id` 474 (CLI 0.142.0+ resume/fork lineage) — so it is never
+// identity-compared (nor type-checked) while `payload.id` is present, and serves as the identity
+// only when `payload.id` is absent (legacy shape). `codex exec resume`/fork rewrites replay the
+// parent thread's history into the new rollout, including the parent's session_meta records, so
+// second and later session_meta records carry parent ids and are not identity-checked.
 export function assertCodexNativeSessionIdentity(logText: string, expectedSessionId: string): void {
-  let sessionMetaCount = 0;
   for (const line of logText.split(/\r?\n/)) {
     if (!line.trim()) continue;
     const entry = parseLine(line);
     if (entry.type !== 'session_meta') continue;
-    sessionMetaCount += 1;
     const payload = isObject(entry.payload) ? entry.payload : null;
-    if (!payload) {
+    const identityKey = payload === null
+      ? null
+      : Object.prototype.hasOwnProperty.call(payload, 'id')
+        ? 'id'
+        : Object.prototype.hasOwnProperty.call(payload, 'session_id')
+          ? 'session_id'
+          : null;
+    if (payload === null || identityKey === null) {
       throw new OpenPError('Codex session metadata has no native session identity', EXIT_CODES.protocolViolation);
     }
-    const identities: string[] = [];
-    for (const key of ['id', 'session_id'] as const) {
-      if (!Object.prototype.hasOwnProperty.call(payload, key)) continue;
-      const value = payload[key];
-      if (typeof value !== 'string' || value.length === 0) {
-        throw new OpenPError('Codex session metadata has an invalid native session identity', EXIT_CODES.protocolViolation);
-      }
-      identities.push(value);
+    const identity = payload[identityKey];
+    if (typeof identity !== 'string' || identity.length === 0) {
+      throw new OpenPError('Codex session metadata has an invalid native session identity', EXIT_CODES.protocolViolation);
     }
-    if (identities.length === 0 || identities.some((identity) => identity !== expectedSessionId)) {
+    if (identity !== expectedSessionId) {
       throw new OpenPError('Codex session log belongs to a different native session', EXIT_CODES.protocolViolation);
     }
+    return;
   }
-  if (sessionMetaCount !== 1) {
-    throw new OpenPError('Codex session log must contain exactly one session metadata record', EXIT_CODES.protocolViolation);
-  }
+  throw new OpenPError('Codex session log has no session metadata record', EXIT_CODES.protocolViolation);
 }
 
-// Turn windows open at task_started(T) and close at the first of task_complete(T), turn_aborted(T),
-// the next task_started, or end of file. task_complete is not required for completion: Codex omits
-// it for a minority of otherwise-completed turns, so a window closed by the next task_started is a
-// normally-completed turn. The completion boundary id is always T from task_started.
+// Turn windows open at task_started(T) and leave the open-window stack at explicit
+// task_complete(T) or turn_aborted(T). Records without a passthrough turn_id attribute to the top
+// of the open-window stack; `codex exec resume`/fork rewrites replay parallel and nested windows,
+// so a new task_started never closes another window. Codex also omits task_complete for some
+// otherwise-completed turns (and omits task_started for the implicit first `codex exec` window),
+// so completion is settled in a post-pass: explicit task_complete wins; otherwise a turn whose
+// last attributed record precedes another turn's task_started is completed-by-successor;
+// otherwise a trailing window whose last attributed record is an assistant message is a completed
+// turn, and anything else is dropped as interrupted mid-work. The completion boundary id is
+// always T.
 export function extractCodexNativeTurns(logText: string): readonly NativeSessionTurn[] {
   const byTurnId = new Map<string, PendingCodexTurn>();
   const order: string[] = [];
   const orderedTurnIds = new Set<string>();
-  let activeTurnId: string | null = null;
+  const openWindowStack: string[] = [];
   const rememberTurnId = (turnId: string): void => {
     if (!orderedTurnIds.has(turnId)) {
       orderedTurnIds.add(turnId);
       order.push(turnId);
     }
   };
-  const closeActiveWindowAsCompleted = (): void => {
-    if (activeTurnId === null) return;
-    const pending = ensureTurn(byTurnId, activeTurnId);
-    pending.completed = true;
-    pending.completionId = activeTurnId;
-    activeTurnId = null;
+  const openWindowTop = (): string | null =>
+    openWindowStack.length > 0 ? openWindowStack[openWindowStack.length - 1]! : null;
+  const removeOpenWindow = (turnId: string): void => {
+    const at = openWindowStack.lastIndexOf(turnId);
+    if (at !== -1) openWindowStack.splice(at, 1);
   };
 
   const entries: JsonObject[] = [];
@@ -140,9 +161,6 @@ export function extractCodexNativeTurns(logText: string): readonly NativeSession
     if (payload.type === 'context_compacted') continue;
     if (entry.type === 'event_msg' && payload.type === 'task_started') {
       const turnId = requireLifecycleTurnId(payload, 'task_started');
-      if (activeTurnId !== null && activeTurnId !== turnId) {
-        closeActiveWindowAsCompleted();
-      }
       const pending = ensureTurn(byTurnId, turnId);
       if (pending.aborted) {
         throw new OpenPError(`Codex source has events after turn_aborted for ${turnId}`, EXIT_CODES.protocolViolation);
@@ -153,41 +171,56 @@ export function extractCodexNativeTurns(logText: string): readonly NativeSession
       if (pending.started) {
         throw new OpenPError(`Codex source has duplicate task_started for ${turnId}`, EXIT_CODES.protocolViolation);
       }
-      if (pending.userText !== null || pending.assistantText.length > 0) {
-        throw new OpenPError(`Codex source turn ${turnId} has portable messages before task_started`, EXIT_CODES.protocolViolation);
-      }
       rememberTurnId(turnId);
       pending.started = true;
-      activeTurnId = turnId;
+      pending.taskStartedIndex = index;
+      pending.lastRecordIndex = index;
+      openWindowStack.push(turnId);
       continue;
     }
     if (entry.type === 'event_msg' && payload.type === 'task_complete') {
       const turnId = requireLifecycleTurnId(payload, 'task_complete');
       const pending = ensureTurn(byTurnId, turnId);
+      if (pending.aborted) {
+        throw new OpenPError(`Codex source has events after turn_aborted for ${turnId}`, EXIT_CODES.protocolViolation);
+      }
       if (pending.completed) {
         throw new OpenPError(`Codex source has duplicate task_complete for ${turnId}`, EXIT_CODES.protocolViolation);
       }
-      if (!pending.started) {
-        throw new OpenPError(`Codex source turn ${turnId} completed before task_started`, EXIT_CODES.protocolViolation);
-      }
-      if (activeTurnId !== turnId) {
-        throw new OpenPError(`Codex source task_complete does not own the active lifecycle`, EXIT_CODES.protocolViolation);
-      }
+      // A task_complete without task_started is the implicit first `codex exec` window: the CLI
+      // omits the first turn's task_started but still emits its completion.
       rememberTurnId(turnId);
-      closeActiveWindowAsCompleted();
+      pending.completed = true;
+      pending.completionId = turnId;
+      removeOpenWindow(turnId);
       continue;
     }
     if (entry.type === 'event_msg' && payload.type === 'turn_aborted') {
       const turnId = requireLifecycleTurnId(payload, 'turn_aborted');
       const pending = ensureTurn(byTurnId, turnId);
-      if (activeTurnId !== turnId || !pending.started) {
-        throw new OpenPError(`Codex source turn_aborted does not own the active lifecycle`, EXIT_CODES.protocolViolation);
+      if (pending.completed) {
+        throw new OpenPError(`Codex source has events after task_complete for ${turnId}`, EXIT_CODES.protocolViolation);
       }
       pending.aborted = true;
-      activeTurnId = null;
+      removeOpenWindow(turnId);
       continue;
     }
-    if (entry.type !== 'response_item' || payload.type !== 'message') {
+    if (entry.type !== 'response_item') {
+      // Other event_msg records (user_message, agent_message, token_count,
+      // thread_settings_applied, ...) are bookkeeping and never attribute to a window.
+      continue;
+    }
+    if (payload.type !== 'message') {
+      // Non-message response_items (reasoning, function_call, function_call_output,
+      // custom_tool_call, ...) attribute for window-tail tracking only. Attribution to an
+      // already-settled window is unobserved in the corpus, so the record is discarded without
+      // failing the file; its content is never read.
+      const turnId = readTurnId(payload) ?? openWindowTop();
+      if (turnId === null) continue;
+      const pending = ensureTurn(byTurnId, turnId);
+      if (pending.completed || pending.aborted) continue;
+      pending.lastRecordIndex = index;
+      pending.tailIsAssistantMessage = false;
       continue;
     }
     if (payload.role === 'user') {
@@ -198,17 +231,13 @@ export function extractCodexNativeTurns(logText: string): readonly NativeSession
       // also carry a passthrough turn_id but have no mirror, so passthrough alone must not qualify
       // a caller.
       if (!isCallerMirrorRecord(entries[index + 1])) continue;
-      let turnId = readTurnId(payload);
-      if (!turnId) {
-        if (activeTurnId === null) {
-          throw new OpenPError(
-            'Codex source has a caller message outside a task lifecycle window',
-            EXIT_CODES.protocolViolation,
-          );
-        }
-        turnId = activeTurnId;
+      const turnId = readTurnId(payload) ?? openWindowTop();
+      if (turnId === null) {
+        throw new OpenPError(
+          'Codex source has a caller message outside a task lifecycle window',
+          EXIT_CODES.protocolViolation,
+        );
       }
-      rejectOverlappingPortableMessage(activeTurnId, turnId);
       rememberTurnId(turnId);
       const pending = ensureTurn(byTurnId, turnId);
       if (pending.aborted) {
@@ -217,28 +246,32 @@ export function extractCodexNativeTurns(logText: string): readonly NativeSession
       if (pending.completed) {
         throw new OpenPError(`Codex source has events after task_complete for ${turnId}`, EXIT_CODES.protocolViolation);
       }
-      if (pending.userText !== null) {
-        throw new OpenPError('Codex source has multiple user messages for one turn id', EXIT_CODES.protocolViolation);
+      if (pending.userText === null) {
+        if (pending.assistantText.length > 0) {
+          throw new OpenPError(`Codex source turn ${turnId} has assistant before portable user message`, EXIT_CODES.protocolViolation);
+        }
+        pending.userId = nativePayloadId(payload, `user:${turnId}`);
+        pending.userText = text;
+      } else {
+        // Mid-turn steering: the TUI appends further caller messages into a still-open window.
+        // They merge in record order; the first caller keeps the user id.
+        pending.userText = `${pending.userText}\n\n${text}`;
       }
-      if (pending.assistantText.length > 0) {
-        throw new OpenPError(`Codex source turn ${turnId} has assistant before portable user message`, EXIT_CODES.protocolViolation);
-      }
-      pending.userId = nativePayloadId(payload, `user:${turnId}`);
-      pending.userText = text;
+      pending.lastRecordIndex = index;
+      pending.tailIsAssistantMessage = false;
       continue;
     }
     if (payload.role === 'assistant') {
       const text = readSingleText(payload.content, 'output_text');
       if (text === null || text.length === 0) continue;
       const passthroughTurnId = readTurnId(payload);
-      const turnId = passthroughTurnId ?? activeTurnId;
+      const turnId = passthroughTurnId ?? openWindowTop();
       if (turnId === null) {
         throw new OpenPError(
           'Codex source has a window-bound assistant message outside a task lifecycle window',
           EXIT_CODES.protocolViolation,
         );
       }
-      rejectOverlappingPortableMessage(activeTurnId, turnId);
       const pending = ensureTurn(byTurnId, turnId);
       if (pending.aborted) {
         throw new OpenPError(`Codex source has events after turn_aborted for ${turnId}`, EXIT_CODES.protocolViolation);
@@ -251,21 +284,41 @@ export function extractCodexNativeTurns(logText: string): readonly NativeSession
         ? requireAssistantPayloadId(payload)
         : nativePayloadId(payload, `assistant:${turnId}:${pending.assistantIds.length + 1}`));
       pending.assistantText.push(text);
+      pending.lastRecordIndex = index;
+      pending.tailIsAssistantMessage = true;
+    }
+  }
+
+  let maxTaskStartedIndex = -1;
+  for (const pending of byTurnId.values()) {
+    if (pending.taskStartedIndex !== null && pending.taskStartedIndex > maxTaskStartedIndex) {
+      maxTaskStartedIndex = pending.taskStartedIndex;
     }
   }
 
   const turns: NativeSessionTurn[] = [];
-  for (const [index, turnId] of order.entries()) {
+  for (const turnId of order) {
     const pending = byTurnId.get(turnId)!;
     // turn_aborted-closed windows are dropped: their content is an interrupted turn.
     if (pending.aborted) continue;
+    let completionId = pending.completionId;
     if (!pending.completed) {
-      // The trailing open window (or a trailing passthrough fragment) at end of file is dropped.
-      if (index === order.length - 1) continue;
-      throw new OpenPError(
-        `Codex source turn ${turnId} has malformed or non-trailing incomplete lifecycle state`,
-        EXIT_CODES.protocolViolation,
-      );
+      const lastRecordIndex = pending.lastRecordIndex ?? -1;
+      if (maxTaskStartedIndex > lastRecordIndex) {
+        // completed-by-successor: another turn's task_started after this window's last attributed
+        // record proves this window's work ended even though its task_complete was omitted. A
+        // turn's own task_started index never exceeds its lastRecordIndex, so a strictly greater
+        // maximum always belongs to a different turn.
+        completionId = turnId;
+      } else if (pending.tailIsAssistantMessage && pending.userText !== null && pending.userText.length > 0
+        && pending.assistantText.length > 0) {
+        // A trailing open window that ends on an assistant message is a turn that ran to
+        // completion before the process exited without writing task_complete.
+        completionId = turnId;
+      } else {
+        // Trailing window cut off mid-work (tool-call tail or no answer yet): interrupted, dropped.
+        continue;
+      }
     }
     const userText = pending.userText;
     const userId = pending.userId;
@@ -274,7 +327,6 @@ export function extractCodexNativeTurns(logText: string): readonly NativeSession
     if (userText === null || userText.length === 0 || userId === null || pending.assistantText.length === 0) {
       continue;
     }
-    const completionId = pending.completionId;
     if (completionId === null) {
       throw new OpenPError(`Codex source turn ${turnId} has no completion id`, EXIT_CODES.protocolViolation);
     }
@@ -303,15 +355,6 @@ function isCallerMirrorRecord(entry: JsonObject | undefined): boolean {
   return payload !== null && payload.type === 'user_message';
 }
 
-function rejectOverlappingPortableMessage(activeTurnId: string | null, turnId: string): void {
-  if (activeTurnId !== null && activeTurnId !== turnId) {
-    throw new OpenPError(
-      `Codex source message for ${turnId} overlaps active lifecycle ${activeTurnId}`,
-      EXIT_CODES.protocolViolation,
-    );
-  }
-}
-
 function ensureTurn(map: Map<string, PendingCodexTurn>, turnId: string): PendingCodexTurn {
   const existing = map.get(turnId);
   if (existing) {
@@ -326,6 +369,9 @@ function ensureTurn(map: Map<string, PendingCodexTurn>, turnId: string): Pending
     assistantIds: [],
     assistantText: [],
     completionId: null,
+    taskStartedIndex: null,
+    lastRecordIndex: null,
+    tailIsAssistantMessage: false,
   };
   map.set(turnId, created);
   return created;

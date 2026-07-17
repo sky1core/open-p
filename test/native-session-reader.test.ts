@@ -727,13 +727,18 @@ test('Codex reader extracts task-complete paired turns and ignores developer/rea
     codexNativeStateDigest(Buffer.from(baseText)),
   );
 
+  // Removing the final task_complete leaves a trailing open window that ends on an assistant
+  // message; exec rollouts omit that completion, so the reader recovers the turn.
   const withoutLastCompletion = lines(logText)
     .map((line) => JSON.parse(line))
     .filter((entry) => !(entry.type === 'event_msg' && entry.payload?.type === 'task_complete' &&
       entry.payload.turn_id === turns[1]!.nativeIds.completionId))
     .map((entry) => JSON.stringify(entry))
     .join('\n');
-  assert.equal(extractCodexNativeTurns(`${withoutLastCompletion}\n`).length, 1);
+  const recoveredTrailing = extractCodexNativeTurns(`${withoutLastCompletion}\n`);
+  assert.equal(recoveredTrailing.length, 2);
+  assert.equal(recoveredTrailing[1]!.assistantText, 'BLUEFIN-7');
+  assert.equal(recoveredTrailing[1]!.nativeIds.completionId, turns[1]!.nativeIds.completionId);
   assert.notEqual(
     codexNativeStateDigest(Buffer.from(`${withoutLastCompletion}\n`)),
     codexNativeStateDigest(Buffer.from(baseText)),
@@ -748,27 +753,31 @@ test('Codex reader binds session_meta identity to the requested native session',
   assert.doesNotThrow(() => assertCodexNativeSessionIdentity(logText, expectedSessionId));
 
   const wrongIdentity = structuredClone(entries);
-  wrongIdentity.find((entry) => entry.type === 'session_meta')!.payload.session_id = 'foreign-session';
+  wrongIdentity.find((entry) => entry.type === 'session_meta')!.payload.id = 'foreign-session';
   rejects(() => assertCodexNativeSessionIdentity(
     wrongIdentity.map((entry) => JSON.stringify(entry)).join('\n'),
     expectedSessionId,
   ));
 
+  // exec resume/fork rewrites replay parent session_meta records after the file's own first meta;
+  // later metas are not identity-checked.
   const duplicateMetadata = `${logText.trimEnd()}\n${JSON.stringify(sessionMeta)}\n`;
-  rejects(() => assertCodexNativeSessionIdentity(duplicateMetadata, expectedSessionId));
+  assert.doesNotThrow(() => assertCodexNativeSessionIdentity(duplicateMetadata, expectedSessionId));
 });
 
-test('Codex reader skips compaction markers and fails closed on rollback and orphan aborts', async () => {
+test('Codex reader skips compaction markers, drops orphan aborts, and fails closed on rollback', async () => {
   const logText = await readFile(join(FIXTURES, 'redacted-codex-golden.jsonl'), 'utf8');
   assert.equal(extractCodexNativeTurns(`${logText}\n${JSON.stringify({ type: 'compacted' })}\n`).length, 2);
   assert.equal(extractCodexNativeTurns(`${logText}\n${JSON.stringify({
     type: 'event_msg',
     payload: { type: 'context_compacted' },
   })}\n`).length, 2);
-  rejects(() => extractCodexNativeTurns(`${logText}\n${JSON.stringify({
+  // turn_aborted without task_started closes an implicit window: the aborted turn is dropped and
+  // the completed turns stay portable.
+  assert.equal(extractCodexNativeTurns(`${logText}\n${JSON.stringify({
     type: 'event_msg',
     payload: { type: 'turn_aborted', turn_id: 'orphan-abort' },
-  })}\n`));
+  })}\n`).length, 2);
   rejects(() => extractCodexNativeTurns(`${logText}\n${JSON.stringify({ type: 'event_msg', payload: { type: 'turn_aborted' } })}\n`));
   rejects(() => extractCodexNativeTurns(`${logText}\n${JSON.stringify({ type: 'event_msg', payload: { type: 'thread_rolled_back' } })}\n`));
 });
@@ -850,9 +859,11 @@ test('Codex reader rejects missing assistant ids and out-of-order portable lifec
   rejects(() => extractCodexNativeTurns([
     started, user, userMirror, complete, assistantWithId,
   ].map((entry) => JSON.stringify(entry)).join('\n')));
-  rejects(() => extractCodexNativeTurns([
+  // exec resume rewrites can replay passthrough content before the turn's own task_started; the
+  // content accumulates into the same pending turn.
+  assert.equal(extractCodexNativeTurns([
     user, userMirror, started, assistantWithId, complete,
-  ].map((entry) => JSON.stringify(entry)).join('\n')));
+  ].map((entry) => JSON.stringify(entry)).join('\n')).length, 1);
   rejects(() => extractCodexNativeTurns([
     started, started, user, userMirror, assistantWithId, complete,
   ].map((entry) => JSON.stringify(entry)).join('\n')));
@@ -881,9 +892,16 @@ test('Codex reader rejects missing assistant ids and out-of-order portable lifec
     },
   };
   const completeB = { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'turn-b' } };
-  rejects(() => extractCodexNativeTurns([
+  // Parallel windows are legal: exec resume rewrites nest one turn's window inside another, and
+  // passthrough binding keeps each record on its own turn.
+  const interleaved = extractCodexNativeTurns([
     started, user, userMirror, startedB, userB, userMirrorB, assistantWithId, complete, assistantB, completeB,
-  ].map((entry) => JSON.stringify(entry)).join('\n')));
+  ].map((entry) => JSON.stringify(entry)).join('\n'));
+  assert.equal(interleaved.length, 2);
+  assert.deepEqual(
+    interleaved.map((turn) => turn.nativeIds.completionId),
+    ['turn-a', 'turn-b'],
+  );
 
   const excludedForeignMessages = [
     {
@@ -1152,21 +1170,21 @@ test('Codex reader rejects window-bound assistant text outside a task lifecycle 
   ));
 });
 
-test('Codex reader rejects two mirrored caller messages inside one lifecycle window', () => {
+test('Codex reader merges adjacent mid-turn steering caller messages inside one lifecycle window', () => {
   const turn = codexOldFormatTurn('T1', 'PROMPT-A', ['ANS-1', 'ANS-2']);
   const secondCaller = codexOldFormatTurn('T1', 'PROMPT-A2', ['ANS-1', 'ANS-2']);
-  assert.throws(
-    () => extractCodexNativeTurns(
-      [
-        CODEX_OLDFORMAT_SESSION_META,
-        turn.started, turn.callerUser, turn.callerMirror,
-        secondCaller.callerUser, secondCaller.callerMirror,
-        turn.answerOne, turn.answerTwo, turn.complete,
-      ].map((entry) => JSON.stringify(entry)).join('\n'),
-    ),
-    (error: unknown) => error instanceof OpenPError && error.exitCode === 40 &&
-      error.message.includes('multiple user messages for one turn id'),
+  const turns = extractCodexNativeTurns(
+    [
+      CODEX_OLDFORMAT_SESSION_META,
+      turn.started, turn.callerUser, turn.callerMirror,
+      secondCaller.callerUser, secondCaller.callerMirror,
+      turn.answerOne, turn.answerTwo, turn.complete,
+    ].map((entry) => JSON.stringify(entry)).join('\n'),
   );
+  assert.equal(turns.length, 1);
+  assert.equal(turns[0]!.userText, 'PROMPT-A\n\nPROMPT-A2');
+  assert.equal(turns[0]!.assistantText, 'ANS-1\n\nANS-2');
+  assert.equal(turns[0]!.nativeIds.userId, 'user:T1');
 });
 
 test('Codex reader extracts mixed-generation rollouts with per-record binding', () => {
@@ -1304,8 +1322,11 @@ test('Codex reader skips lifecycle windows without a caller user message', () =>
   assert.equal(turns[0]!.nativeIds.completionId, 'T2');
 });
 
-test('Codex reader fails closed when a present task_complete does not match the open window', () => {
-  rejects(() => extractCodexNativeTurns(
+test('Codex reader treats a foreign task_complete as an implicit window and recovers the open turn', () => {
+  // task_complete no longer needs to own the innermost window: a completion for an unseen turn id
+  // settles that (content-free) implicit window, and the still-open trailing window that ends on
+  // an assistant message is recovered.
+  const turns = extractCodexNativeTurns(
     [
       CODEX_OLDFORMAT_SESSION_META,
       { type: 'event_msg', payload: { type: 'task_started', turn_id: 'T1' } },
@@ -1313,7 +1334,11 @@ test('Codex reader fails closed when a present task_complete does not match the 
       codexWindowBoundAssistantRecord('A1'),
       { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'T-other' } },
     ].map((entry) => JSON.stringify(entry)).join('\n'),
-  ));
+  );
+  assert.equal(turns.length, 1);
+  assert.equal(turns[0]!.userText, 'Q1');
+  assert.equal(turns[0]!.assistantText, 'A1');
+  assert.equal(turns[0]!.nativeIds.completionId, 'T1');
 });
 
 test('Codex reader fails closed when the completion boundary id collides with an assistant id', () => {
@@ -1344,6 +1369,250 @@ test('Codex reader fails closed when the completion boundary id collides with an
       { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'T1' } },
     ].map((entry) => JSON.stringify(entry)).join('\n'),
   ));
+});
+
+test('Codex reader recovers the implicit first exec window completed without task_started', () => {
+  const turns = extractCodexNativeTurns(
+    [
+      CODEX_OLDFORMAT_SESSION_META,
+      {
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: 'Q1' }],
+          internal_chat_message_metadata_passthrough: { turn_id: 'T1' },
+        },
+      },
+      { type: 'event_msg', payload: { type: 'user_message', message: 'Q1' } },
+      {
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'assistant',
+          id: 'msg_implicit_first_a',
+          content: [{ type: 'output_text', text: 'A1' }],
+          internal_chat_message_metadata_passthrough: { turn_id: 'T1' },
+        },
+      },
+      { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'T1' } },
+    ].map((entry) => JSON.stringify(entry)).join('\n'),
+  );
+  assert.equal(turns.length, 1);
+  assert.equal(turns[0]!.userText, 'Q1');
+  assert.equal(turns[0]!.assistantText, 'A1');
+  assert.deepEqual(turns[0]!.nativeIds, {
+    userId: 'user:T1',
+    assistantIds: ['msg_implicit_first_a'],
+    completionId: 'T1',
+  });
+});
+
+test('Codex reader recovers a trailing open window that ends on an assistant message', () => {
+  const turn = codexOldFormatTurn('T1', 'Q1', ['ANS-1', 'ANS-2']);
+  const turns = extractCodexNativeTurns(
+    [
+      CODEX_OLDFORMAT_SESSION_META,
+      turn.started, turn.callerUser, turn.callerMirror,
+      turn.reasoning, turn.agentMessage, turn.answerOne,
+      turn.functionCall, turn.functionCallOutput, turn.answerTwo,
+    ].map((entry) => JSON.stringify(entry)).join('\n'),
+  );
+  assert.equal(turns.length, 1);
+  assert.equal(turns[0]!.userText, 'Q1');
+  assert.equal(turns[0]!.assistantText, 'ANS-1\n\nANS-2');
+  assert.deepEqual(turns[0]!.nativeIds, {
+    userId: 'user:T1',
+    assistantIds: ['assistant:T1:1', 'assistant:T1:2'],
+    completionId: 'T1',
+  });
+});
+
+test('Codex reader drops a trailing open window cut off mid-work without failing', () => {
+  const turn = codexOldFormatTurn('T1', 'Q1', ['ANS-1', 'ANS-2']);
+  const turns = extractCodexNativeTurns(
+    [
+      CODEX_OLDFORMAT_SESSION_META,
+      turn.started, turn.callerUser, turn.callerMirror,
+      turn.answerOne, turn.functionCall,
+    ].map((entry) => JSON.stringify(entry)).join('\n'),
+  );
+  assert.deepEqual(turns, []);
+});
+
+test('Codex reader recovers nested parallel windows in exec resume rewrites', () => {
+  const turns = extractCodexNativeTurns(
+    [
+      CODEX_OLDFORMAT_SESSION_META,
+      { type: 'event_msg', payload: { type: 'task_started', turn_id: 'TA' } },
+      ...codexMirrorCallerRecords('QA'),
+      { type: 'event_msg', payload: { type: 'task_started', turn_id: 'TB' } },
+      ...codexMirrorCallerRecords('QB'),
+      codexWindowBoundAssistantRecord('AB'),
+      { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'TB' } },
+      {
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'assistant',
+          id: 'msg_nested_outer_a',
+          content: [{ type: 'output_text', text: 'AA' }],
+          internal_chat_message_metadata_passthrough: { turn_id: 'TA' },
+        },
+      },
+      { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'TA' } },
+    ].map((entry) => JSON.stringify(entry)).join('\n'),
+  );
+  assert.equal(turns.length, 2);
+  assert.deepEqual(
+    turns.map((turn) => [turn.userText, turn.assistantText, turn.nativeIds.completionId]),
+    [['QA', 'AA', 'TA'], ['QB', 'AB', 'TB']],
+  );
+});
+
+test('Codex reader completes an omitted-complete window at a successor task_started', () => {
+  // The successor rule settles the window even when its tail is a tool call, where the trailing
+  // assistant-tail rule alone would drop it.
+  const turn = codexOldFormatTurn('TA', 'QA', ['AA', 'unused']);
+  const turns = extractCodexNativeTurns(
+    [
+      CODEX_OLDFORMAT_SESSION_META,
+      turn.started, turn.callerUser, turn.callerMirror,
+      turn.answerOne, turn.functionCall,
+      ...codexPassthroughTurnRecords('TB', 'QB', 'AB', 'msg_successor_b'),
+    ].map((entry) => JSON.stringify(entry)).join('\n'),
+  );
+  assert.equal(turns.length, 2);
+  assert.deepEqual(
+    turns.map((item) => [item.userText, item.assistantText, item.nativeIds.completionId]),
+    [['QA', 'AA', 'TA'], ['QB', 'AB', 'TB']],
+  );
+});
+
+test('Codex reader merges interleaved steering callers in record order', () => {
+  const turns = extractCodexNativeTurns(
+    [
+      CODEX_OLDFORMAT_SESSION_META,
+      { type: 'event_msg', payload: { type: 'task_started', turn_id: 'T1' } },
+      ...codexMirrorCallerRecords('u1'),
+      codexWindowBoundAssistantRecord('a1'),
+      ...codexMirrorCallerRecords('u2'),
+      codexWindowBoundAssistantRecord('a2'),
+      { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'T1' } },
+    ].map((entry) => JSON.stringify(entry)).join('\n'),
+  );
+  assert.equal(turns.length, 1);
+  assert.equal(turns[0]!.userText, 'u1\n\nu2');
+  assert.equal(turns[0]!.assistantText, 'a1\n\na2');
+  assert.equal(turns[0]!.nativeIds.userId, 'user:T1');
+});
+
+test('Codex reader fails closed on portable messages after explicit task_complete', () => {
+  const base = [
+    CODEX_OLDFORMAT_SESSION_META,
+    ...codexPassthroughTurnRecords('T1', 'Q1', 'A1', 'msg_postcomplete_a'),
+  ];
+  rejects(() => extractCodexNativeTurns(
+    [
+      ...base,
+      {
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'assistant',
+          id: 'msg_postcomplete_late',
+          content: [{ type: 'output_text', text: 'late answer' }],
+          internal_chat_message_metadata_passthrough: { turn_id: 'T1' },
+        },
+      },
+    ].map((entry) => JSON.stringify(entry)).join('\n'),
+  ));
+  rejects(() => extractCodexNativeTurns(
+    [
+      ...base,
+      {
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: 'late question' }],
+          internal_chat_message_metadata_passthrough: { turn_id: 'T1' },
+        },
+      },
+      { type: 'event_msg', payload: { type: 'user_message', message: 'late question' } },
+    ].map((entry) => JSON.stringify(entry)).join('\n'),
+  ));
+});
+
+test('Codex identity binds only the first session_meta record', () => {
+  const fileId = '019f0000-0000-7000-8000-00000000aaaa';
+  const parentId = '019f0000-0000-7000-8000-00000000bbbb';
+  const fileMeta = { type: 'session_meta', payload: { id: fileId, session_id: fileId } };
+  const parentMeta = { type: 'session_meta', payload: { id: parentId, session_id: parentId } };
+  assert.doesNotThrow(() => assertCodexNativeSessionIdentity(
+    [fileMeta, parentMeta].map((entry) => JSON.stringify(entry)).join('\n'),
+    fileId,
+  ));
+  rejects(() => assertCodexNativeSessionIdentity(
+    [parentMeta, fileMeta].map((entry) => JSON.stringify(entry)).join('\n'),
+    fileId,
+  ));
+  rejects(() => assertCodexNativeSessionIdentity(
+    JSON.stringify({ type: 'event_msg', payload: { type: 'token_count' } }),
+    fileId,
+  ));
+});
+
+test('Codex identity treats payload.id as authoritative and session_id as lineage metadata', () => {
+  const fileId = '019f0000-0000-7000-8000-00000000cccc';
+  const lineageRootId = '019f0000-0000-7000-8000-00000000dddd';
+  // 0.142.0+ resume/fork rollouts: session_id carries the thread-lineage root, not this rollout's
+  // identity (census 474/3,438 files with session_id != id).
+  assert.doesNotThrow(() => assertCodexNativeSessionIdentity(
+    JSON.stringify({ type: 'session_meta', payload: { id: fileId, session_id: lineageRootId } }),
+    fileId,
+  ));
+  // payload.id stays authoritative: a lineage session_id matching the request never rescues a
+  // foreign id.
+  rejects(() => assertCodexNativeSessionIdentity(
+    JSON.stringify({ type: 'session_meta', payload: { id: lineageRootId, session_id: fileId } }),
+    fileId,
+  ));
+  // Legacy shape without payload.id falls back to session_id as the identity.
+  assert.doesNotThrow(() => assertCodexNativeSessionIdentity(
+    JSON.stringify({ type: 'session_meta', payload: { session_id: fileId } }),
+    fileId,
+  ));
+});
+
+test('Codex reader ignores thread_settings_applied after task_complete', () => {
+  const turns = extractCodexNativeTurns(
+    [
+      CODEX_OLDFORMAT_SESSION_META,
+      ...codexPassthroughTurnRecords('T1', 'Q1', 'A1', 'msg_settings_a'),
+      { type: 'event_msg', payload: { type: 'thread_settings_applied', thread_settings: { model: 'synthetic' } } },
+    ].map((entry) => JSON.stringify(entry)).join('\n'),
+  );
+  assert.equal(turns.length, 1);
+  assert.equal(turns[0]!.userText, 'Q1');
+  assert.equal(turns[0]!.assistantText, 'A1');
+});
+
+test('Codex reader never leaks content from a turn_aborted window', () => {
+  const turns = extractCodexNativeTurns(
+    [
+      CODEX_OLDFORMAT_SESSION_META,
+      { type: 'event_msg', payload: { type: 'task_started', turn_id: 'TA' } },
+      ...codexMirrorCallerRecords('ABORTED-QUESTION'),
+      codexWindowBoundAssistantRecord('ABORTED-ANSWER'),
+      { type: 'event_msg', payload: { type: 'turn_aborted', turn_id: 'TA', reason: 'user_interrupt' } },
+      ...codexPassthroughTurnRecords('TB', 'Q2', 'A2', 'msg_noleak_b'),
+    ].map((entry) => JSON.stringify(entry)).join('\n'),
+  );
+  assert.equal(turns.length, 1);
+  assert.equal(turns[0]!.userText, 'Q2');
+  assert.equal(turns[0]!.assistantText, 'A2');
+  assert.ok(!JSON.stringify(turns).includes('ABORTED-'));
 });
 
 test('Kiro reader requires JSONL plus companion completion metadata', async () => {
