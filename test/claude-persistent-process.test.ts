@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import {
+  escapeClaudeComposerShellModeToggle,
   isClaudeCodeEmptyInputPromptLine,
   isClaudeCodeInputPromptLine,
   isClaudeCodeMenuSelectionLine,
@@ -1349,6 +1350,16 @@ test('input prompt line detection rejects assistant text that contains prompt gl
   assert.equal(isClaudeCodeInputPromptLine('        82% context used'), false);
 });
 
+test('composer shell-mode escape prepends one space only to "!"-leading prompts', () => {
+  assert.equal(escapeClaudeComposerShellModeToggle('! echo probe'), ' ! echo probe');
+  assert.equal(escapeClaudeComposerShellModeToggle('!ls'), ' !ls');
+  assert.equal(escapeClaudeComposerShellModeToggle('!'), ' !');
+  assert.equal(escapeClaudeComposerShellModeToggle(' ! echo probe'), ' ! echo probe');
+  assert.equal(escapeClaudeComposerShellModeToggle('echo ! probe'), 'echo ! probe');
+  assert.equal(escapeClaudeComposerShellModeToggle('hello'), 'hello');
+  assert.equal(escapeClaudeComposerShellModeToggle(''), '');
+});
+
 test('persistent Claude Code startup failure escalates cleanup when graceful exit leaves PTY alive', async () => {
   const session = new StartupFailureSession(false, false);
   const provider = providerFor(session);
@@ -1545,6 +1556,35 @@ test('persistent local command prompt returns command output without retrying su
     assert.equal(result.text, 'Compacted (ctrl+o to see full summary)');
     assert.equal(session.submitCount, 1);
     assert.deepEqual(session.writes, ['/compact']);
+  } finally {
+    await process.shutdown();
+  }
+});
+
+class WriteRecordingTurnLogSession extends TurnLogSession {
+  readonly writes: string[] = [];
+
+  override async write(input: string): Promise<void> {
+    this.writes.push(input);
+    await super.write(input);
+  }
+}
+
+test('persistent turn prepends one space to a "!"-leading prompt at the PTY write boundary', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openp-bang-prompt-'));
+  const logPath = join(dir, 'session.jsonl');
+  await writeFile(logPath, '');
+  const sessionId = randomUUID();
+  const session = new WriteRecordingTurnLogSession(logPath);
+  const process = new PersistentClaudeCodeProcess(sessionId, signature(), dir, session, logPath, logPath, 0);
+
+  try {
+    const result = await process.sendTurn('! scripts/run-checks.sh', {
+      timeoutMs: 5_000,
+    });
+
+    assert.equal(result.text, 'active result');
+    assert.deepEqual(session.writes, [' ! scripts/run-checks.sh']);
   } finally {
     await process.shutdown();
   }

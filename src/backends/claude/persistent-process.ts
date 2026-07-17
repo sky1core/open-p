@@ -17,6 +17,7 @@ import type { PtyProvider, PtySession } from '../../runners/types.js';
 import { rejectStructuredClaudeCodeBackendArgs } from './args-validation.js';
 import { ClaudeCodeBackgroundRouter, isClaudeCodeTaskNotificationLine } from './background-parser.js';
 import {
+  escapeClaudeComposerShellModeToggle,
   readinessTimeoutMs,
   waitForClaudeCodeInputReady,
 } from './interactive.js';
@@ -586,7 +587,7 @@ async function submitPrompt(
 ): Promise<ClaudeInputDraftFingerprint | null> {
   assertCanSubmit();
   const beforeWriteSurface = await captureClaudeInputDraftSurface(pty);
-  await pty.write(prompt);
+  await pty.write(escapeClaudeComposerShellModeToggle(prompt));
   const remainingMs = assertCanSubmit();
   const draftFingerprint = await waitForChangedClaudeInputDraftSurface(
     pty,

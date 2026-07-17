@@ -61,6 +61,15 @@ export async function isClaudeCodeInputReady(pty: Pick<PtySession, 'captureCurso
   return isClaudeCodeInputPromptLine(await pty.captureCursorLine().catch(() => ''));
 }
 
+// A paste whose first character is `!` toggles the Claude Code composer's shell mode instead of
+// entering literal prompt text (even under bracketed paste), so the input runs as a shell command
+// without a caller user turn. Prepending one space suppresses the toggle; Claude Code preserves
+// the leading space untrimmed in the session-log caller user record.
+// Evidence: a live probe of bang-leading prompt delivery against Claude Code.
+export function escapeClaudeComposerShellModeToggle(prompt: string): string {
+  return prompt.startsWith('!') ? ` ${prompt}` : prompt;
+}
+
 export function isClaudeCodeInputPromptLine(line: string): boolean {
   const cleanLine = cleanClaudeCodeInputLine(line);
   return /^❯(?:\s|$)/u.test(cleanLine) && !isClaudeCodeMenuSelectionLine(line);

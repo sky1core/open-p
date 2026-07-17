@@ -1398,6 +1398,95 @@ test('single-turn recovery downgrades resend safety when the backend survives sh
   );
 });
 
+class BangPromptTurnSession implements PtySession {
+  readonly id = 'fake-bang-prompt-session';
+  readonly writes: string[] = [];
+  private alive = true;
+  private lastWrite = '';
+
+  constructor(
+    private readonly logPath: string,
+    private readonly cwd: string,
+    private readonly sessionId: string,
+  ) {}
+
+  async write(input: string): Promise<void> {
+    this.writes.push(input);
+    this.lastWrite = input;
+  }
+
+  async submit(): Promise<void> {
+    await appendFile(this.logPath, [
+      eventLine({
+        type: 'user',
+        cwd: this.cwd,
+        sessionId: this.sessionId,
+        uuid: 'active-user',
+        message: { content: this.lastWrite },
+      }),
+      eventLine({
+        type: 'assistant',
+        cwd: this.cwd,
+        sessionId: this.sessionId,
+        parentUuid: 'active-user',
+        message: {
+          content: [{ type: 'text', text: 'bang prompt result' }],
+          stop_reason: 'end_turn',
+        },
+      }),
+      eventLine({
+        type: 'system',
+        subtype: 'turn_duration',
+        cwd: this.cwd,
+        sessionId: this.sessionId,
+        durationMs: 10,
+      }),
+    ].join('\n') + '\n');
+  }
+
+  async interrupt(): Promise<void> {}
+
+  async terminate(): Promise<void> {
+    this.alive = false;
+  }
+
+  async exit(): Promise<void> {
+    this.alive = false;
+  }
+
+  async isAlive(): Promise<boolean> {
+    return this.alive;
+  }
+
+  async captureText(): Promise<string> {
+    return '❯';
+  }
+
+  async captureCursorLine(): Promise<string> {
+    return '❯';
+  }
+}
+
+test('single-turn submit prepends one space to a "!"-leading prompt at the PTY write boundary', async () => {
+  await withSingleTurnBackend(
+    'openp-claude-adapter-bang-prompt-',
+    (logPath, cwd, sessionId) => new BangPromptTurnSession(logPath, cwd, sessionId),
+    async ({ backend, cwd, session, sessionId }) => {
+      const result = await backend.runTurn(
+        {
+          turnId: '22222222-2222-4222-8222-222222222299',
+          prompt: '! echo probe',
+          jsonSchema: null,
+        },
+        adapterRunOptions(cwd, sessionId, 5_000),
+      );
+
+      assert.equal(result.text, 'bang prompt result');
+      assert.deepEqual(session.writes, [' ! echo probe']);
+    },
+  );
+});
+
 class PreCallerLocalCommandThenLateCallerSession implements PtySession {
   readonly id = 'fake-pty';
   submitCount = 0;
