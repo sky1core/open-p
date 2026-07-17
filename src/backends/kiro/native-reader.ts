@@ -185,8 +185,19 @@ export function extractKiroNativeTurns(
       },
     });
   }
-  for (const [id, { record }] of records) {
-    if (referencedIds.has(id)) {
+  // Trailing boundary: the highest native record index proven by companion metadata. Records after
+  // it belong to an in-progress/unproven trailing turn and are allowed; unproven text records at or
+  // before it are mid-history holes and stay fail-closed. With zero proven records the boundary is
+  // -1, so the whole log is trailing and the reader returns an empty turn list.
+  let provenBoundaryIndex = -1;
+  for (const id of referencedIds) {
+    const index = records.get(id)!.index;
+    if (index > provenBoundaryIndex) {
+      provenBoundaryIndex = index;
+    }
+  }
+  for (const [id, { record, index }] of records) {
+    if (referencedIds.has(id) || index > provenBoundaryIndex) {
       continue;
     }
     const promptClassification = classifyPrompt(record);
@@ -208,7 +219,11 @@ function readKiroRecordMap(logText: string): Map<string, IndexedKiroRecord> {
       throw new OpenPError('Kiro session log version is not supported for seed conversion', EXIT_CODES.protocolViolation);
     }
     if (entry.kind === 'Compaction') {
-      throw new OpenPError('Kiro compacted sessions are not supported for seed source conversion', EXIT_CODES.protocolViolation);
+      // Compaction is session-history metadata carrying no message_id. It is skipped before any
+      // data inspection so its payload (messages_snapshot/strategy/summary) is never read or
+      // indexed — compaction summaries cannot leak into extracted turn text.
+      recordIndex += 1;
+      continue;
     }
     const data = isObject(entry.data) ? entry.data : null;
     if ((entry.kind === 'Prompt' || entry.kind === 'AssistantMessage') &&

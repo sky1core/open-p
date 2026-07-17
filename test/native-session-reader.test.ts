@@ -13,7 +13,11 @@ import {
   codexNativeStateDigest,
   extractCodexNativeTurns,
 } from '../src/backends/codex/native-reader.js';
-import { extractKiroNativeTurns, kiroNativeStateDigest } from '../src/backends/kiro/native-reader.js';
+import {
+  assertKiroNativeSessionAppendable,
+  extractKiroNativeTurns,
+  kiroNativeStateDigest,
+} from '../src/backends/kiro/native-reader.js';
 import {
   assertOpenCodeExportOk,
   assertStableOpenCodeNativeExports,
@@ -1683,21 +1687,151 @@ test('Kiro reader binds companion metadata to the requested native session id', 
   rejects(() => extractKiroNativeTurns(logText, JSON.stringify(missingIdentity), expectedSessionId));
 });
 
-test('Kiro reader rejects compaction and companion drift', async () => {
+test('Kiro reader rejects companion drift and mid-history unproven prompts', async () => {
   const logText = await readFile(join(FIXTURES, 'redacted-kiro-golden.jsonl'), 'utf8');
   const rawCompanionText = await readFile(join(FIXTURES, 'redacted-kiro-golden.json'), 'utf8');
   const companionText = validKiroCompanion(logText, rawCompanionText);
-  rejects(() => extractKiroNativeTurns(`${logText}\n${JSON.stringify({ version: 'v1', kind: 'Compaction', data: {} })}\n`, companionText));
+  // Companion metadata referencing message ids absent from the JSONL stays fail-closed.
   rejects(() => extractKiroNativeTurns(logText, rawCompanionText));
-  rejects(() => extractKiroNativeTurns(`${logText}\n${JSON.stringify({
-    version: 'v1',
-    kind: 'Prompt',
-    data: {
-      message_id: 'unproven-prompt',
-      content: [{ kind: 'text', data: 'not in companion' }],
-      meta: { timestamp: 1 },
-    },
-  })}\n`, companionText));
+  // An unproven caller prompt at or before the proven boundary is a mid-history hole.
+  const logLines = lines(logText);
+  const midHistoryUnproven = [
+    ...logLines.slice(0, 2),
+    JSON.stringify({
+      version: 'v1',
+      kind: 'Prompt',
+      data: {
+        message_id: 'unproven-prompt',
+        content: [{ kind: 'text', data: 'not in companion' }],
+        meta: { timestamp: 1 },
+      },
+    }),
+    ...logLines.slice(2),
+  ].join('\n');
+  rejects(() => extractKiroNativeTurns(`${midHistoryUnproven}\n`, companionText));
+});
+
+test('Kiro reader skips compaction records and allows the unproven trailing turn', async () => {
+  // Mirrors the observed compacted session shape from live kiro evidence: proven turns stay intact
+  // in the JSONL, Compaction fires mid trailing turn, and the trailing turn has no companion
+  // metadata yet.
+  const logText = await readFile(join(FIXTURES, 'redacted-kiro-golden.jsonl'), 'utf8');
+  const companion = JSON.parse(await readFile(join(FIXTURES, 'redacted-kiro-golden.json'), 'utf8'));
+  const summarySentinel = 'COMPACTION_SUMMARY_SENTINEL';
+  const snapshotSentinel = 'COMPACTION_SNAPSHOT_SENTINEL';
+  const trailingSentinel = 'TRAILING_TURN_SENTINEL';
+  const compactedLog = [
+    ...lines(logText),
+    // Third proven turn (already present in the golden companion metadata).
+    JSON.stringify({
+      version: 'v1',
+      kind: 'Prompt',
+      data: {
+        message_id: '00000000-0000-4000-8000-000000000029',
+        content: [{ kind: 'text', data: 'Reply with exactly: CONTROL_OK' }],
+        meta: { timestamp: 1784008020 },
+      },
+    }),
+    JSON.stringify({
+      version: 'v1',
+      kind: 'AssistantMessage',
+      data: {
+        message_id: '00000000-0000-4000-8000-000000000033',
+        content: [{ kind: 'text', data: 'CONTROL_OK' }],
+      },
+    }),
+    // Unproven trailing turn with a Compaction record in its middle.
+    JSON.stringify({
+      version: 'v1',
+      kind: 'Prompt',
+      data: {
+        message_id: 'trailing-turn-prompt',
+        content: [{ kind: 'text', data: `${trailingSentinel} fourth turn in progress` }],
+        meta: { timestamp: 1784008030 },
+      },
+    }),
+    JSON.stringify({
+      version: 'v1',
+      kind: 'Compaction',
+      data: {
+        messages_snapshot: [{
+          id: 'trailing-turn-prompt',
+          role: 'user',
+          content: [{ kind: 'text', data: snapshotSentinel }],
+        }],
+        strategy: { message_pairs_to_exclude: 2, truncate_large_messages: false },
+        summary: `## OBJECTIVE\n${summarySentinel}`,
+      },
+    }),
+    JSON.stringify({
+      version: 'v1',
+      kind: 'AssistantMessage',
+      data: {
+        message_id: 'trailing-turn-assistant',
+        content: [{ kind: 'text', data: `${trailingSentinel} still running` }],
+      },
+    }),
+  ].join('\n');
+  const turns = extractKiroNativeTurns(`${compactedLog}\n`, JSON.stringify(companion));
+  assert.equal(turns.length, 3);
+  assert.equal(turns[0]!.assistantText, 'REMEMBERED');
+  assert.equal(turns[1]!.assistantText, 'BLUEFIN-7');
+  assert.equal(turns[2]!.assistantText, 'CONTROL_OK');
+  const portableText = turns.map((turn) => `${turn.userText}\n${turn.assistantText}`).join('\n');
+  assert.ok(!portableText.includes(summarySentinel));
+  assert.ok(!portableText.includes(snapshotSentinel));
+  assert.ok(!portableText.includes(trailingSentinel));
+});
+
+test('Kiro reader keeps failing closed on unproven text assistant messages before the boundary', async () => {
+  const logText = await readFile(join(FIXTURES, 'redacted-kiro-golden.jsonl'), 'utf8');
+  const companionText = validKiroCompanion(logText, await readFile(join(FIXTURES, 'redacted-kiro-golden.json'), 'utf8'));
+  const logLines = lines(logText);
+  const midHistoryAssistant = [
+    ...logLines.slice(0, 2),
+    JSON.stringify({
+      version: 'v1',
+      kind: 'AssistantMessage',
+      data: {
+        message_id: 'unproven-mid-history-assistant',
+        content: [{ kind: 'text', data: 'not in companion' }],
+      },
+    }),
+    ...logLines.slice(2),
+  ].join('\n');
+  rejects(() => extractKiroNativeTurns(`${midHistoryAssistant}\n`, companionText));
+});
+
+test('Kiro reader returns an empty turn list when no turn is proven by companion metadata', async () => {
+  const logText = await readFile(join(FIXTURES, 'redacted-kiro-golden.jsonl'), 'utf8');
+  const companion = JSON.parse(validKiroCompanion(
+    logText,
+    await readFile(join(FIXTURES, 'redacted-kiro-golden.json'), 'utf8'),
+  ));
+  companion.session_state.conversation_metadata.user_turn_metadatas = [];
+  // Zero proven turns puts the whole log after the proven boundary: trailing, not a violation.
+  assert.deepEqual(extractKiroNativeTurns(logText, JSON.stringify(companion)), []);
+});
+
+test('Kiro append preflight accepts a compacted target session', async () => {
+  const logText = await readFile(join(FIXTURES, 'redacted-kiro-golden.jsonl'), 'utf8');
+  const companion = JSON.parse(validKiroCompanion(
+    logText,
+    await readFile(join(FIXTURES, 'redacted-kiro-golden.json'), 'utf8'),
+  ));
+  const compactedLog = [
+    ...lines(logText),
+    JSON.stringify({
+      version: 'v1',
+      kind: 'Compaction',
+      data: {
+        messages_snapshot: [],
+        strategy: { message_pairs_to_exclude: 2 },
+        summary: 'compacted history summary',
+      },
+    }),
+  ].join('\n');
+  assertKiroNativeSessionAppendable(`${compactedLog}\n`, JSON.stringify(companion), companion.session_id);
 });
 
 test('Kiro reader rejects duplicate native and completed-turn message ids', async () => {
@@ -2146,7 +2280,10 @@ test('Kiro reader rejects an unreferenced mixed assistant message with text cont
       content: [{ kind: 'text', data: 'not in companion' }, { kind: 'toolUse', data: { name: 'fsRead' } }],
     },
   });
-  rejects(() => extractKiroNativeTurns(`${logText}\n${unprovenMixed}\n`, companionText));
+  // Placed before the proven boundary: appended after it, this would be an allowed trailing record.
+  const logLines = lines(logText);
+  const midHistoryMixed = [...logLines.slice(0, 2), unprovenMixed, ...logLines.slice(2)].join('\n');
+  rejects(() => extractKiroNativeTurns(`${midHistoryMixed}\n`, companionText));
 });
 
 test('native JSONL readers reject valid JSON non-object records', async () => {
