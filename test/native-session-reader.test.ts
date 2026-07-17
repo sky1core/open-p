@@ -170,6 +170,103 @@ test('Claude reader binds in-record identity to the requested session and worksp
   ));
 });
 
+// A session that cds into a subdirectory records that cwd on its later entries. Those entries are
+// the same session, so the workspace cwd and any cwd below it are in scope; ancestor and unrelated
+// cwds stay exit 40.
+async function rejectsForeignWorkspace(logText: string, sessionId: string, expectedCwd: string): Promise<void> {
+  await assert.rejects(
+    () => assertClaudeNativeSessionIdentity(logText, sessionId, expectedCwd),
+    (error: unknown) => error instanceof OpenPError && error.exitCode === 40 &&
+      /belongs to a different workspace/.test(error.message),
+  );
+}
+
+// Rewrites every cwd-bearing record's cwd by its cwd-record ordinal, leaving records without a cwd
+// key untouched (a dropped cwd key would change which identity check fires).
+function claudeLogWithCwds(entries: readonly any[], cwdFor: (ordinal: number) => unknown): string {
+  let ordinal = -1;
+  return entries
+    .map((entry) => {
+      if (!Object.prototype.hasOwnProperty.call(entry, 'cwd')) return entry;
+      ordinal += 1;
+      return { ...entry, cwd: cwdFor(ordinal) };
+    })
+    .map((entry) => JSON.stringify(entry))
+    .join('\n');
+}
+
+test('Claude reader scopes session-log cwd to the workspace and its descendants', async () => {
+  const logText = await readFile(join(FIXTURES, 'redacted-claude-golden.jsonl'), 'utf8');
+  const entries = lines(logText).map((line) => JSON.parse(line));
+  const sessionId = entries.find((entry) => typeof entry.sessionId === 'string')!.sessionId as string;
+  const workspace = entries.find((entry) => typeof entry.cwd === 'string')!.cwd as string;
+
+  // 1. Every cwd is the workspace itself: the pre-existing single-cwd session stays valid.
+  await assert.doesNotReject(() => assertClaudeNativeSessionIdentity(
+    claudeLogWithCwds(entries, () => workspace),
+    sessionId,
+    workspace,
+  ));
+
+  // 2. Workspace mixed with descendant cwds: accepted, and the turns are still recovered.
+  const descendants = [workspace, `${workspace}/webui`, `${workspace}/tools/sandbox`];
+  const withDescendants = claudeLogWithCwds(entries, (ordinal) => descendants[ordinal % descendants.length]!);
+  await assert.doesNotReject(() => assertClaudeNativeSessionIdentity(withDescendants, sessionId, workspace));
+  const turns = extractClaudeNativeTurns(withDescendants);
+  assert.equal(turns.length, 2);
+  assert.deepEqual(turns.map((turn) => turn.assistantText), ['REMEMBERED', 'BLUEFIN-7']);
+
+  // 3. An ancestor cwd is not in scope: the parent directory is a different workspace.
+  await rejectsForeignWorkspace(
+    claudeLogWithCwds(entries, (ordinal) => (ordinal === 1 ? '/redacted' : workspace)),
+    sessionId,
+    workspace,
+  );
+
+  // 4. An unrelated sibling cwd stays rejected.
+  await rejectsForeignWorkspace(
+    claudeLogWithCwds(entries, (ordinal) => (ordinal === 1 ? '/redacted/other' : workspace)),
+    sessionId,
+    workspace,
+  );
+
+  // 5. Descendant testing is separator-bounded: `/a/bc` merely shares a string prefix with `/a/b`.
+  await rejectsForeignWorkspace(
+    claudeLogWithCwds(entries, (ordinal) => (ordinal === 1 ? '/a/bc' : '/a/b')),
+    sessionId,
+    '/a/b',
+  );
+  await assert.doesNotReject(() => assertClaudeNativeSessionIdentity(
+    claudeLogWithCwds(entries, (ordinal) => (ordinal === 1 ? '/a/b/c' : '/a/b')),
+    sessionId,
+    '/a/b',
+  ));
+
+  // 6. A non-string or empty cwd is malformed native identity, not a workspace to scope.
+  await rejectsForeignWorkspace(
+    claudeLogWithCwds(entries, (ordinal) => (ordinal === 1 ? 42 : workspace)),
+    sessionId,
+    workspace,
+  );
+  await rejectsForeignWorkspace(
+    claudeLogWithCwds(entries, (ordinal) => (ordinal === 1 ? '' : workspace)),
+    sessionId,
+    workspace,
+  );
+
+  // 7. Widening cwd scope must not widen session scope: a foreign sessionId still fails closed,
+  //    including when its cwd is a descendant of the workspace.
+  await assert.rejects(
+    () => assertClaudeNativeSessionIdentity(
+      claudeLogWithCwds(entries, () => `${workspace}/webui`).replaceAll(sessionId, 'foreign-session'),
+      sessionId,
+      workspace,
+    ),
+    (error: unknown) => error instanceof OpenPError && error.exitCode === 40 &&
+      /belongs to a different native session/.test(error.message),
+  );
+});
+
 test('Claude reader rejects portable boundary records without a native uuid', async () => {
   const logText = await readFile(join(FIXTURES, 'redacted-claude-golden.jsonl'), 'utf8');
   const parentUuid = lastUuid(logText);

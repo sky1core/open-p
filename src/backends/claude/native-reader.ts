@@ -1,4 +1,5 @@
 import { readFile, realpath } from 'node:fs/promises';
+import { isAbsolute, relative, sep } from 'node:path';
 import type { NativeSessionReadResult, NativeSessionTurn } from '../../core/backend.js';
 import { EXIT_CODES, OpenPError } from '../../core/errors.js';
 import {
@@ -90,7 +91,7 @@ export async function assertClaudeNativeSessionIdentity(
       sawSessionIdentity = true;
     }
     if (Object.prototype.hasOwnProperty.call(entry, 'cwd')) {
-      if (typeof entry.cwd !== 'string' || entry.cwd.length === 0 || !validCwds.has(entry.cwd)) {
+      if (typeof entry.cwd !== 'string' || entry.cwd.length === 0 || !isWorkspaceScopedCwd(entry.cwd, validCwds)) {
         throw new OpenPError('Claude session log belongs to a different workspace', EXIT_CODES.protocolViolation);
       }
       sawCallerCwd = true;
@@ -99,6 +100,30 @@ export async function assertClaudeNativeSessionIdentity(
   if (!sawSessionIdentity || !sawCallerCwd) {
     throw new OpenPError('Claude session log is missing its native session identity', EXIT_CODES.protocolViolation);
   }
+}
+
+// A session that cds into a subdirectory records that cwd on its later entries. Those entries are
+// normal work in the same session, not another workspace: session sameness is already guaranteed by
+// the sessionId check above. So a cwd is workspace-scoped when it equals, or is below, one of the
+// caller-path/realpath variants — each variant judged on its own. Ancestor and unrelated paths stay
+// rejected; the cwd check remains the defense against reading a foreign workspace's log.
+function isWorkspaceScopedCwd(candidate: string, validCwds: ReadonlySet<string>): boolean {
+  for (const base of validCwds) {
+    if (isSameOrDescendantPath(candidate, base)) return true;
+  }
+  return false;
+}
+
+// Descendant testing is separator-bounded, never a raw string prefix: `/a/bc` is not below `/a/b`.
+// `path.relative` compares both paths only after normalizing `.`/`..`, so a lexically prefix-looking
+// but escaping path (`/a/b/../c`) is not below `/a/b` either. Both paths must be absolute for that
+// normalization to be meaningful without resolving against the ambient process cwd; a non-absolute
+// path can only match by exact equality, as before.
+function isSameOrDescendantPath(candidate: string, base: string): boolean {
+  if (candidate === base) return true;
+  if (!isAbsolute(candidate) || !isAbsolute(base)) return false;
+  const rel = relative(base, candidate);
+  return rel.length > 0 && rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
 }
 
 export function extractClaudeNativeTurns(logText: string): readonly NativeSessionTurn[] {
