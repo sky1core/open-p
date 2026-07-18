@@ -1390,9 +1390,8 @@ test('extractSessionLogResult does not count mirror-less injected user records a
   assert.equal(result.content, 'own turn answer');
 });
 
-// Design test 6: regression for the observed run-path failures. Redacted from
-// ~/.codex/sessions/2026/06/30/rollout-...-019f14d8-....jsonl records 9261-9866, where a second
-// controller opened turn 019f56a0-8… while openp's turn 019f5693-a… was still running. Before the
+// Design test 6: regression for the observed run-path failures. A second controller opened a
+// concurrent turn while openp's turn was still running, interleaving both turns' records. Before the
 // turn-attribution fix this segment failed with exit 40 multiple_turn_boundaries.
 test('extractSessionLogResult recovers the openp turn from a redacted concurrent-turn segment', () => {
   const result = extractSessionLogResult(
@@ -1404,7 +1403,7 @@ test('extractSessionLogResult recovers the openp turn from a redacted concurrent
   assert.equal(result.model, 'codex-test-model');
   assert.deepEqual(result.usage, { inputTokens: 200, outputTokens: 40, cacheReadInputTokens: 1000 });
 
-  // No text from the concurrently running turn 019f56a0-8… reaches this turn's output.
+  // No text from the concurrently running turn reaches this turn's output.
   const texts = result.commentaryEvents.map((event) => (event.message.content as any[])[0]?.text);
   assert.deepEqual(texts, [
     'redacted own turn progress message',

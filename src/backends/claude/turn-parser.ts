@@ -949,7 +949,7 @@ function buildReasoningContent(state: ParserState): string | null {
   return explicitReasoning || null;
 }
 
-// Reasoning accumulation follows the same SPEC.md rule as answer accumulation: an assistant update
+// Reasoning accumulation follows the same contract rule as answer accumulation: an assistant update
 // with the same native `message.id` is a same-message snapshot of the latest reasoning segment,
 // and a different `message.id` always starts a new segment (never merged by text comparison).
 // Raw references show every Claude assistant event carries `message.id`; events without it are

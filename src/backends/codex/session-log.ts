@@ -251,7 +251,7 @@ interface CodexSegmentAttribution {
 // Active-turn boundary counting and, for concurrent segments only, output attribution.
 //
 // A caller is a `response_item` user message whose immediately following record is its
-// `event_msg user_message` mirror (SPEC "Active turn segment"). Injected transcript records
+// `event_msg user_message` mirror, which opens an active turn segment. Injected transcript records
 // (`<environment_context>`, `# AGENTS.md instructions`, ...) carry a passthrough `turn_id` but no
 // mirror, so they are not callers. Each caller binds to its passthrough `turn_id`, else to the top
 // of the open-window stack (`task_started` .. `task_complete`/`turn_aborted`), which is `null` for

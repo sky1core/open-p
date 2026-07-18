@@ -53,8 +53,8 @@ import {
 } from './submission-recovery.js';
 
 // The non-interactive PTY turn cannot survive tools that outlive the synchronous turn or that block on
-// interactive input. openp launches Claude with these suppressed (official contract — see
-// src/backends/claude/SPEC.md "Background Suppression"):
+// interactive input. openp launches Claude with these suppressed (official contract, background
+// suppression):
 // - env CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 removes `run_in_background` / auto-backgrounding.
 // - --disallowedTools removes `Monitor`/`Workflow` (background work that outlives the turn) and
 //   `AskUserQuestion` (renders a blocking multiple-choice menu the PTY cannot answer → the turn hangs;

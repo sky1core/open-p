@@ -17,7 +17,7 @@ export const CLAUDE_CODE_ISOLATED_ENV_PREFIXES = ['ANTHROPIC_'] as const;
 
 // Keys the Claude launch always unsets at the launch boundary, even when no ambient value is present.
 // CLAUDE_CONFIG_DIR (via CLAUDE_CODE_ACCOUNT_UNSET_ENV): ambient config dir would silently disagree with
-//   the explicitly supplied one (see SPEC).
+//   the explicitly supplied one.
 // ANTHROPIC_BASE_URL: the single ANTHROPIC_* key the launch supplies explicitly (endpoint configuration
 //   only; see SAFE_ANTHROPIC_ENV_KEYS). Always unsetting it before the explicit value is supplied
 //   matches the prior tmux behavior of forcing this key onto the unset list regardless of ambient state.
