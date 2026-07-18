@@ -1,0 +1,484 @@
+{
+  "info": {
+    "id": "ses_openpseedtest0000000001",
+    "slug": "kind-planet",
+    "projectID": "global",
+    "directory": "/workspace/probe",
+    "path": "workspace/probe",
+    "title": "LANTERN probe Busan",
+    "agent": "build",
+    "model": {
+      "id": "Qwen3-8B-4bit",
+      "providerID": "mlx-lm",
+      "variant": "default"
+    },
+    "version": "1.17.11",
+    "summary": {
+      "additions": 0,
+      "deletions": 0,
+      "files": 0
+    },
+    "cost": 0,
+    "tokens": {
+      "input": 22682,
+      "output": 860,
+      "reasoning": 0,
+      "cache": {
+        "read": 0,
+        "write": 0
+      }
+    },
+    "permission": [
+      {
+        "permission": "question",
+        "pattern": "*",
+        "action": "deny"
+      },
+      {
+        "permission": "plan_enter",
+        "pattern": "*",
+        "action": "deny"
+      },
+      {
+        "permission": "plan_exit",
+        "pattern": "*",
+        "action": "deny"
+      }
+    ],
+    "time": {
+      "created": 1784355232292,
+      "updated": 1784355422027
+    }
+  },
+  "messages": [
+    {
+      "info": {
+        "role": "user",
+        "time": {
+          "created": 1784355232328
+        },
+        "agent": "build",
+        "model": {
+          "providerID": "mlx-lm",
+          "modelID": "Qwen3-8B-4bit"
+        },
+        "summary": {
+          "diffs": []
+        },
+        "id": "msg_f60012000008AAAAAAAAAAAAAA",
+        "sessionID": "ses_openpseedtest0000000001"
+      },
+      "parts": [
+        {
+          "type": "text",
+          "text": "\"Remember: the probe codename is LANTERN and the probe city is Busan. Reply with exactly: NOTED\"",
+          "id": "prt_f60012000009AAAAAAAAAAAAAA",
+          "sessionID": "ses_openpseedtest0000000001",
+          "messageID": "msg_f60012000008AAAAAAAAAAAAAA"
+        }
+      ]
+    },
+    {
+      "info": {
+        "parentID": "msg_f60012000008AAAAAAAAAAAAAA",
+        "role": "assistant",
+        "mode": "build",
+        "agent": "build",
+        "path": {
+          "cwd": "/workspace/probe",
+          "root": "/"
+        },
+        "cost": 0,
+        "tokens": {
+          "total": 7512,
+          "input": 7353,
+          "output": 159,
+          "reasoning": 0,
+          "cache": {
+            "write": 0,
+            "read": 0
+          }
+        },
+        "modelID": "Qwen3-8B-4bit",
+        "providerID": "mlx-lm",
+        "time": {
+          "created": 1784355232458,
+          "completed": 1784355374433
+        },
+        "finish": "stop",
+        "id": "msg_f6001200000aAAAAAAAAAAAAAA",
+        "sessionID": "ses_openpseedtest0000000001"
+      },
+      "parts": [
+        {
+          "type": "step-start",
+          "id": "prt_f6001200000bAAAAAAAAAAAAAA",
+          "sessionID": "ses_openpseedtest0000000001",
+          "messageID": "msg_f6001200000aAAAAAAAAAAAAAA"
+        },
+        {
+          "type": "reasoning",
+          "text": "\nOkay, let me break this down. The user wants me to remember that the probe codename is LANTERN and the probe city is Busan. They specified to reply with exactly \"NOTED\". \n\nFirst, I need to confirm that I've correctly stored those details. The codename \"LANTERN\" and the city \"Busan\" are the key points here. Since the user emphasized replying with \"NOTED\", I should make sure there's no extra text or explanation.\n\nI should check if there's any follow-up action needed, but the user hasn't asked for anything else. They just want confirmation. So the correct response is simply \"NOTED\" as instructed. No need for additional information or questions. Just a straightforward acknowledgment.\n",
+          "time": {
+            "start": 1784355370154,
+            "end": 1784355374078
+          },
+          "id": "prt_f6001200000cAAAAAAAAAAAAAA",
+          "sessionID": "ses_openpseedtest0000000001",
+          "messageID": "msg_f6001200000aAAAAAAAAAAAAAA"
+        },
+        {
+          "type": "text",
+          "text": "\n\nNOTED",
+          "time": {
+            "start": 1784355374082,
+            "end": 1784355374425
+          },
+          "id": "prt_f6001200000dAAAAAAAAAAAAAA",
+          "sessionID": "ses_openpseedtest0000000001",
+          "messageID": "msg_f6001200000aAAAAAAAAAAAAAA"
+        },
+        {
+          "reason": "stop",
+          "type": "step-finish",
+          "tokens": {
+            "total": 7512,
+            "input": 7353,
+            "output": 159,
+            "reasoning": 0,
+            "cache": {
+              "write": 0,
+              "read": 0
+            }
+          },
+          "cost": 0,
+          "id": "prt_f6001200000eAAAAAAAAAAAAAA",
+          "sessionID": "ses_openpseedtest0000000001",
+          "messageID": "msg_f6001200000aAAAAAAAAAAAAAA"
+        }
+      ]
+    },
+    {
+      "info": {
+        "role": "user",
+        "time": {
+          "created": 1784355375144
+        },
+        "agent": "build",
+        "model": {
+          "providerID": "mlx-lm",
+          "modelID": "Qwen3-8B-4bit"
+        },
+        "summary": {
+          "diffs": []
+        },
+        "id": "msg_f6001200000fAAAAAAAAAAAAAA",
+        "sessionID": "ses_openpseedtest0000000001"
+      },
+      "parts": [
+        {
+          "type": "text",
+          "text": "\"Also remember: the probe number is 47. Reply with exactly: NOTED\"",
+          "id": "prt_f60012000010AAAAAAAAAAAAAA",
+          "sessionID": "ses_openpseedtest0000000001",
+          "messageID": "msg_f6001200000fAAAAAAAAAAAAAA"
+        }
+      ]
+    },
+    {
+      "info": {
+        "parentID": "msg_f6001200000fAAAAAAAAAAAAAA",
+        "role": "assistant",
+        "mode": "build",
+        "agent": "build",
+        "path": {
+          "cwd": "/workspace/probe",
+          "root": "/"
+        },
+        "cost": 0,
+        "tokens": {
+          "total": 7521,
+          "input": 7384,
+          "output": 137,
+          "reasoning": 0,
+          "cache": {
+            "write": 0,
+            "read": 0
+          }
+        },
+        "modelID": "Qwen3-8B-4bit",
+        "providerID": "mlx-lm",
+        "time": {
+          "created": 1784355375266,
+          "completed": 1784355404876
+        },
+        "finish": "stop",
+        "id": "msg_f60012000011AAAAAAAAAAAAAA",
+        "sessionID": "ses_openpseedtest0000000001"
+      },
+      "parts": [
+        {
+          "type": "step-start",
+          "id": "prt_f60012000012AAAAAAAAAAAAAA",
+          "sessionID": "ses_openpseedtest0000000001",
+          "messageID": "msg_f60012000011AAAAAAAAAAAAAA"
+        },
+        {
+          "type": "reasoning",
+          "text": "\nOkay, the user wants me to remember that the probe number is 47. Let me check the previous messages to see what's already been noted.\n\nEarlier, they mentioned the codename LANTERN and the city Busan. Now adding the probe number 47. The user asked to reply with exactly \"NOTED\" each time. Since this is a new piece of information, I need to confirm it's added. But the user's instruction is to just reply with NOTED, so I should follow that without extra text. Make sure not to include any other messages or explanations, just the exact reply. Alright, that's straightforward.\n",
+          "time": {
+            "start": 1784355401172,
+            "end": 1784355404504
+          },
+          "id": "prt_f60012000013AAAAAAAAAAAAAA",
+          "sessionID": "ses_openpseedtest0000000001",
+          "messageID": "msg_f60012000011AAAAAAAAAAAAAA"
+        },
+        {
+          "type": "text",
+          "text": "\n\nNOTED",
+          "time": {
+            "start": 1784355404506,
+            "end": 1784355404868
+          },
+          "id": "prt_f60012000014AAAAAAAAAAAAAA",
+          "sessionID": "ses_openpseedtest0000000001",
+          "messageID": "msg_f60012000011AAAAAAAAAAAAAA"
+        },
+        {
+          "reason": "stop",
+          "type": "step-finish",
+          "tokens": {
+            "total": 7521,
+            "input": 7384,
+            "output": 137,
+            "reasoning": 0,
+            "cache": {
+              "write": 0,
+              "read": 0
+            }
+          },
+          "cost": 0,
+          "id": "prt_f60012000015AAAAAAAAAAAAAA",
+          "sessionID": "ses_openpseedtest0000000001",
+          "messageID": "msg_f60012000011AAAAAAAAAAAAAA"
+        }
+      ]
+    },
+    {
+      "info": {
+        "role": "user",
+        "model": {
+          "providerID": "mlx-lm",
+          "modelID": "Qwen3-8B-4bit"
+        },
+        "agent": "build",
+        "time": {
+          "created": 1784355406107
+        },
+        "summary": {
+          "diffs": []
+        },
+        "id": "msg_f60012000016AAAAAAAAAAAAAA",
+        "sessionID": "ses_openpseedtest0000000001"
+      },
+      "parts": [
+        {
+          "type": "compaction",
+          "auto": false,
+          "id": "prt_f60012000017AAAAAAAAAAAAAA",
+          "sessionID": "ses_openpseedtest0000000001",
+          "messageID": "msg_f60012000016AAAAAAAAAAAAAA"
+        }
+      ]
+    },
+    {
+      "info": {
+        "role": "assistant",
+        "parentID": "msg_f60012000016AAAAAAAAAAAAAA",
+        "mode": "compaction",
+        "agent": "compaction",
+        "summary": true,
+        "path": {
+          "cwd": "/workspace/probe",
+          "root": "/"
+        },
+        "cost": 0,
+        "tokens": {
+          "total": 929,
+          "input": 472,
+          "output": 457,
+          "reasoning": 0,
+          "cache": {
+            "write": 0,
+            "read": 0
+          }
+        },
+        "modelID": "Qwen3-8B-4bit",
+        "providerID": "mlx-lm",
+        "time": {
+          "created": 1784355406230,
+          "completed": 1784355415744
+        },
+        "finish": "stop",
+        "id": "msg_f60012000018AAAAAAAAAAAAAA",
+        "sessionID": "ses_openpseedtest0000000001"
+      },
+      "parts": [
+        {
+          "type": "step-start",
+          "id": "prt_f60012000019AAAAAAAAAAAAAA",
+          "sessionID": "ses_openpseedtest0000000001",
+          "messageID": "msg_f60012000018AAAAAAAAAAAAAA"
+        },
+        {
+          "type": "reasoning",
+          "text": "\nOkay, let me try to figure out how to approach this. The user wants me to create an anchored summary from the conversation history. The previous interactions were the user reminding the assistant about the probe codename, city, and number. The assistant just replied with \"NOTED\" each time.\n\nFirst, I need to structure the output according to the template provided. The sections are Goal, Constraints & Preferences, Progress (Done, In Progress, Blocked), Key Decisions, Next Steps, Critical Context, and Relevant Files. Each section should be a bullet point, even if it's empty. \n\nLooking at the conversation, there's no actual task mentioned beyond remembering specific details. The user's goal seems to be setting up context for a coding session, maybe related to a probe with codename LANTERN in Busan, probe number 47. Since there's no explicit task, the Goal section should reflect that the task is to remember these details. \n\nConstraints & Preferences: The user hasn't specified any constraints except the reminders. So maybe under Constraints, it's about retaining specific probe details. \n\nProgress sections are all empty because nothing has been done yet. Key Decisions might not apply here. Next Steps would be the next actions, but since the user hasn't given any, it's (none). Critical Context includes the probe details. Relevant Files are (none) because no files were mentioned.\n\nI need to make sure each section is present and follows the structure. Also, use terse bullets without any explanation. Check for exact file paths, but since there are none, just (none). Avoid any markdown in the response, just the structure as per the template.\n",
+          "time": {
+            "start": 1784355408029,
+            "end": 1784355413732
+          },
+          "id": "prt_f6001200001aAAAAAAAAAAAAAA",
+          "sessionID": "ses_openpseedtest0000000001",
+          "messageID": "msg_f60012000018AAAAAAAAAAAAAA"
+        },
+        {
+          "type": "text",
+          "text": "\n\n## Goal  \n- Remember probe details for coding session  \n\n## Constraints & Preferences  \n- Codename: LANTERN, City: Busan, Probe Number: 47  \n\n## Progress  \n### Done  \n- (none)  \n\n### In Progress  \n- (none)  \n\n### Blocked  \n- (none)  \n\n## Key Decisions  \n- (none)  \n\n## Next Steps  \n- (none)  \n\n## Critical Context  \n- Probe codename: LANTERN, city: Busan, number: 47  \n\n## Relevant Files  \n- (none)",
+          "time": {
+            "start": 1784355413735,
+            "end": 1784355415737
+          },
+          "id": "prt_f6001200001bAAAAAAAAAAAAAA",
+          "sessionID": "ses_openpseedtest0000000001",
+          "messageID": "msg_f60012000018AAAAAAAAAAAAAA"
+        },
+        {
+          "reason": "stop",
+          "type": "step-finish",
+          "tokens": {
+            "total": 929,
+            "input": 472,
+            "output": 457,
+            "reasoning": 0,
+            "cache": {
+              "write": 0,
+              "read": 0
+            }
+          },
+          "cost": 0,
+          "id": "prt_f6001200001cAAAAAAAAAAAAAA",
+          "sessionID": "ses_openpseedtest0000000001",
+          "messageID": "msg_f60012000018AAAAAAAAAAAAAA"
+        }
+      ]
+    },
+    {
+      "info": {
+        "role": "user",
+        "time": {
+          "created": 1784355421904
+        },
+        "agent": "build",
+        "model": {
+          "providerID": "mlx-lm",
+          "modelID": "Qwen3-8B-4bit"
+        },
+        "summary": {
+          "diffs": []
+        },
+        "id": "msg_f6001200001dAAAAAAAAAAAAAA",
+        "sessionID": "ses_openpseedtest0000000001"
+      },
+      "parts": [
+        {
+          "type": "text",
+          "text": "\"What is the probe codename? Reply with just the codename.\"",
+          "id": "prt_f6001200001eAAAAAAAAAAAAAA",
+          "sessionID": "ses_openpseedtest0000000001",
+          "messageID": "msg_f6001200001dAAAAAAAAAAAAAA"
+        }
+      ]
+    },
+    {
+      "info": {
+        "parentID": "msg_f6001200001dAAAAAAAAAAAAAA",
+        "role": "assistant",
+        "mode": "build",
+        "agent": "build",
+        "path": {
+          "cwd": "/workspace/probe",
+          "root": "/"
+        },
+        "cost": 0,
+        "tokens": {
+          "total": 7580,
+          "input": 7473,
+          "output": 107,
+          "reasoning": 0,
+          "cache": {
+            "write": 0,
+            "read": 0
+          }
+        },
+        "modelID": "Qwen3-8B-4bit",
+        "providerID": "mlx-lm",
+        "time": {
+          "created": 1784355422015,
+          "completed": 1784355451522
+        },
+        "finish": "stop",
+        "id": "msg_f6001200001fAAAAAAAAAAAAAA",
+        "sessionID": "ses_openpseedtest0000000001"
+      },
+      "parts": [
+        {
+          "type": "step-start",
+          "id": "prt_f60012000020AAAAAAAAAAAAAA",
+          "sessionID": "ses_openpseedtest0000000001",
+          "messageID": "msg_f6001200001fAAAAAAAAAAAAAA"
+        },
+        {
+          "type": "reasoning",
+          "text": "\nOkay, the user is asking for the probe codename. Let me check the conversation history.\n\nEarlier, the user mentioned \"Probe codename: LANTERN, City: Busan, Probe Number: 47\". So the codename is LANTERN. The current question is just asking to confirm that. The answer should be straightforward. Since the user specified to reply with just the codename, I should make sure not to add any extra text. The answer is LANTERN.\n",
+          "time": {
+            "start": 1784355448581,
+            "end": 1784355451156
+          },
+          "id": "prt_f60012000021AAAAAAAAAAAAAA",
+          "sessionID": "ses_openpseedtest0000000001",
+          "messageID": "msg_f6001200001fAAAAAAAAAAAAAA"
+        },
+        {
+          "type": "text",
+          "text": "\n\nLANTERN",
+          "time": {
+            "start": 1784355451158,
+            "end": 1784355451512
+          },
+          "id": "prt_f60012000022AAAAAAAAAAAAAA",
+          "sessionID": "ses_openpseedtest0000000001",
+          "messageID": "msg_f6001200001fAAAAAAAAAAAAAA"
+        },
+        {
+          "reason": "stop",
+          "type": "step-finish",
+          "tokens": {
+            "total": 7580,
+            "input": 7473,
+            "output": 107,
+            "reasoning": 0,
+            "cache": {
+              "write": 0,
+              "read": 0
+            }
+          },
+          "cost": 0,
+          "id": "prt_f60012000023AAAAAAAAAAAAAA",
+          "sessionID": "ses_openpseedtest0000000001",
+          "messageID": "msg_f6001200001fAAAAAAAAAAAAAA"
+        }
+      ]
+    }
+  ]
+}

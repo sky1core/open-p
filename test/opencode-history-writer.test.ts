@@ -22,6 +22,7 @@ import { extractOpenCodeNativeTurns } from '../src/backends/opencode/native-read
 import { resolveOpenPStateRoot } from '../src/core/state-root.js';
 
 const GOLDEN = join(process.cwd(), 'test/fixtures/seed/redacted-opencode-golden-export.json');
+const COMPACTED = join(process.cwd(), 'test/fixtures/opencode/compacted-session-export.json');
 const NOW_MS = Date.UTC(2026, 6, 14, 12, 0, 0);
 const TURNS: readonly SeedWriteTurn[] = [
   { logicalId: 'turn-1', userText: 'codename REDMOON', assistantText: 'noted one', contentDigest: 'digest-1', sourceNativeIds: null },
@@ -152,6 +153,55 @@ test('OpenCode writer never clones synthetic or ignored text into portable seed 
     assert.equal(Object.prototype.hasOwnProperty.call(message.parts[0], 'ignored'), false);
   }
   assert.equal(extractOpenCodeNativeTurns(JSON.stringify(built), built.info.id).at(-1)!.assistantText, TURNS[0]!.assistantText);
+});
+
+test('OpenCode writer skips completed compaction pair members when choosing clone templates', async () => {
+  const source = JSON.parse(await readFile(COMPACTED, 'utf8'));
+  source.messages = source.messages.slice(0, 6);
+  source.messages[2].info.templateProbe = 'ordinary-user-template';
+  source.messages[3].info.templateProbe = 'ordinary-assistant-template';
+  const nowMs = Math.max(...source.messages.flatMap((message: Msg) => [
+    message.info.time?.created,
+    message.info.time?.completed,
+  ]).filter(Number.isFinite)) + 10;
+
+  const built = prepareOpenCodeHistoryAppend(
+    JSON.stringify(source),
+    [TURNS[0]!],
+    nowMs,
+    source.info.id,
+  );
+  const doc = JSON.parse(built.doc);
+  const appended = doc.messages.slice(source.messages.length);
+  assert.equal(appended.length, 2);
+  assert.equal(appended[0].info.role, 'user');
+  assert.equal(appended[0].info.templateProbe, 'ordinary-user-template');
+  assert.equal(appended[1].info.role, 'assistant');
+  assert.equal(appended[1].info.templateProbe, 'ordinary-assistant-template');
+  assert.equal(Object.prototype.hasOwnProperty.call(appended[1].info, 'summary'), false);
+
+  const turns = extractOpenCodeNativeTurns(built.doc, source.info.id);
+  assert.deepEqual(turns.at(-1), {
+    userText: TURNS[0]!.userText,
+    assistantText: TURNS[0]!.assistantText,
+    nativeIds: built.written[0]!.nativeIds,
+  });
+});
+
+test('OpenCode writer still rejects compacted exports that have no non-pair text templates', async () => {
+  const source = JSON.parse(await readFile(COMPACTED, 'utf8'));
+  source.messages = source.messages.slice(4, 6);
+  const nowMs = Math.max(...source.messages.flatMap((message: Msg) => [
+    message.info.time?.created,
+    message.info.time?.completed,
+  ]).filter(Number.isFinite)) + 10;
+
+  assertExitCode(() => prepareOpenCodeHistoryAppend(
+    JSON.stringify(source),
+    [TURNS[0]!],
+    nowMs,
+    source.info.id,
+  ), 40);
 });
 
 test('OpenCode writer never clones a tool-loop intermediate assistant as its terminal template', async () => {

@@ -29,6 +29,7 @@ import { OpenPError } from '../src/core/errors.js';
 import { decodeNativeStateUtf8, digestNativeState } from '../src/core/native-state-digest.js';
 
 const FIXTURES = join(process.cwd(), 'test/fixtures/seed');
+const OPENCODE_FIXTURES = join(process.cwd(), 'test/fixtures/opencode');
 
 function rejects(fn: () => unknown): void {
   try {
@@ -43,6 +44,14 @@ function rejects(fn: () => unknown): void {
 
 function lines(text: string): string[] {
   return text.trimEnd().split('\n').filter(Boolean);
+}
+
+function opencodeTextFromMessage(message: any): string {
+  return message.parts
+    .filter((part: any) => part.type === 'text' && typeof part.text === 'string' &&
+      part.synthetic !== true && part.ignored !== true)
+    .map((part: any) => part.text)
+    .join('');
 }
 
 function lastUuid(logText: string): string {
@@ -2487,15 +2496,100 @@ test('OpenCode reader rejects malformed or duplicate native message and part ids
   }
 });
 
-test('OpenCode reader rejects pending revert and every native compaction marker', async () => {
+test('OpenCode reader skips completed compaction marker pairs and recovers surrounding turns', async () => {
+  const exportDoc = JSON.parse(await readFile(join(OPENCODE_FIXTURES, 'compacted-session-export.json'), 'utf8'));
+  const turns = extractOpenCodeNativeTurns(JSON.stringify(exportDoc), exportDoc.info.id);
+  const expectedPairs = [
+    [exportDoc.messages[0], exportDoc.messages[1]],
+    [exportDoc.messages[2], exportDoc.messages[3]],
+    [exportDoc.messages[6], exportDoc.messages[7]],
+  ] as const;
+
+  assert.equal(turns.length, 3);
+  for (const [index, [userMessage, assistantMessage]] of expectedPairs.entries()) {
+    const turn = turns[index]!;
+    assert.equal(turn.userText, opencodeTextFromMessage(userMessage));
+    assert.equal(turn.assistantText, opencodeTextFromMessage(assistantMessage));
+    assert.deepEqual(turn.nativeIds, {
+      userId: userMessage.info.id,
+      assistantIds: [assistantMessage.info.id],
+      completionId: assistantMessage.info.id,
+    });
+  }
+
+  const summaryText = opencodeTextFromMessage(exportDoc.messages[5]);
+  assert.ok(summaryText.includes('## Goal'));
+  assert.equal(turns.flatMap((turn) => [turn.userText, turn.assistantText])
+    .some((text) => text.includes('## Goal')), false);
+});
+
+test('OpenCode reader rejects incomplete or non-pair compaction markers', async () => {
+  const exportDoc = JSON.parse(await readFile(join(OPENCODE_FIXTURES, 'compacted-session-export.json'), 'utf8'));
+  const corruptions: readonly (readonly [string, (doc: any) => void])[] = [
+    ['summary assistant has error', (doc) => {
+      doc.messages[5].info.error = { message: 'summary failed' };
+    }],
+    ['summary assistant lacks completed time', (doc) => {
+      delete doc.messages[5].info.time.completed;
+    }],
+    ['summary assistant parent differs', (doc) => {
+      doc.messages[5].info.parentID = doc.messages[0].info.id;
+    }],
+    ['summary assistant text part has summary marker', (doc) => {
+      doc.messages[5].parts.find((part: any) => part.type === 'text').summary = true;
+    }],
+    ['compaction user has text part', (doc) => {
+      doc.messages[4].parts.push({
+        id: 'prt_f73dec11b002AAAAAAAAAAAAAA',
+        sessionID: doc.info.id,
+        messageID: doc.messages[4].info.id,
+        type: 'text',
+        text: 'not compaction metadata',
+      });
+    }],
+    ['summary assistant is not adjacent', (doc) => {
+      const [summaryMessage] = doc.messages.splice(5, 1);
+      doc.messages.splice(6, 0, summaryMessage);
+    }],
+    ['document compacting marker exists', (doc) => {
+      doc.info.time.compacting = doc.info.time.updated;
+    }],
+    ['metadata compaction continue marker exists', (doc) => {
+      doc.messages[0].parts[0].metadata = { compaction_continue: true };
+    }],
+    ['pair compaction user metadata continue marker exists', (doc) => {
+      doc.messages[4].parts[0].metadata = { compaction_continue: true };
+    }],
+    ['summary assistant info has revert marker', (doc) => {
+      doc.messages[5].info.revert = { messageID: doc.messages[4].info.id };
+    }],
+    ['summary assistant has compaction part', (doc) => {
+      doc.messages[5].parts.push({
+        id: 'prt_f73dec196002AAAAAAAAAAAAAA',
+        sessionID: doc.info.id,
+        messageID: doc.messages[5].info.id,
+        type: 'compaction',
+        auto: false,
+      });
+    }],
+    ['compaction user has boolean summary marker', (doc) => {
+      doc.messages[4].info.summary = true;
+    }],
+  ];
+
+  for (const [name, corrupt] of corruptions) {
+    const candidate = structuredClone(exportDoc);
+    corrupt(candidate);
+    assert.doesNotThrow(() => JSON.stringify(candidate), name);
+    rejects(() => extractOpenCodeNativeTurns(JSON.stringify(candidate), candidate.info.id));
+  }
+});
+
+test('OpenCode reader rejects pending revert and malformed OpenCode source sequences', async () => {
   const exportDoc = JSON.parse(await readFile(join(FIXTURES, 'redacted-opencode-golden-export.json'), 'utf8'));
   const reverted = structuredClone(exportDoc);
   reverted.info.revert = { messageID: reverted.messages[0].info.id };
   rejects(() => extractOpenCodeNativeTurns(JSON.stringify(reverted)));
-
-  const compacting = structuredClone(exportDoc);
-  compacting.info.time.compacting = compacting.info.time.updated;
-  rejects(() => extractOpenCodeNativeTurns(JSON.stringify(compacting)));
 
   const compacted = structuredClone(exportDoc);
   compacted.messages[0].parts.push({

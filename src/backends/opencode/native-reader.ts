@@ -207,9 +207,14 @@ export function extractOpenCodeNativeTurns(exportJson: string, expectedSessionId
     });
   };
 
-  for (const message of parsed.messages) {
+  for (let messageIndex = 0; messageIndex < parsed.messages.length; messageIndex += 1) {
+    const message = parsed.messages[messageIndex];
     if (!isObject(message) || !isObject(message.info) || !Array.isArray(message.parts)) {
       throw new OpenPError('OpenCode export contains unsupported message shape', EXIT_CODES.protocolViolation);
+    }
+    if (isCompletedOpenCodeCompactionPair(parsed.messages, messageIndex)) {
+      messageIndex += 1;
+      continue;
     }
     rejectUnsupportedOpenCodeSource(message);
     const role = message.info.role;
@@ -253,6 +258,54 @@ export function extractOpenCodeNativeTurns(exportJson: string, expectedSessionId
   }
   finalizePending(true);
   return turns;
+}
+
+export function isCompletedOpenCodeCompactionPair(messages: readonly unknown[], userIndex: number): boolean {
+  const userMessage = messages[userIndex];
+  const assistantMessage = messages[userIndex + 1];
+  if (!isObject(userMessage) || !isObject(userMessage.info) || !Array.isArray(userMessage.parts) ||
+    !isObject(assistantMessage) || !isObject(assistantMessage.info) || !Array.isArray(assistantMessage.parts)) {
+    return false;
+  }
+  if (userMessage.info.role !== 'user' || userMessage.parts.length !== 1) {
+    return false;
+  }
+  // Observed pair users carry an object-valued info.summary; boolean true on the user member is an
+  // unobserved shape and must fall through to the fail-closed rejection (only the assistant member
+  // legitimately carries info.summary === true).
+  if (userMessage.info.summary === true) {
+    return false;
+  }
+  if (hasOpenCodeCompactionPairFailClosedMarker(userMessage) ||
+    hasOpenCodeCompactionPairFailClosedMarker(assistantMessage)) {
+    return false;
+  }
+  const [part] = userMessage.parts;
+  if (!isObject(part) || part.type !== 'compaction') {
+    return false;
+  }
+  if (assistantMessage.info.role !== 'assistant' || assistantMessage.info.summary !== true ||
+    assistantMessage.info.parentID !== messageId(userMessage) ||
+    Object.prototype.hasOwnProperty.call(assistantMessage.info, 'error')) {
+    return false;
+  }
+  // The pair's only compaction part is the user member's single one; a compaction part on the
+  // summary assistant is an unobserved shape and must fall through to the fail-closed rejection.
+  if (assistantMessage.parts.some((assistantPart) => isObject(assistantPart) && assistantPart.type === 'compaction')) {
+    return false;
+  }
+  return isObject(assistantMessage.info.time) &&
+    typeof assistantMessage.info.time.completed === 'number' &&
+    Number.isFinite(assistantMessage.info.time.completed) &&
+    assistantMessage.info.time.completed >= 0;
+}
+
+function hasOpenCodeCompactionPairFailClosedMarker(message: JsonObject): boolean {
+  if (isObject(message.info) && Object.prototype.hasOwnProperty.call(message.info, 'revert')) {
+    return true;
+  }
+  return (message.parts as unknown[]).some((part) => isObject(part) &&
+    (part.summary === true || isObject(part.metadata) && part.metadata.compaction_continue === true));
 }
 
 export function assertOpenCodeExportNativeIds(exportDoc: unknown): void {

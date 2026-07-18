@@ -24,6 +24,7 @@ import {
   assertOpenCodeExportSessionIdentity,
   extractOpenCodeNativeTurns,
   hasPendingOpenCodeToolCall,
+  isCompletedOpenCodeCompactionPair,
   openCodeNativeStateDigest,
 } from './native-reader.js';
 import { parseOpenCodeNativeId } from './native-id.js';
@@ -429,8 +430,8 @@ function isAlreadyExistsError(error: unknown): boolean {
 // an `opencode import` document JSON string. Existing messages are preserved verbatim and the new
 // text-only messages are appended. The document-level `info.id` (the upsert key) is never changed;
 // appended message-level `info.id` values are fresh native ids. The clone templates are the last
-// user message and last assistant message that carry a `text` part; a missing template or
-// unparseable export is a protocol violation.
+// user message and last assistant message that carry a `text` part and are not completed compaction
+// pair members; a missing template or unparseable export is a protocol violation.
 export function buildOpenCodeImportDoc(
   exportJson: string,
   turns: readonly SeedWriteTurn[],
@@ -548,6 +549,9 @@ interface OpenCodeTemplateMessage extends JsonObject {
 
 function findLastTextMessage(messages: unknown[], role: 'user' | 'assistant'): OpenCodeTemplateMessage | null {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (isCompletedOpenCodeCompactionPairMember(messages, index)) {
+      continue;
+    }
     const message = messages[index];
     if (!isJsonObject(message) || !isJsonObject(message.info) || message.info.role !== role) {
       continue;
@@ -561,6 +565,11 @@ function findLastTextMessage(messages: unknown[], role: 'user' | 'assistant'): O
     return message as OpenCodeTemplateMessage;
   }
   return null;
+}
+
+function isCompletedOpenCodeCompactionPairMember(messages: readonly unknown[], index: number): boolean {
+  return isCompletedOpenCodeCompactionPair(messages, index) ||
+    (index > 0 && isCompletedOpenCodeCompactionPair(messages, index - 1));
 }
 
 function buildTextPart(
