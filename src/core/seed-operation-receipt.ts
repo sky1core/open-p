@@ -782,8 +782,8 @@ async function ensureReceiptParentDirectory(directory: string): Promise<void> {
   try {
     const stat = await lstat(directory);
     exists = true;
-    if (!stat.isDirectory() || (stat.mode & 0o777) !== 0o700 || !ownedByCurrentUser(stat.uid)) {
-      throw stateError(`invalid seed operation parent directory permissions: ${directory}`);
+    if (!stat.isDirectory() || (stat.mode & 0o022) !== 0 || !ownedByCurrentUser(stat.uid)) {
+      throw stateError(`invalid seed operation parent directory (must be an owned, non-group/other-writable directory): ${directory}`);
     }
   } catch (error) {
     if (!isNotFoundError(error)) throw error;
@@ -791,7 +791,7 @@ async function ensureReceiptParentDirectory(directory: string): Promise<void> {
   if (!exists) {
     await ensureDurableDirectory(directory, 0o700, false);
   }
-  await inspectPrivateDirectory(directory, false);
+  await inspectOwnedDirectory(directory, false);
 }
 
 async function inspectPrivateDirectory(directory: string, allowMissing: boolean): Promise<boolean> {
@@ -828,6 +828,46 @@ async function inspectPrivateDirectory(directory: string, allowMissing: boolean)
     } catch {
       if (primaryError === null) {
         throw stateError(`failed to close seed operation directory: ${directory}`);
+      }
+    }
+  }
+  return true;
+}
+
+async function inspectOwnedDirectory(directory: string, allowMissing: boolean): Promise<boolean> {
+  let observed;
+  try {
+    observed = await lstat(directory);
+  } catch (error) {
+    if (allowMissing && isNotFoundError(error)) return false;
+    throw stateError(`failed to read seed operation parent directory: ${directory}`);
+  }
+  if (!observed.isDirectory() || (observed.mode & 0o022) !== 0 || !ownedByCurrentUser(observed.uid)) {
+    throw stateError(`invalid seed operation parent directory (must be an owned, non-group/other-writable directory): ${directory}`);
+  }
+  let handle: FileHandle;
+  try {
+    handle = await open(directory, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_DIRECTORY);
+  } catch {
+    throw stateError(`invalid seed operation parent directory: ${directory}`);
+  }
+  let primaryError: unknown = null;
+  try {
+    const actual = await handle.stat();
+    if (!actual.isDirectory() || actual.dev !== observed.dev || actual.ino !== observed.ino ||
+      (actual.mode & 0o022) !== 0 || !ownedByCurrentUser(actual.uid)) {
+      throw stateError(`seed operation parent directory changed while being read: ${directory}`);
+    }
+  } catch (error) {
+    primaryError = error;
+    if (error instanceof OpenPError) throw error;
+    throw stateError(`failed to inspect seed operation parent directory: ${directory}`);
+  } finally {
+    try {
+      await handle.close();
+    } catch {
+      if (primaryError === null) {
+        throw stateError(`failed to close seed operation parent directory: ${directory}`);
       }
     }
   }

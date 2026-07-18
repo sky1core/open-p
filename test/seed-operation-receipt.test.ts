@@ -440,3 +440,67 @@ test('seed operation receipt loads remain valid across concurrent phase renames'
     assert.equal((await ctx.store.load(operationId))?.phase, 'succeeded');
   }));
 });
+
+test('seed operation receipt accepts owned parents that are not group/other-writable', async () => {
+  for (const parentMode of [0o700, 0o755, 0o750, 0o711]) {
+    const label = parentMode.toString(8);
+    const ctx = await context();
+    await chmod(ctx.stateRoot, parentMode);
+    const first = prepared();
+    await ctx.store.create(first);
+
+    const path = ctx.store.pathForOperation(OPERATION_ID);
+    assert.equal((await stat(dirname(path))).mode & 0o777, 0o700, `seed-operations directory must stay 0700 (parent ${label})`);
+    assert.equal((await stat(path)).mode & 0o777, 0o600, `receipt file must stay 0600 (parent ${label})`);
+    assert.equal((await stat(ctx.stateRoot)).mode & 0o777, parentMode, `parent ${label} must not be chmod-repaired`);
+    assert.equal((await ctx.store.load(OPERATION_ID))?.phase, 'prepared');
+
+    const creating = nextSeedOperationPhase(first, 'creating');
+    await ctx.store.update(first, creating);
+    assert.equal((await ctx.store.load(OPERATION_ID))?.phase, 'creating');
+  }
+});
+
+test('seed operation receipt rejects group- or other-writable parents without seeding them', async () => {
+  for (const parentMode of [0o777, 0o757, 0o770, 0o720]) {
+    const label = parentMode.toString(8);
+    const ctx = await context();
+    await chmod(ctx.stateRoot, parentMode);
+
+    await assert.rejects(
+      () => ctx.store.create(prepared()),
+      (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.sessionState,
+      `writable parent ${label} must be rejected`,
+    );
+    assert.equal((await stat(ctx.stateRoot)).mode & 0o777, parentMode, `rejected parent ${label} must not be repaired`);
+    assert.deepEqual(await readdir(ctx.stateRoot), [], `no receipt directory may be created under writable parent ${label}`);
+  }
+});
+
+test('seed operation receipt rejects a symlinked parent without seeding its target', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'openp-seed-op-cwd-'));
+  const realParent = await mkdtemp(join(tmpdir(), 'openp-seed-op-realparent-'));
+  const linkBase = await mkdtemp(join(tmpdir(), 'openp-seed-op-linkbase-'));
+  const symlinkParent = join(linkBase, 'state-root');
+  await symlink(realParent, symlinkParent, 'dir');
+  const store = new SeedOperationReceiptStore(cwd, symlinkParent);
+
+  await assert.rejects(
+    () => store.create(prepared()),
+    (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.sessionState,
+  );
+  assert.deepEqual(await readdir(realParent), [], 'symlinked parent target must not receive a receipt directory');
+});
+
+test('seed operation receipt still rejects a pre-existing non-0700 receipt directory', async () => {
+  const ctx = await context();
+  const seedOpsDir = dirname(ctx.store.pathForOperation(OPERATION_ID));
+  await mkdir(seedOpsDir, { mode: 0o700 });
+  await chmod(seedOpsDir, 0o755);
+
+  await assert.rejects(
+    () => ctx.store.create(prepared()),
+    (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.sessionState,
+  );
+  assert.equal((await stat(seedOpsDir)).mode & 0o777, 0o755, 'invalid receipt directory must not be repaired');
+});
