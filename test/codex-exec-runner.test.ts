@@ -42,6 +42,20 @@ test('runCodexExec captures stderr and non-zero exit', async () => {
   assert.equal(result.timedOut, false);
 });
 
+test('runCodexExec ignores stdin pipe errors after early child exit', async () => {
+  const result = await runCodexExec({
+    bin: join(FIXTURES, 'fake-codex-error.sh'),
+    args: ['exec', '-'],
+    stdinInput: 'x'.repeat(1024 * 1024),
+    cwd: process.cwd(),
+    timeoutMs: 10000,
+  });
+
+  assert.equal(result.exitCode, 1);
+  assert.ok(result.stderr.includes('something went wrong'));
+  assert.equal(result.timedOut, false);
+});
+
 test('runCodexExec maps missing backend executable to backendNotFound', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'openp-codex-missing-bin-'));
   const missingBin = join(dir, 'missing-codex-cli');

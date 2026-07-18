@@ -10,44 +10,52 @@ const CODEX_UNRESTRICTED_MODE_FLAG = '--dangerously-bypass-approvals-and-sandbox
 
 test('buildFirstTurnArgs does not add the unrestricted mode flag by default', () => {
   for (const executionMode of [undefined, 'default']) {
-    const args = buildFirstTurnArgs('hello', { ...BASE_OPTIONS, executionMode });
+    const args = buildFirstTurnArgs({ ...BASE_OPTIONS, executionMode });
     assert.ok(!args.includes(CODEX_UNRESTRICTED_MODE_FLAG));
     assert.ok(args.includes('exec'));
     assert.ok(args.includes('--skip-git-repo-check'));
     assert.ok(args.includes('--json'));
     assert.ok(args.includes('--output-last-message'));
-    assert.equal(args.at(-1), 'hello');
+    assert.equal(args.at(-1), '-');
   }
 });
 
+test('buildFirstTurnArgs uses stdin sentinel and never includes prompt bytes', () => {
+  const prompt = '--looks-like-codex-flag\nliteral prompt body';
+  const args = buildFirstTurnArgs(BASE_OPTIONS);
+
+  assert.equal(args.at(-1), '-');
+  assert.ok(!args.includes(prompt));
+});
+
 test('buildFirstTurnArgs maps danger-full-access to the unrestricted mode flag', () => {
-  const args = buildFirstTurnArgs('hello', { ...BASE_OPTIONS, executionMode: 'danger-full-access' });
+  const args = buildFirstTurnArgs({ ...BASE_OPTIONS, executionMode: 'danger-full-access' });
   assert.ok(args.includes(CODEX_UNRESTRICTED_MODE_FLAG));
 });
 
 test('buildFirstTurnArgs includes model when specified', () => {
-  const args = buildFirstTurnArgs('hello', { ...BASE_OPTIONS, model: 'gpt-5.6' });
+  const args = buildFirstTurnArgs({ ...BASE_OPTIONS, model: 'gpt-5.6' });
   const modelIdx = args.indexOf('--model');
   assert.ok(modelIdx >= 0);
   assert.equal(args[modelIdx + 1], 'gpt-5.6');
 });
 
 test('buildFirstTurnArgs includes reasoning effort as config override', () => {
-  const args = buildFirstTurnArgs('hello', { ...BASE_OPTIONS, reasoningEffort: 'max' });
+  const args = buildFirstTurnArgs({ ...BASE_OPTIONS, reasoningEffort: 'max' });
   const cIdx = args.indexOf('-c');
   assert.ok(cIdx >= 0);
   assert.equal(args[cIdx + 1], 'model_reasoning_effort="max"');
 });
 
 test('buildFirstTurnArgs preserves non-empty reasoning effort values for Codex validation', () => {
-  const args = buildFirstTurnArgs('hello', { ...BASE_OPTIONS, reasoningEffort: ' bogus ' });
+  const args = buildFirstTurnArgs({ ...BASE_OPTIONS, reasoningEffort: ' bogus ' });
   const cIdx = args.indexOf('-c');
   assert.ok(cIdx >= 0);
   assert.equal(args[cIdx + 1], 'model_reasoning_effort=" bogus "');
 });
 
 test('buildFirstTurnArgs uses sandbox mode for read-only', () => {
-  const args = buildFirstTurnArgs('hello', { ...BASE_OPTIONS, executionMode: 'read-only' });
+  const args = buildFirstTurnArgs({ ...BASE_OPTIONS, executionMode: 'read-only' });
   assert.ok(args.includes('--sandbox'));
   assert.ok(args.includes('read-only'));
   assert.ok(args.includes('--ask-for-approval'));
@@ -57,34 +65,34 @@ test('buildFirstTurnArgs uses sandbox mode for read-only', () => {
 
 test('buildFirstTurnArgs rejects unsupported execution modes instead of falling back to trusted tools', () => {
   assert.throws(
-    () => buildFirstTurnArgs('hello', { ...BASE_OPTIONS, executionMode: 'unknown-mode' }),
+    () => buildFirstTurnArgs({ ...BASE_OPTIONS, executionMode: 'unknown-mode' }),
     (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.unsupportedOption,
   );
 });
 
 test('buildFirstTurnArgs rejects public tool allowlist because Codex has no verified tool surface', () => {
   assert.throws(
-    () => buildFirstTurnArgs('hello', { ...BASE_OPTIONS, tools: 'Read,Grep' }),
+    () => buildFirstTurnArgs({ ...BASE_OPTIONS, tools: 'Read,Grep' }),
     (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.unsupportedOption,
   );
 });
 
 test('buildFirstTurnArgs includes output-schema on first turn', () => {
-  const args = buildFirstTurnArgs('hello', { ...BASE_OPTIONS, outputSchemaPath: '/tmp/schema.json' });
+  const args = buildFirstTurnArgs({ ...BASE_OPTIONS, outputSchemaPath: '/tmp/schema.json' });
   assert.ok(args.includes('--output-schema'));
   const schemaIdx = args.indexOf('--output-schema');
   assert.equal(args[schemaIdx + 1], '/tmp/schema.json');
 });
 
 test('buildFirstTurnArgs includes -C for cwd', () => {
-  const args = buildFirstTurnArgs('hello', { ...BASE_OPTIONS, cwd: '/my/project' });
+  const args = buildFirstTurnArgs({ ...BASE_OPTIONS, cwd: '/my/project' });
   const cIdx = args.indexOf('-C');
   assert.ok(cIdx >= 0);
   assert.equal(args[cIdx + 1], '/my/project');
 });
 
 test('buildResumeTurnArgs uses config override for sandbox on resume', () => {
-  const args = buildResumeTurnArgs('session-uuid', 'hello', { ...BASE_OPTIONS, executionMode: 'workspace-write' });
+  const args = buildResumeTurnArgs('session-uuid', { ...BASE_OPTIONS, executionMode: 'workspace-write' });
   assert.ok(!args.includes('--sandbox'));
   const cIndices = args.reduce((acc: number[], a, i) => a === '-c' ? [...acc, i] : acc, []);
   const sandboxOverride = cIndices.some(i => args[i + 1] === 'sandbox_mode="workspace-write"');
@@ -94,33 +102,33 @@ test('buildResumeTurnArgs uses config override for sandbox on resume', () => {
 });
 
 test('buildResumeTurnArgs does not add the unrestricted mode flag by default', () => {
-  const args = buildResumeTurnArgs('session-uuid', 'hello', { ...BASE_OPTIONS, executionMode: 'default' });
+  const args = buildResumeTurnArgs('session-uuid', { ...BASE_OPTIONS, executionMode: 'default' });
 
   assert.ok(!args.includes(CODEX_UNRESTRICTED_MODE_FLAG));
   assert.ok(args.includes('resume'));
 });
 
 test('buildResumeTurnArgs maps danger-full-access to the unrestricted mode flag', () => {
-  const args = buildResumeTurnArgs('session-uuid', 'hello', { ...BASE_OPTIONS, executionMode: 'danger-full-access' });
+  const args = buildResumeTurnArgs('session-uuid', { ...BASE_OPTIONS, executionMode: 'danger-full-access' });
   assert.ok(args.includes(CODEX_UNRESTRICTED_MODE_FLAG));
 });
 
 test('buildResumeTurnArgs includes model when specified', () => {
-  const args = buildResumeTurnArgs('session-uuid', 'hello', { ...BASE_OPTIONS, model: 'gpt-5.6' });
+  const args = buildResumeTurnArgs('session-uuid', { ...BASE_OPTIONS, model: 'gpt-5.6' });
   const modelIdx = args.indexOf('--model');
   assert.ok(modelIdx >= 0);
   assert.equal(args[modelIdx + 1], 'gpt-5.6');
 });
 
 test('buildResumeTurnArgs includes reasoning effort as config override', () => {
-  const args = buildResumeTurnArgs('session-uuid', 'hello', { ...BASE_OPTIONS, reasoningEffort: 'max' });
+  const args = buildResumeTurnArgs('session-uuid', { ...BASE_OPTIONS, reasoningEffort: 'max' });
   const cIdx = args.indexOf('-c');
   assert.ok(cIdx >= 0);
   assert.equal(args[cIdx + 1], 'model_reasoning_effort="max"');
 });
 
 test('buildResumeTurnArgs preserves non-empty reasoning effort values for Codex validation', () => {
-  const args = buildResumeTurnArgs('session-uuid', 'hello', { ...BASE_OPTIONS, reasoningEffort: ' bogus ' });
+  const args = buildResumeTurnArgs('session-uuid', { ...BASE_OPTIONS, reasoningEffort: ' bogus ' });
   const cIdx = args.indexOf('-c');
   assert.ok(cIdx >= 0);
   assert.equal(args[cIdx + 1], 'model_reasoning_effort=" bogus "');
@@ -128,33 +136,34 @@ test('buildResumeTurnArgs preserves non-empty reasoning effort values for Codex 
 
 test('buildResumeTurnArgs rejects unsupported execution modes instead of falling back to trusted tools', () => {
   assert.throws(
-    () => buildResumeTurnArgs('session-uuid', 'hello', { ...BASE_OPTIONS, executionMode: 'unknown-mode' }),
+    () => buildResumeTurnArgs('session-uuid', { ...BASE_OPTIONS, executionMode: 'unknown-mode' }),
     (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.unsupportedOption,
   );
 });
 
 test('buildResumeTurnArgs rejects public tool allowlist because Codex has no verified tool surface', () => {
   assert.throws(
-    () => buildResumeTurnArgs('session-uuid', 'hello', { ...BASE_OPTIONS, tools: 'Read,Grep' }),
+    () => buildResumeTurnArgs('session-uuid', { ...BASE_OPTIONS, tools: 'Read,Grep' }),
     (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.unsupportedOption,
   );
 });
 
-test('buildResumeTurnArgs places session id and prompt as trailing positional args', () => {
-  const args = buildResumeTurnArgs('my-session-id', 'follow up', BASE_OPTIONS);
+test('buildResumeTurnArgs places session id and stdin sentinel as trailing positional args', () => {
+  const args = buildResumeTurnArgs('my-session-id', BASE_OPTIONS);
   assert.ok(args.includes('exec'));
   assert.ok(args.includes('resume'));
   const lastTwo = args.slice(-2);
-  assert.deepEqual(lastTwo, ['my-session-id', 'follow up']);
+  assert.deepEqual(lastTwo, ['my-session-id', '-']);
+  assert.ok(!args.includes('follow up'));
 });
 
 test('buildResumeTurnArgs does not include -C', () => {
-  const args = buildResumeTurnArgs('sid', 'hello', { ...BASE_OPTIONS, cwd: '/my/project' });
+  const args = buildResumeTurnArgs('sid', { ...BASE_OPTIONS, cwd: '/my/project' });
   assert.ok(!args.includes('-C'));
 });
 
-test('buildResumeTurnArgs includes output-schema before session and prompt', () => {
-  const args = buildResumeTurnArgs('sid', 'hello', { ...BASE_OPTIONS, outputSchemaPath: '/tmp/schema.json' });
+test('buildResumeTurnArgs includes output-schema before session and stdin sentinel', () => {
+  const args = buildResumeTurnArgs('sid', { ...BASE_OPTIONS, outputSchemaPath: '/tmp/schema.json' });
   const schemaIdx = args.indexOf('--output-schema');
   assert.ok(schemaIdx >= 0);
   assert.equal(args[schemaIdx + 1], '/tmp/schema.json');

@@ -7,6 +7,7 @@ import { GracefulInterrupt, shouldTerminateOnAbort } from '../../core/graceful-i
 export interface CodexExecOptions {
   readonly bin: string;
   readonly args: readonly string[];
+  readonly stdinInput?: string;
   readonly cwd: string;
   readonly env?: NodeJS.ProcessEnv;
   readonly timeoutMs: number;
@@ -39,7 +40,13 @@ export function runCodexExec(options: CodexExecOptions): Promise<CodexExecResult
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
-    child.stdin?.end();
+    if (child.stdin) {
+      child.stdin.on('error', () => {
+        // Codex process failures are reported through exit/stderr handling; a
+        // closed stdin pipe must not become an unhandled stream error.
+      });
+      child.stdin.end(options.stdinInput);
+    }
 
     let stdout = '';
     let stderr = '';

@@ -229,7 +229,10 @@ test('configured Codex instance id is accepted by text CLI dispatch', async () =
   const argLines = (await readFile(argsLog, 'utf8')).trimEnd().split('\n');
   assert.match(argLines[0]!, /\texec\t/);
   assert.doesNotMatch(argLines[0]!, /\tresume\t/);
-  assert.match(argLines[1]!, new RegExp(`\\texec\\tresume\\t.*\\t${CODEX_SESSION_ID}\\tfollow up$`));
+  assert.match(argLines[1]!, new RegExp(`\\texec\\tresume\\t.*\\t${CODEX_SESSION_ID}\\t-$`));
+  assert.ok(!argLines[1]!.includes('follow up'));
+  const resumeLog = await readFile(join(configuredHome, 'sessions', '2026', '05', '23', `rollout-${CODEX_SESSION_ID}.jsonl`), 'utf8');
+  assert.match(resumeLog, /"text":"follow up"/);
 });
 
 test('configured Codex instance id is accepted by stream-json worker dispatch', async () => {

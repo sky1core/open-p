@@ -143,6 +143,31 @@ function assistantEventText(result: Awaited<ReturnType<CodexBackend['runTurn']>>
   return Array.isArray(content) ? (content[0] as { readonly text?: string } | undefined)?.text : undefined;
 }
 
+function lastCodexCallerTexts(log: string): { readonly responseText: string; readonly mirrorText: string } {
+  let responseText: string | null = null;
+  let mirrorText: string | null = null;
+  for (const line of log.trimEnd().split('\n')) {
+    const record = JSON.parse(line) as {
+      readonly type?: string;
+      readonly payload?: {
+        readonly type?: string;
+        readonly role?: string;
+        readonly content?: readonly { readonly type?: string; readonly text?: string }[];
+        readonly message?: string;
+      };
+    };
+    if (record.type === 'response_item' && record.payload?.type === 'message' && record.payload.role === 'user') {
+      responseText = record.payload.content?.find((item) => item.type === 'input_text')?.text ?? null;
+    }
+    if (record.type === 'event_msg' && record.payload?.type === 'user_message') {
+      mirrorText = record.payload.message ?? null;
+    }
+  }
+  assert.notEqual(responseText, null);
+  assert.notEqual(mirrorText, null);
+  return { responseText: responseText!, mirrorText: mirrorText! };
+}
+
 const BASE_OPTIONS = {
   cwd: process.cwd(),
   backendSessionId: 'test-session-001',
@@ -183,6 +208,42 @@ test('CodexBackend.runTurn succeeds on first turn', withFakeBin('fake-codex-succ
   assert.equal(result.sessionId, FAKE_CODEX_SESSION_ID);
   assert.ok(result.diagnostics.durationMs! >= 0);
 }));
+
+for (const [label, prompt] of [
+  ['double-dash-leading', '--literal prompt, not a codex flag'],
+  ['single-dash-only', '-'],
+  ['multiline', 'first line\n--second line\nthird line'],
+] as const) {
+  test(`CodexBackend.runTurn sends ${label} prompt through stdin unchanged`, withFakeBin('fake-codex-success.sh', async () => {
+    const prevArgsLog = process.env.OPENP_FAKE_CODEX_ARGS_LOG;
+    const argsLog = join(await mkdtemp(join(tmpdir(), `openp-codex-stdin-${label}-`)), 'args.log');
+    process.env.OPENP_FAKE_CODEX_ARGS_LOG = argsLog;
+    const backend = new CodexBackend();
+    try {
+      const result = await backend.runTurn(
+        { turnId: `turn-${label}`, prompt },
+        BASE_OPTIONS,
+      );
+
+      assert.equal(result.text, 'final answer here');
+      const args = (await readFile(argsLog, 'utf8')).trimEnd().split('\t');
+      assert.equal(args.at(-1), '-');
+      if (prompt !== '-') {
+        assert.ok(!args.includes(prompt));
+      }
+      const codexHome = process.env.CODEX_HOME;
+      assert.ok(codexHome);
+      const callerTexts = lastCodexCallerTexts(await readFile(codexTestLogPath(codexHome), 'utf8'));
+      assert.deepEqual(callerTexts, { responseText: prompt, mirrorText: prompt });
+    } finally {
+      if (prevArgsLog === undefined) {
+        delete process.env.OPENP_FAKE_CODEX_ARGS_LOG;
+      } else {
+        process.env.OPENP_FAKE_CODEX_ARGS_LOG = prevArgsLog;
+      }
+    }
+  }));
+}
 
 test('configured Codex backend passes configured CODEX_HOME to child and result reader', async () => {
   const prevPath = process.env.PATH;

@@ -91,8 +91,8 @@ export async function executeCodexTurn(input: CodexTurnExecutionInput): Promise<
       cwd: input.projectRoot,
     };
     const args = input.isFirstTurn
-      ? buildFirstTurnArgs(input.prompt, argsOptions)
-      : buildResumeTurnArgs(input.sessionId!, input.prompt, argsOptions);
+      ? buildFirstTurnArgs(argsOptions)
+      : buildResumeTurnArgs(input.sessionId!, argsOptions);
     const streamState = createCodexStreamState(structuredOutputSchema === null);
     const resumeLogBaseline = !input.isFirstTurn && input.sessionId
       ? await getCodexSessionLogBaseline(input.sessionId, { homeDir: codexHome })
@@ -100,6 +100,7 @@ export async function executeCodexTurn(input: CodexTurnExecutionInput): Promise<
     const result = await runCodexExec({
       bin: input.bin,
       args,
+      stdinInput: input.prompt,
       cwd: input.projectRoot,
       env: childEnv,
       timeoutMs: input.timeoutMs,

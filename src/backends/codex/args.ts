@@ -19,7 +19,7 @@ export function validateCodexBackendArgs(backendArgs: readonly string[]): void {
   }
 }
 
-export function buildFirstTurnArgs(prompt: string, options: CodexArgsOptions): string[] {
+export function buildFirstTurnArgs(options: CodexArgsOptions): string[] {
   const args: string[] = [];
 
   rejectUnsupportedTools(options.tools);
@@ -43,11 +43,11 @@ export function buildFirstTurnArgs(prompt: string, options: CodexArgsOptions): s
     args.push('--output-schema', options.outputSchemaPath);
   }
 
-  args.push(prompt);
+  args.push('-');
   return args;
 }
 
-export function buildResumeTurnArgs(sessionId: string, prompt: string, options: CodexArgsOptions): string[] {
+export function buildResumeTurnArgs(sessionId: string, options: CodexArgsOptions): string[] {
   const args: string[] = [];
 
   rejectUnsupportedTools(options.tools);
@@ -67,7 +67,7 @@ export function buildResumeTurnArgs(sessionId: string, prompt: string, options: 
     args.push('--output-schema', options.outputSchemaPath);
   }
 
-  args.push(sessionId, prompt);
+  args.push(sessionId, '-');
   return args;
 }
 
