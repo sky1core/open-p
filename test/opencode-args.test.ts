@@ -17,7 +17,37 @@ test('buildOpenCodeArgs builds a first-turn local-private run command', () => {
       backendArgs: [],
     },
   });
-  assert.deepEqual(args, ['run', '--pure', '--format', 'json', '--model', 'ollama/qwen-coder', 'hello']);
+  assert.deepEqual(args, ['run', '--pure', '--format', 'json', '--model', 'ollama/qwen-coder', '--', 'hello']);
+});
+
+// `opencode run` takes the message as a positional, so a dash-leading prompt is parsed as a native
+// flag unless option parsing is ended first. `--dangerously-skip-permissions` is a real opencode
+// option: without the separator a prompt carrying that text runs the turn with permissions the
+// caller never requested.
+test('buildOpenCodeArgs keeps a dash-leading prompt out of option position', () => {
+  const args = buildOpenCodeArgs({
+    message: '--dangerously-skip-permissions',
+    sessionId: null,
+    isFirstTurn: true,
+    options: {
+      model: 'ollama/qwen-coder',
+      reasoningEffort: null,
+      executionMode: null,
+      tools: null,
+      jsonSchema: null,
+      backendArgs: [],
+    },
+  });
+
+  const separator = args.indexOf('--');
+  assert.notEqual(separator, -1, 'option parsing is terminated before the prompt');
+  assert.equal(args[separator + 1], '--dangerously-skip-permissions', 'prompt is the message positional');
+  assert.equal(args.length, separator + 2, 'nothing follows the prompt');
+  assert.deepEqual(
+    args.slice(0, separator).filter((arg) => arg === '--dangerously-skip-permissions'),
+    [],
+    'the prompt text never appears in option position',
+  );
 });
 
 test('buildOpenCodeArgs resumes with a safe session id', () => {
@@ -46,6 +76,7 @@ test('buildOpenCodeArgs resumes with a safe session id', () => {
     '--variant',
     'high',
     '--dangerously-skip-permissions',
+    '--',
     'next',
   ]);
 });
@@ -65,7 +96,7 @@ test('buildOpenCodeArgs passes arbitrary non-empty effort values to OpenCode wit
     },
   });
 
-  assert.deepEqual(args.slice(-3), ['--variant', ' future-effort ', 'hello']);
+  assert.deepEqual(args.slice(-4), ['--variant', ' future-effort ', '--', 'hello']);
 });
 
 test('requireLocalModel rejects non-local provider prefixes', () => {

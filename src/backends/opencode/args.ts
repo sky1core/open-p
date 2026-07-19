@@ -67,7 +67,10 @@ export function buildOpenCodeArgs(input: {
     args.push('--dangerously-skip-permissions');
   }
 
-  args.push(input.message);
+  // `--` ends option parsing, so the prompt reaches `opencode run` as the message positional even
+  // when it starts with a dash. Without it a prompt like `--dangerously-skip-permissions` is read as
+  // a native flag and the turn runs with permissions the caller never asked for.
+  args.push('--', input.message);
   return args;
 }
 
