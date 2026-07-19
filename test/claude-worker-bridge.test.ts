@@ -455,3 +455,29 @@ test('worker bridge rejects an already aborted turn before starting a process', 
   );
   assert.equal(starts, 0);
 });
+
+// The resume id is passed to Claude Code as a `--resume <value>` argv pair. A dash-leading value
+// would be parsed as a native flag instead of a session id, so it has to be rejected before any
+// process starts rather than at the launch boundary.
+test('worker bridge rejects an unsafe resume session id before starting a process', async () => {
+  const starts: ClaudeCodeWorkerBridgeStartRequest[] = [];
+  const bridge = new ClaudeCodeWorkerBridge(UNUSED_PROVIDER, undefined, async (request) => {
+    starts.push(request);
+    return new FakeManagedProcess(request.sessionId, request.launchSignature);
+  });
+
+  for (const unsafeId of ['--dangerously-skip-permissions', '--allow-dangerously-skip-permissions', '-p']) {
+    await assert.rejects(
+      () => bridge.runTurn({
+        sessionId: unsafeId,
+        isFirstTurn: false,
+        projectRoot: '/work/open-p',
+        message: 'resume prompt',
+      }),
+      (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.usage,
+      `rejects ${unsafeId}`,
+    );
+  }
+
+  assert.equal(starts.length, 0, 'no backend process is started for an unsafe resume id');
+});

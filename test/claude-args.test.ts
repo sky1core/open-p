@@ -131,6 +131,10 @@ test('buildClaudeCodeArgs rejects raw Claude print and permission backend args',
     ['--permission-mode', CLAUDE_UNRESTRICTED_PERMISSION_MODE],
     [`--permission-mode=${CLAUDE_UNRESTRICTED_PERMISSION_MODE}`],
     ['--dangerously-skip-permissions'],
+    // Claude Code exposes a second flag enabling the same bypass; rejecting only the first one
+    // leaves raw backend args a way to turn off every permission check.
+    ['--allow-dangerously-skip-permissions'],
+    ['--allow-dangerously-skip-permissions=true'],
   ]) {
     assert.throws(
       () => buildClaudeCodeArgs({
@@ -415,6 +419,10 @@ test('buildPersistentClaudeCodeArgs rejects raw Claude print and permission back
     ['--permission-mode', CLAUDE_UNRESTRICTED_PERMISSION_MODE],
     [`--permission-mode=${CLAUDE_UNRESTRICTED_PERMISSION_MODE}`],
     ['--dangerously-skip-permissions'],
+    // Claude Code exposes a second flag enabling the same bypass; rejecting only the first one
+    // leaves raw backend args a way to turn off every permission check.
+    ['--allow-dangerously-skip-permissions'],
+    ['--allow-dangerously-skip-permissions=true'],
   ]) {
     assert.throws(
       () => buildPersistentClaudeCodeArgs({

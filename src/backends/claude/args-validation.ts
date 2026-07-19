@@ -8,6 +8,9 @@ const UNSUPPORTED_BACKEND_FLAGS = new Set([
   '--include-partial-messages',
   '--permission-mode',
   '--dangerously-skip-permissions',
+  // Claude Code exposes a second flag that enables the same bypass. Rejecting only the first one
+  // leaves the caller a way to turn off every permission check through raw backend args.
+  '--allow-dangerously-skip-permissions',
   '--effort',
 ]);
 

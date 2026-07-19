@@ -4,6 +4,7 @@ import { EXIT_CODES, OpenPError } from '../../core/errors.js';
 import { buildLaunchSignature } from '../../core/launch-signature.js';
 import { PersistentProcessManager } from '../../core/persistent-process.js';
 import type { ProcessStartRequest, ManagedBackendProcess } from '../../core/persistent-process.js';
+import { isSafeSessionId } from '../../core/session-id.js';
 import { prepareWorkerTurnInput } from '../../core/worker-input.js';
 import { toWorkerTurnResult } from '../../core/worker-result.js';
 import type { BackendWorkerBridge } from '../../core/backend.js';
@@ -58,6 +59,12 @@ export class ClaudeCodeWorkerBridge implements BackendWorkerBridge {
     const preparedInput = prepareWorkerTurnInput(request);
     if (!preparedInput.isFirstTurn && !request.sessionId) {
       throw new OpenPError('Claude Code resume requires a session id', EXIT_CODES.usage);
+    }
+    // The resume id becomes a `--resume <value>` argv pair, so a dash-leading value would be read as
+    // a native flag instead of a session id. The Codex and OpenCode bridges check their own resume
+    // ids the same way.
+    if (!preparedInput.isFirstTurn && !isSafeSessionId(request.sessionId!)) {
+      throw new OpenPError('Claude Code resume received an unsafe session id', EXIT_CODES.usage);
     }
     const backendSessionId = preparedInput.isFirstTurn ? randomUUID() : request.sessionId!;
     const launchEnv = withClaudeCodeAccountLaunchEnv(request.env ?? {}, this.configDir);
