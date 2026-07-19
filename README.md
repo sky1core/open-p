@@ -212,6 +212,24 @@ openp codex --resume <session-id> "follow-up"
 
 Text output does not include session ids.
 
+### Session Locks
+
+One turn at a time holds a session. The lock is a directory gate; a lock left behind by a process
+that is really gone is reclaimed automatically on the next acquisition.
+
+Releases before 0.19.6 wrote a file-shaped lock instead. This version never removes one of those on
+its own, because deleting it while a delayed older process still held the session would let two turns
+run against it at once. So if a session ended abnormally under an older release — a crash, `kill -9`,
+a reboot — the first run after upgrading exits `21` (session busy) and names the path to delete:
+
+```
+session <id> is held by a file-shaped lock written by an older open-p. It is never cleared
+automatically: ... Stop anything using this session, then delete <path> to continue.
+```
+
+Confirm nothing is still using that session, then remove the path. Sessions created by this version
+are unaffected.
+
 ## Session Seeding
 
 `openp seed` translates completed user/assistant turns from one native backend session into another
@@ -380,6 +398,8 @@ Debug logs may contain session ids, prompts, response previews, and error contex
 `--event-log` writes caller-owned lifecycle records under `openpRun`. The first record contains
 `openpRun.header`, the final record contains `openpRun.terminal`, and long-running backend waits
 may emit `openpRun.activity` records such as Claude session-log wait stage and idle duration.
+It requires `--output-format stream-json` and cannot be combined with `--input-format stream-json`;
+either combination exits `2` (usage) rather than writing a partial log.
 New event-log files are created with normal caller ownership and the caller's umask. Existing
 caller-owned event-log files keep their current mode and ACL; open-p never tightens or rewrites
 the file permissions.

@@ -114,6 +114,38 @@ test('does not auto-remove a legacy file lock owned by a missing process', async
   assert.equal((await stat(path)).ino, inodeBefore);
 });
 
+// The lock a released older open-p wrote is file-shaped, so upgrading over a session that ended
+// abnormally leaves a lock this version refuses to clear. A bare "session is busy" gives the caller
+// nothing to act on: the message has to name the path to remove and why it is not removed for them.
+test('reports the path to clear when a legacy file lock blocks acquisition', async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), 'openp-lock-'));
+  const stateRoot = await mkdtemp(join(tmpdir(), 'openp-lock-root-'));
+  const store = new SessionLockStore(projectRoot, stateRoot);
+  const path = store.pathForSession(SESSION_ID);
+  await mkdir(join(stateRoot, 'locks'), { recursive: true });
+  await writeFile(path, JSON.stringify({
+    token: 'stale-token',
+    sessionId: SESSION_ID,
+    pid: 99_999_999,
+    createdAt: new Date().toISOString(),
+  }));
+
+  await assert.rejects(
+    () => store.acquire(SESSION_ID),
+    (error) => {
+      assert.ok(error instanceof OpenPError);
+      assert.equal(error.exitCode, EXIT_CODES.sessionBusy);
+      assert.ok(error.message.includes(path), 'names the lock path the caller must delete');
+      assert.ok(error.message.includes('older open-p'), 'attributes the lock to a previous version');
+      assert.ok(
+        error.message.includes('never cleared automatically'),
+        'explains that open-p will not remove it on the caller\'s behalf',
+      );
+      return true;
+    },
+  );
+});
+
 test('recovers stale and empty legacy directory claims into a permanent gate', async () => {
   for (const legacyShape of ['stale', 'empty'] as const) {
     const projectRoot = await mkdtemp(join(tmpdir(), 'openp-lock-'));

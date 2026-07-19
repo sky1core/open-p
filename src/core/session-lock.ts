@@ -101,6 +101,18 @@ export class SessionLockStore {
     }
 
     if (!ownerPath) {
+      if (canonicalKind === 'legacy-file') {
+        // A file-shaped lock predates the permanent gate. It is never removed automatically (see
+        // inspectCanonicalLock), so the caller has to clear it once the session is really idle —
+        // say so instead of reporting a plain busy session it cannot diagnose.
+        throw new OpenPError(
+          `session ${sessionId} is held by a file-shaped lock written by an older open-p. `
+            + 'It is never cleared automatically: removing it while a delayed old-version process '
+            + 'still holds the session would let two turns run at once. Stop anything using this '
+            + `session, then delete ${gateDir} to continue.`,
+          EXIT_CODES.sessionBusy,
+        );
+      }
       if (canonicalKind !== 'permanent') {
         throw new OpenPError(`session ${sessionId} is busy`, EXIT_CODES.sessionBusy);
       }
