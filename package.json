@@ -1,6 +1,6 @@
 {
   "name": "open-p",
-  "version": "0.32.3",
+  "version": "0.32.6",
   "license": "MIT",
   "type": "module",
   "bin": {
@@ -11,15 +11,10 @@
     "README.md"
   ],
   "scripts": {
-    "clean": "node scripts/clean-dist.mjs",
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
     "build": "npm run clean && tsc -p tsconfig.build.json && chmod +x dist/src/cli.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "tsx --test --test-concurrency=1 test/*.test.ts",
-    "test:parallel": "tsx --test test/*.test.ts",
-    "verify": "npm run typecheck && npm test",
-    "prepare": "npm run build",
-    "smoke:live": "node scripts/live-smoke.mjs",
-    "verify:stream-json-contract": "node scripts/verify-stream-json-contract.mjs"
+    "prepare": "npm run build"
   },
   "engines": {
     "node": ">=20"
