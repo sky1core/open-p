@@ -832,7 +832,7 @@ test('extractSessionLogResult fills aggregate usage from a single token_count la
 });
 
 test('extractSessionLogResult sums aggregate usage across multi-subturn token_count events', () => {
-  // Values mirror .agents/references/full-suite/20260524-195248/cases/codex-gpt-5.5/tool-use-file/codex-session-log.jsonl
+  // Values mirror a live codex session log from a tool-use turn.
   const log = [
     codexUserTurn(),
     codexTokenCount({ input: 28014, cached: 3456, output: 392 }, { input: 28014, cached: 3456, output: 392 }),
@@ -860,7 +860,7 @@ test('extractSessionLogResult sums aggregate usage across multi-subturn token_co
 });
 
 test('extractSessionLogResult scoped resume tail reports the resumed turn usage without session totals', () => {
-  // Values mirror turn 2 of .agents/references/openp-codex-live-0721-usage-probe/20260610-070233/codex-session-log.jsonl:
+  // Values mirror turn 2 of a live codex session log:
   // total_token_usage is session-cumulative (52394 includes turn 1); last_token_usage is the resumed turn alone.
   const resumedTail = [
     codexUserTurn(),

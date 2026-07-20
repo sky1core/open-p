@@ -45,8 +45,7 @@ import { extractPromptLocalCommandName } from './prompt-command.js';
 // - --disallowedTools removes `Monitor`/`Workflow` (background work that outlives the turn) and
 //   `AskUserQuestion` (renders a blocking multiple-choice menu the PTY cannot answer → the turn hangs;
 //   with it disallowed the model asks via plain answer text instead).
-// The disable levers are live-verified
-// (.agents/references/ad-hoc/20260530-pty-kickoff-monitor-turn-lifecycle/observations.md §11).
+// The disable levers are live-verified against Claude Code's PTY turn lifecycle.
 
 const PRE_CALLER_LOCAL_COMMAND_PROMPT_RETRY_LIMIT = 1;
 

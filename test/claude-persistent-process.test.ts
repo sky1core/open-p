@@ -19,7 +19,7 @@ import type { PtyProvider, PtySession, PtyStartOptions } from '../src/runners/ty
 
 const TEST_CWD = process.cwd();
 const RAW_BYPASS_WARNING_SCREEN = [
-  // Source: .agents/references/claude-bypass-warning-screen-20260612-095113/screen.txt
+  // Source: a live capture of the Claude Code permission-mode warning screen.
   '────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────',
   '  WARNING: Claude Code running in Bypass Permissions mode',
   '',

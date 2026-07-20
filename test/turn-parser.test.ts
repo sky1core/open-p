@@ -1153,8 +1153,7 @@ function durationLine(durationMs: number): string {
   });
 }
 
-// Line builders below follow the live Claude Code session-log event shape recorded in
-// .agents/references/full-suite/20260524-195248/cases/claude-sonnet-4-6/*/claude-session-log.jsonl.
+// Line builders below follow the live Claude Code session-log event shape.
 const LIVE_SHAPE_SESSION_ID = '30000000-0000-4000-8000-000000000000';
 
 function liveShapeUserLine(uuid: string, content: string): string {
