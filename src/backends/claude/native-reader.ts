@@ -189,7 +189,7 @@ function collectSegmentPortableTurns(
       // resubmitted before the previous turn completed. That pending turn has no completion boundary
       // id, so it can never be a portable turn: discard it and any partial assistant text, and
       // continue from the new caller user. Structural corruption is already caught by the active
-      // parent-lineage append-order/single-root checks, not here. This relies on the observed
+      // parent-lineage root and integrity checks, not here. This relies on the observed
       // pattern that an interrupted turn carries no `system/turn_duration`; a stale/late completion
       // record inserted after the next caller user has not been observed in the corpus.
       discard();
@@ -300,6 +300,13 @@ function activeParentLineage(
     return [];
   }
   const active = new Set<string>();
+  // Active records are emitted in lineage order, not in the order Claude appended them. Claude
+  // sometimes flushes a finished child record ahead of the parent it answers — observed on tool
+  // results, on turn-completion records, and on records that follow a completion — so file position
+  // does not state which record came first. The chain does, and the timestamps on every inverted
+  // pair agree with the chain. Reading file position as order would reorder an answer around its own
+  // tool preamble, or split a turn at the wrong boundary.
+  const lineageTipToRoot: JsonObject[] = [];
   let cursor: string | null = lastUuid;
   while (cursor) {
     if (active.has(cursor)) {
@@ -315,26 +322,14 @@ function activeParentLineage(
       throw new OpenPError('Claude active session lineage references missing parentUuid', EXIT_CODES.protocolViolation);
     }
     active.add(cursor);
+    lineageTipToRoot.push(entry);
     const parentUuid = parentUuidOf(entry);
     if (parentUuid === null && cursor !== firstUuid) {
       throw new OpenPError('Claude active session lineage terminates at an unexpected root', EXIT_CODES.protocolViolation);
     }
-    if (parentUuid) {
-      const parentIndex = indexByUuid.get(parentUuid);
-      if (parentIndex !== undefined && parentIndex >= cursorIndex!) {
-        throw new OpenPError('Claude active session lineage is not in append order', EXIT_CODES.protocolViolation);
-      }
-    }
     cursor = parentUuid;
   }
-  const activeEntries: JsonObject[] = [];
-  for (let index = segment.start; index < segment.end; index += 1) {
-    const entry = entries[index]!;
-    if (typeof entry.uuid === 'string' && active.has(entry.uuid)) {
-      activeEntries.push(entry);
-    }
-  }
-  return activeEntries;
+  return lineageTipToRoot.reverse();
 }
 
 function parentUuidOf(entry: JsonObject): string | null {
