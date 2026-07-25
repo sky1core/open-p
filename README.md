@@ -192,6 +192,8 @@ The OpenCode backend is intended for local-provider use. On Apple Silicon, prefe
 - `ollama/<model-id>` -> `http://localhost:11434/v1`
 - `llama.cpp/<model-id>` -> `http://localhost:8080/v1`
 
+Start that provider's model server before running a turn. `openp` checks the base URL first and exits `11` when nothing is listening, because OpenCode itself would instead retry the connection indefinitely without printing anything. The check runs at launch and confirms only that the address accepts a connection, so set `--timeout` as well if you want a bound on turns whose server stops or stalls mid-turn.
+
 The backend does not publish a hardcoded model or reasoning-effort catalog. Within its required local-provider boundary, `--model <provider>/<model-id>` is passed as OpenCode `--model` and `--effort <level>` is passed unchanged as `--variant <level>`. Non-zero exits preserve bounded OpenCode stdout and stderr diagnostics, including non-JSON output.
 
 OpenCode provider ids are config keys, so the provider id alone is not a privacy boundary. `openp` supplies a private OpenCode config for the selected local provider and does not load ambient OpenCode account data.
