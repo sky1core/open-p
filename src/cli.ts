@@ -733,6 +733,7 @@ function buildOutputMetadata(options: ResolvedCliOptions, cwd: string): {
   readonly backend: string;
   readonly cwd: string;
   readonly model: string | null;
+  readonly requestedEffort: string | null;
   readonly permissionMode: string | null;
   readonly mcpServers?: readonly unknown[];
   readonly contextWindow: number | null;
@@ -741,6 +742,7 @@ function buildOutputMetadata(options: ResolvedCliOptions, cwd: string): {
     backend: options.backend,
     cwd,
     model: options.model,
+    requestedEffort: options.reasoningEffort,
     permissionMode: options.permissionMode,
     contextWindow: null,
     mcpServers: [],

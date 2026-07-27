@@ -20,6 +20,10 @@ export interface TurnDiagnostics {
   readonly usage: BackendUsage;
   readonly rawUsage?: Record<string, unknown> | null;
   readonly model?: string | null;
+  // The reasoning effort the backend reports for the turn it just ran, which is not necessarily the
+  // one the caller asked for: a backend may substitute its own without saying so. Present only when
+  // the backend states it, so a caller can compare it against the requested value.
+  readonly effort?: string | null;
   readonly contextWindow?: number | null;
   readonly lastSubturnUsage?: BackendUsage | null;
   readonly lastSubturnContextTokens?: number | null;

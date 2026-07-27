@@ -17,6 +17,9 @@ export interface OutputOptions {
   readonly backendSessionId: string;
   readonly backend?: string | null;
   readonly model?: string | null;
+  // What the caller asked for, reported beside the effort the backend actually ran with so a
+  // substitution is visible from the output alone. Never used to fill that value in.
+  readonly requestedEffort?: string | null;
   readonly cwd?: string | null;
   readonly permissionMode?: string | null;
   readonly mcpServers?: readonly unknown[];
@@ -61,6 +64,7 @@ export function formatTurnResult(result: TurnResult, options: OutputOptions): st
   const warnings = mergeWarnings(result.warnings, options.warnings);
   const stopReason = result.diagnostics.stopReason ?? null;
   const effectiveModel = result.diagnostics.model ?? options.model ?? null;
+  const actualEffort = result.diagnostics.effort ?? null;
   const resultUsage = result.diagnostics.usage;
   const lastSubturnUsage = result.diagnostics.lastSubturnUsage ?? null;
   const assistantEventUsage = resultUsage;
@@ -213,6 +217,8 @@ export function formatTurnResult(result: TurnResult, options: OutputOptions): st
       contextWindow: effectiveContextWindow,
       lastSubturnContextTokens,
       model: effectiveModel,
+      actualEffort,
+      requestedEffort: options.requestedEffort ?? null,
       warnings,
     }))}\n`;
   }
@@ -246,6 +252,8 @@ export function formatTurnResult(result: TurnResult, options: OutputOptions): st
       contextWindow: effectiveContextWindow,
       lastSubturnContextTokens,
       model: effectiveModel,
+      actualEffort,
+      requestedEffort: options.requestedEffort ?? null,
       warnings,
     }),
   );
@@ -377,6 +385,7 @@ export function formatWorkerTurnResult(result: WorkerTurnResult, event: {
   readonly turnId: string;
   readonly backend?: string | null;
   readonly model?: string | null;
+  readonly requestedEffort?: string | null;
   readonly structuredOutputToolUseId?: string | null;
   readonly suppressAssistantSnapshots?: readonly AssistantEventSnapshot[];
   readonly previouslyEmittedAssistantEvents?: readonly Record<string, unknown>[];
@@ -390,6 +399,7 @@ export function formatWorkerTurnResult(result: WorkerTurnResult, event: {
   };
   const warnings = mergeWarnings(result.warnings, event.warnings);
   const effectiveModel = result.diagnostics.model ?? event.model ?? null;
+  const actualEffort = result.diagnostics.effort ?? null;
   const lastSubturnUsage = result.diagnostics.lastSubturnUsage ?? null;
   const assistantEventUsage = usage;
   const lastSubturnContextTokens =
@@ -595,6 +605,8 @@ export function formatWorkerTurnResult(result: WorkerTurnResult, event: {
       contextWindow: result.diagnostics.contextWindow,
       lastSubturnContextTokens,
       model: effectiveModel,
+      actualEffort,
+      requestedEffort: event.requestedEffort ?? null,
       warnings,
     }),
   ];
@@ -1557,6 +1569,8 @@ function buildOpenPTurnResult(event: {
   readonly structuredOutputToolUseId?: string | null;
   readonly requestId?: string | null;
   readonly model?: string | null;
+  readonly actualEffort?: string | null;
+  readonly requestedEffort?: string | null;
   readonly stopReason?: string | null;
   readonly numTurns: number | null;
   readonly durationMs: number | null;
@@ -1626,6 +1640,8 @@ function buildOpenPTurnResult(event: {
     backend: event.backend ?? undefined,
     requestId: event.requestId ?? undefined,
     model: event.model ?? undefined,
+    actualEffort: event.actualEffort ?? null,
+    requestedEffort: event.requestedEffort ?? null,
     usage: buildOpenPUsage(event.usage),
     lastSubturnUsage: event.lastSubturnUsage ? buildOpenPUsage(event.lastSubturnUsage) : undefined,
     rawUsage: event.rawUsage ?? undefined,
@@ -2737,6 +2753,8 @@ function buildResultEvent(event: {
   readonly contextWindow: number | null;
   readonly lastSubturnContextTokens: number | null;
   readonly model: string | null;
+  readonly actualEffort: string | null;
+  readonly requestedEffort: string | null;
   readonly warnings?: readonly OutputWarning[];
 }): Record<string, unknown> {
   const warnings = event.warnings ?? [];
@@ -2753,6 +2771,8 @@ function buildResultEvent(event: {
       structuredOutputToolUseId: event.structuredOutputToolUseId ?? null,
       requestId: event.requestId ?? null,
       model: event.model,
+      actualEffort: event.actualEffort,
+      requestedEffort: event.requestedEffort,
       stopReason: event.stopReason,
       numTurns: event.numTurns,
       durationMs: event.durationMs,

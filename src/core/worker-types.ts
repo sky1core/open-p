@@ -54,6 +54,7 @@ export interface WorkerTurnDiagnostics {
   readonly cacheCreationInputTokens?: number | null;
   readonly rawUsage?: Record<string, unknown> | null;
   readonly model?: string | null;
+  readonly effort?: string | null;
   readonly contextWindow: number | null;
   readonly lastSubturnUsage?: BackendUsage | null;
   readonly lastSubturnContextTokens: number | null;

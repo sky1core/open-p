@@ -79,6 +79,7 @@ interface ParserState {
   requestId: string | null;
   sessionId: string | null;
   model: string | null;
+  effort: string | null;
   modelFallback: ModelFallbackSignal | null;
   assistantEvents: AssistantEventSnapshot[];
   callerUserTurnCount: number;
@@ -161,6 +162,7 @@ export function parseClaudeCodeJsonlTurn(
     requestId: null,
     sessionId: null,
     model: null,
+    effort: null,
     modelFallback: null,
     assistantEvents: [],
     callerUserTurnCount: 0,
@@ -250,6 +252,7 @@ export function parseClaudeCodeJsonlTurn(
     ...(state.lastSubturnUsage && hasUsageSnapshot(state.lastSubturnUsage) ? { lastSubturnUsage: state.lastSubturnUsage } : {}),
     rawUsage: state.rawUsage,
     ...(state.model ? { model: state.model } : {}),
+    ...(state.effort ? { effort: state.effort } : {}),
     rawEventCount: state.rawEventCount,
   };
 
@@ -528,6 +531,7 @@ function consumeEvent(state: ParserState, event: JsonObject, turnId: string): vo
     state.activeTextSinceBackgroundStart = false;
     state.requestId = null;
     state.model = null;
+    state.effort = null;
     state.modelFallback = null;
     state.assistantEvents = [];
     return;
@@ -708,6 +712,13 @@ function consumeAssistantEvent(state: ParserState, event: JsonObject): void {
   const model = stringOrNull(message?.model);
   if (model && model !== '<synthetic>') {
     state.model = model;
+  }
+  // Claude states the effort it actually ran with on the record itself, beside the request id rather
+  // than inside the message. It substitutes its own when the requested one is not a value it knows,
+  // and says nothing about having done so, so this is the only place that difference is visible.
+  const effort = stringOrNull(event.effort);
+  if (effort) {
+    state.effort = effort;
   }
   const stopReason = typeof message?.stop_reason === 'string' ? message.stop_reason : null;
   state.stopReason = stopReason;

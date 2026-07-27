@@ -244,6 +244,7 @@ async function runStreamJsonWorkerLinesWithLock(input: {
           turnId: publicTurnId,
           backend: input.options.backend,
           model: input.options.model,
+          requestedEffort: input.options.reasoningEffort,
           structuredOutputToolUseId,
           suppressAssistantSnapshots: emittedAssistantSnapshots,
           previouslyEmittedAssistantEvents: emittedAssistantEvents,
@@ -254,6 +255,7 @@ async function runStreamJsonWorkerLinesWithLock(input: {
           turnId: publicTurnId,
           backend: input.options.backend,
           model: input.options.model,
+          requestedEffort: input.options.reasoningEffort,
           warnings: verboseWarnings,
         });
       }

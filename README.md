@@ -119,6 +119,8 @@ Streaming `answer` and `reasoning` values are cumulative snapshots, not deltas. 
 
 `openp` does not maintain model or reasoning-effort availability catalogs. For a backend that exposes native selectors, caller-provided non-empty `--model` and `--effort` values are passed unchanged through the backend-specific native option mapping. The backend CLI remains the authority on whether a value is accepted; a rejection is returned as a backend-exit error with available native diagnostics instead of an open-p enum-validation error.
 
+When a backend reports the actual reasoning effort it used, result metadata exposes it as `metadata.actualEffort`; absent backend data is reported as `null` and is not filled from the requested `--effort`. The requested value rides along as `metadata.requestedEffort`. A result carrying both, where they differ, is a backend that ran an effort other than the one it was given; a `null` `metadata.actualEffort` means the backend reported none, not that it substituted anything.
+
 OpenCode is the bounded exception for provider selection: its local-private backend still requires one of its configured localhost provider prefixes. This is a network/privacy boundary, not validation that a particular model id exists. The model id after the prefix and the effort value are passed unchanged.
 
 ## Codex Backend Notes

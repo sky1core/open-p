@@ -40,6 +40,7 @@ export function toWorkerTurnResult(
       ...(cacheCreationInputTokens !== undefined ? { cacheCreationInputTokens } : {}),
       ...(result.diagnostics.rawUsage ? { rawUsage: result.diagnostics.rawUsage } : {}),
       ...(result.diagnostics.model ? { model: result.diagnostics.model } : {}),
+      ...(result.diagnostics.effort ? { effort: result.diagnostics.effort } : {}),
       contextWindow: result.diagnostics.contextWindow ?? null,
       ...(lastSubturnUsage ? { lastSubturnUsage } : {}),
       lastSubturnContextTokens,
