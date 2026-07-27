@@ -28,6 +28,7 @@ export function selectCodexResultSource(
   };
   readonly model: string | null;
   readonly effort: string | null;
+  readonly permissionMode: string | null;
   readonly contextWindow: number | null;
   readonly lastSubturnUsage: {
     readonly inputTokens: number | null;
@@ -50,6 +51,7 @@ export function selectCodexResultSource(
       usage: hasCodexUsageSnapshot(sessionLog.usage) ? sessionLog.usage : emptyCodexUsage(),
       model: sessionLog.model,
       effort: sessionLog.effort,
+      permissionMode: sessionLog.permissionMode,
       contextWindow: sessionLog.contextWindow,
       lastSubturnUsage: sessionLog.lastSubturnUsage,
     };
@@ -61,6 +63,7 @@ export function selectCodexResultSource(
     usage: stdoutParsed.usage,
     model: null,
     effort: null,
+    permissionMode: null,
     contextWindow: null,
     lastSubturnUsage: null,
   };

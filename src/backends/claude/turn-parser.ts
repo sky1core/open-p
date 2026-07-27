@@ -80,6 +80,7 @@ interface ParserState {
   sessionId: string | null;
   model: string | null;
   effort: string | null;
+  permissionMode: string | null;
   modelFallback: ModelFallbackSignal | null;
   assistantEvents: AssistantEventSnapshot[];
   callerUserTurnCount: number;
@@ -163,6 +164,7 @@ export function parseClaudeCodeJsonlTurn(
     sessionId: null,
     model: null,
     effort: null,
+    permissionMode: null,
     modelFallback: null,
     assistantEvents: [],
     callerUserTurnCount: 0,
@@ -253,6 +255,7 @@ export function parseClaudeCodeJsonlTurn(
     rawUsage: state.rawUsage,
     ...(state.model ? { model: state.model } : {}),
     ...(state.effort ? { effort: state.effort } : {}),
+    ...(state.permissionMode ? { permissionMode: state.permissionMode } : {}),
     rawEventCount: state.rawEventCount,
   };
 
@@ -487,7 +490,6 @@ export function extractClaudeCodeIntermediateContent(
 
 function consumeEvent(state: ParserState, event: JsonObject, turnId: string): void {
   rememberSessionId(state, event, turnId);
-
   if (state.completed && state.callerUserTurnCount > 0 && (event.type === 'user' || isSystemLocalCommandEvent(event))) {
     state.inScope = false;
     return;
@@ -532,6 +534,9 @@ function consumeEvent(state: ParserState, event: JsonObject, turnId: string): vo
     state.requestId = null;
     state.model = null;
     state.effort = null;
+    // This record opens the new turn and states the mode that turn runs under, so the reset takes
+    // its value rather than clearing it: the next record to carry one may be turns away.
+    state.permissionMode = stringOrNull(event.permissionMode);
     state.modelFallback = null;
     state.assistantEvents = [];
     return;
@@ -539,6 +544,14 @@ function consumeEvent(state: ParserState, event: JsonObject, turnId: string): vo
 
   if (!state.inScope) {
     return;
+  }
+
+  // Claude states the mode it settled on, which is not always the one it was given: a policy or a
+  // settings key downgrades it without failing the turn. Read it only inside the turn, the same as
+  // model and effort — a record belonging to the next turn states that turn's mode, not this one's.
+  const settledPermissionMode = stringOrNull(event.permissionMode);
+  if (settledPermissionMode) {
+    state.permissionMode = settledPermissionMode;
   }
 
   if (event.type === 'user' && isTaskNotification(event)) {
@@ -963,7 +976,7 @@ function buildReasoningContent(state: ParserState): string | null {
 // Reasoning accumulation follows the same contract rule as answer accumulation: an assistant update
 // with the same native `message.id` is a same-message snapshot of the latest reasoning segment,
 // and a different `message.id` always starts a new segment (never merged by text comparison).
-// Raw references show every Claude assistant event carries `message.id`; events without it are
+// Every observed Claude assistant event carries `message.id`; events without it are
 // unverified and keep the pre-message-id whole-text cumulative-snapshot behavior unchanged.
 function appendReasoningContent(
   state: ReasoningContentState,

@@ -24,6 +24,9 @@ export interface TurnDiagnostics {
   // one the caller asked for: a backend may substitute its own without saying so. Present only when
   // the backend states it, so a caller can compare it against the requested value.
   readonly effort?: string | null;
+  // The permission mode the backend reports for the turn it just ran. A policy or a managed
+  // requirements file can put a turn somewhere other than what was asked for without failing it.
+  readonly permissionMode?: string | null;
   readonly contextWindow?: number | null;
   readonly lastSubturnUsage?: BackendUsage | null;
   readonly lastSubturnContextTokens?: number | null;
@@ -95,6 +98,7 @@ export interface BackendRunOptions {
   readonly model: string | null;
   readonly reasoningEffort: string | null;
   readonly permissionMode: string | null;
+  readonly nativePermissionMode: string | null;
   readonly tools?: string | null;
   readonly jsonSchema: string | null;
   readonly backendArgs: readonly string[];

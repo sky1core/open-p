@@ -16,6 +16,7 @@ export class KiroWorkerBridge implements BackendWorkerBridge {
       model: request.model,
       reasoningEffort: request.reasoningEffort,
       executionMode: request.executionMode,
+      nativeExecutionMode: request.nativeExecutionMode ?? null,
       tools: request.tools,
       backendArgs: request.binArgs ?? [],
     });

@@ -121,6 +121,8 @@ Streaming `answer` and `reasoning` values are cumulative snapshots, not deltas. 
 
 When a backend reports the actual reasoning effort it used, result metadata exposes it as `metadata.actualEffort`; absent backend data is reported as `null` and is not filled from the requested `--effort`. The requested value rides along as `metadata.requestedEffort`. A result carrying both, where they differ, is a backend that ran an effort other than the one it was given; a `null` `metadata.actualEffort` means the backend reported none, not that it substituted anything.
 
+`--permission-mode` follows the same pass-through rule: the value belongs to the selected backend, and a backend without its own permission-mode selector rejects the option instead of ignoring it. Result metadata carries `metadata.requestedPermissionMode` and `metadata.actualPermissionMode` — the second is what the backend reports it ran under, which an organization policy or a managed requirements file can downgrade without failing the turn. Absent backend data is `null` and is never filled from the request.
+
 OpenCode is the bounded exception for provider selection: its local-private backend still requires one of its configured localhost provider prefixes. This is a network/privacy boundary, not validation that a particular model id exists. The model id after the prefix and the effort value are passed unchanged.
 
 ## Codex Backend Notes
@@ -368,6 +370,7 @@ openp claude --timeout 60 "prompt"
 | `--tools <tools>` | Tool allowlist where supported |
 | `--json-schema <json>` | Structured output schema where supported |
 | `--streaming` | Active-turn streaming opt-in |
+| `--permission-mode <mode>` | Backend permission mode where supported |
 | `--dangerously-skip-permissions` | Trust backend tool execution |
 | `--run-id <id>` | Caller-supplied invocation identifier for external process discovery |
 | `--event-log <path>` | Mirror stream-json records plus run lifecycle/activity records to a caller-owned file |
@@ -376,9 +379,9 @@ openp claude --timeout 60 "prompt"
 
 Options may appear before or after the backend name. Only the options listed above are the public `openp` interface.
 
-Backend-native flags that are not listed above fail closed instead of being ignored or passed through. This includes Claude print-mode and raw Claude configuration flags such as `-p`, `--print`, `--include-partial-messages`, `--brief`, `--permission-mode`, `--allowedTools`, `--allowed-tools`, `--disallowedTools`, `--disallowed-tools`, `--mcp-config`, `--settings`, `--setting-sources`, and `--add-dir`.
+Backend-native flags that are not listed above fail closed instead of being ignored or passed through. This includes Claude print-mode and raw Claude configuration flags such as `-p`, `--print`, `--include-partial-messages`, `--brief`, `--allowedTools`, `--allowed-tools`, `--disallowedTools`, `--disallowed-tools`, `--mcp-config`, `--settings`, `--setting-sources`, and `--add-dir`.
 
-Use `--tools` for the public tool-policy selector and `--dangerously-skip-permissions` for the public trusted-tool intent. The selected backend may still reject a public option when it does not support that feature.
+Use `--tools` for the public tool-policy selector, `--permission-mode` to select a backend's own permission mode, and `--dangerously-skip-permissions` for the public trusted-tool intent. Giving `--permission-mode` and `--dangerously-skip-permissions` together is a usage error, because they set the same thing. The selected backend may still reject a public option when it does not support that feature.
 
 ## Stream-JSON Input
 

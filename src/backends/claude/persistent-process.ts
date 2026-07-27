@@ -535,8 +535,7 @@ export function buildPersistentClaudeCodeArgs(options: {
   }
   const permissionMode = resolveInteractivePermissionMode({
     permissionMode: options.launchSignature.executionMode,
-    tools: options.launchSignature.tools,
-    backendArgs: binArgs,
+    nativePermissionMode: options.launchSignature.nativeExecutionMode ?? null,
   });
   if (permissionMode) {
     args.push('--permission-mode', permissionMode);

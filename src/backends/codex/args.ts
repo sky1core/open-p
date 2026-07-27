@@ -6,6 +6,7 @@ export interface CodexArgsOptions {
   readonly model?: string | null;
   readonly reasoningEffort?: string | null;
   readonly executionMode?: string | null;
+  readonly nativeExecutionMode?: string | null;
   readonly tools?: string | null;
   readonly outputLastMessagePath: string;
   readonly outputSchemaPath?: string | null;
@@ -23,7 +24,7 @@ export function buildFirstTurnArgs(options: CodexArgsOptions): string[] {
   const args: string[] = [];
 
   rejectUnsupportedTools(options.tools);
-  appendSandboxArgs(args, options.executionMode);
+  appendSandboxArgs(args, options.executionMode, options.nativeExecutionMode);
 
   args.push('exec');
   args.push('--skip-git-repo-check', '--json');
@@ -51,7 +52,7 @@ export function buildResumeTurnArgs(sessionId: string, options: CodexArgsOptions
   const args: string[] = [];
 
   rejectUnsupportedTools(options.tools);
-  appendResumeSandboxArgs(args, options.executionMode);
+  appendResumeSandboxArgs(args, options.executionMode, options.nativeExecutionMode);
 
   args.push('exec', 'resume');
   args.push('--skip-git-repo-check', '--json');
@@ -71,7 +72,18 @@ export function buildResumeTurnArgs(sessionId: string, options: CodexArgsOptions
   return args;
 }
 
-function appendSandboxArgs(args: string[], executionMode: string | null | undefined): void {
+function appendSandboxArgs(
+  args: string[],
+  executionMode: string | null | undefined,
+  nativeExecutionMode?: string | null,
+): void {
+  // A native mode is Codex's own sandbox value and goes through unread; Codex owns whether it is one
+  // it knows. Approval stays pinned because `codex exec` has no flag for it and a policy that asks
+  // hands the refused call back to the model instead of prompting.
+  if (nativeExecutionMode) {
+    args.push('--sandbox', nativeExecutionMode, '--ask-for-approval', 'never');
+    return;
+  }
   const mode = executionMode?.trim() || null;
 
   if (!mode || mode === 'default') {
@@ -91,7 +103,17 @@ function appendSandboxArgs(args: string[], executionMode: string | null | undefi
   throw new OpenPError(`unsupported Codex execution mode: ${mode}`, EXIT_CODES.unsupportedOption);
 }
 
-function appendResumeSandboxArgs(args: string[], executionMode: string | null | undefined): void {
+function appendResumeSandboxArgs(
+  args: string[],
+  executionMode: string | null | undefined,
+  nativeExecutionMode?: string | null,
+): void {
+  // `codex exec resume` has no --sandbox flag, so the same selection travels as a config override.
+  if (nativeExecutionMode) {
+    appendConfigOverride(args, 'sandbox_mode', nativeExecutionMode);
+    appendConfigOverride(args, 'approval_policy', 'never');
+    return;
+  }
   const mode = executionMode?.trim() || null;
 
   if (!mode || mode === 'default') {

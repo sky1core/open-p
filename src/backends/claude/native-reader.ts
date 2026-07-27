@@ -191,7 +191,7 @@ function collectSegmentPortableTurns(
       // continue from the new caller user. Structural corruption is already caught by the active
       // parent-lineage root and integrity checks, not here. This relies on the observed
       // pattern that an interrupted turn carries no `system/turn_duration`; a stale/late completion
-      // record inserted after the next caller user has not been observed in the corpus.
+      // record inserted after the next caller user has not been observed in real session logs.
       discard();
       pendingUser = { id: nativeEntryId(entry), text: (entry.message as JsonObject).content as string };
       continue;

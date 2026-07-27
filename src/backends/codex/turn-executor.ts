@@ -31,6 +31,7 @@ export interface CodexTurnExecutionInput {
   readonly model: string | null;
   readonly reasoningEffort: string | null;
   readonly executionMode: string | null;
+  readonly nativeExecutionMode?: string | null;
   readonly tools: string | null;
   readonly jsonSchema: string | null;
   readonly binArgs: readonly string[];
@@ -52,6 +53,7 @@ export interface CodexTurnExecutionResult {
   readonly usage: BackendUsage;
   readonly model: string | null;
   readonly effort: string | null;
+  readonly permissionMode: string | null;
   readonly contextWindow: number | null;
   readonly lastSubturnUsage: BackendUsage | null;
   readonly lastSubturnContextTokens: number | null;
@@ -86,6 +88,7 @@ export async function executeCodexTurn(input: CodexTurnExecutionInput): Promise<
       model: input.model,
       reasoningEffort: input.reasoningEffort,
       executionMode: input.executionMode,
+      nativeExecutionMode: input.nativeExecutionMode ?? null,
       tools: input.tools,
       outputLastMessagePath,
       outputSchemaPath,
@@ -188,6 +191,7 @@ export async function executeCodexTurn(input: CodexTurnExecutionInput): Promise<
       // just above, a missing value stays null: filling it from the request would make the field
       // always agree with what was asked and hide a backend that ran something else.
       effort: resultSource.effort,
+      permissionMode: resultSource.permissionMode,
       contextWindow: resultSource.contextWindow,
       lastSubturnUsage,
       lastSubturnContextTokens: addNullable(

@@ -20,6 +20,7 @@ export interface OutputOptions {
   // What the caller asked for, reported beside the effort the backend actually ran with so a
   // substitution is visible from the output alone. Never used to fill that value in.
   readonly requestedEffort?: string | null;
+  readonly requestedPermissionMode?: string | null;
   readonly cwd?: string | null;
   readonly permissionMode?: string | null;
   readonly mcpServers?: readonly unknown[];
@@ -65,6 +66,7 @@ export function formatTurnResult(result: TurnResult, options: OutputOptions): st
   const stopReason = result.diagnostics.stopReason ?? null;
   const effectiveModel = result.diagnostics.model ?? options.model ?? null;
   const actualEffort = result.diagnostics.effort ?? null;
+  const actualPermissionMode = result.diagnostics.permissionMode ?? null;
   const resultUsage = result.diagnostics.usage;
   const lastSubturnUsage = result.diagnostics.lastSubturnUsage ?? null;
   const assistantEventUsage = resultUsage;
@@ -219,6 +221,8 @@ export function formatTurnResult(result: TurnResult, options: OutputOptions): st
       model: effectiveModel,
       actualEffort,
       requestedEffort: options.requestedEffort ?? null,
+      actualPermissionMode,
+      requestedPermissionMode: options.requestedPermissionMode ?? null,
       warnings,
     }))}\n`;
   }
@@ -254,6 +258,8 @@ export function formatTurnResult(result: TurnResult, options: OutputOptions): st
       model: effectiveModel,
       actualEffort,
       requestedEffort: options.requestedEffort ?? null,
+      actualPermissionMode,
+      requestedPermissionMode: options.requestedPermissionMode ?? null,
       warnings,
     }),
   );
@@ -386,6 +392,7 @@ export function formatWorkerTurnResult(result: WorkerTurnResult, event: {
   readonly backend?: string | null;
   readonly model?: string | null;
   readonly requestedEffort?: string | null;
+  readonly requestedPermissionMode?: string | null;
   readonly structuredOutputToolUseId?: string | null;
   readonly suppressAssistantSnapshots?: readonly AssistantEventSnapshot[];
   readonly previouslyEmittedAssistantEvents?: readonly Record<string, unknown>[];
@@ -400,6 +407,7 @@ export function formatWorkerTurnResult(result: WorkerTurnResult, event: {
   const warnings = mergeWarnings(result.warnings, event.warnings);
   const effectiveModel = result.diagnostics.model ?? event.model ?? null;
   const actualEffort = result.diagnostics.effort ?? null;
+  const actualPermissionMode = result.diagnostics.permissionMode ?? null;
   const lastSubturnUsage = result.diagnostics.lastSubturnUsage ?? null;
   const assistantEventUsage = usage;
   const lastSubturnContextTokens =
@@ -607,6 +615,8 @@ export function formatWorkerTurnResult(result: WorkerTurnResult, event: {
       model: effectiveModel,
       actualEffort,
       requestedEffort: event.requestedEffort ?? null,
+      actualPermissionMode,
+      requestedPermissionMode: event.requestedPermissionMode ?? null,
       warnings,
     }),
   ];
@@ -1571,6 +1581,8 @@ function buildOpenPTurnResult(event: {
   readonly model?: string | null;
   readonly actualEffort?: string | null;
   readonly requestedEffort?: string | null;
+  readonly actualPermissionMode?: string | null;
+  readonly requestedPermissionMode?: string | null;
   readonly stopReason?: string | null;
   readonly numTurns: number | null;
   readonly durationMs: number | null;
@@ -1642,6 +1654,8 @@ function buildOpenPTurnResult(event: {
     model: event.model ?? undefined,
     actualEffort: event.actualEffort ?? null,
     requestedEffort: event.requestedEffort ?? null,
+    actualPermissionMode: event.actualPermissionMode ?? null,
+    requestedPermissionMode: event.requestedPermissionMode ?? null,
     usage: buildOpenPUsage(event.usage),
     lastSubturnUsage: event.lastSubturnUsage ? buildOpenPUsage(event.lastSubturnUsage) : undefined,
     rawUsage: event.rawUsage ?? undefined,
@@ -2755,6 +2769,8 @@ function buildResultEvent(event: {
   readonly model: string | null;
   readonly actualEffort: string | null;
   readonly requestedEffort: string | null;
+  readonly actualPermissionMode: string | null;
+  readonly requestedPermissionMode: string | null;
   readonly warnings?: readonly OutputWarning[];
 }): Record<string, unknown> {
   const warnings = event.warnings ?? [];
@@ -2773,6 +2789,8 @@ function buildResultEvent(event: {
       model: event.model,
       actualEffort: event.actualEffort,
       requestedEffort: event.requestedEffort,
+      actualPermissionMode: event.actualPermissionMode,
+      requestedPermissionMode: event.requestedPermissionMode,
       stopReason: event.stopReason,
       numTurns: event.numTurns,
       durationMs: event.durationMs,

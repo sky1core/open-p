@@ -94,6 +94,7 @@ Core options:
   --json-schema <json>        Validate and return structured output
   --run-id <id>               Caller-supplied invocation identifier for process discovery
   --event-log <path>          Append stream-json records and lifecycle/activity records to a file
+  --permission-mode <mode>    Backend permission mode where supported
   --dangerously-skip-permissions
                               Trust backend tool execution where supported
 
@@ -298,6 +299,7 @@ async function main(argv: readonly string[]): Promise<number> {
           model: options.model,
           reasoningEffort: options.reasoningEffort,
           permissionMode: options.permissionMode,
+          nativePermissionMode: options.nativePermissionMode,
           tools: options.tools,
           jsonSchema: options.jsonSchema,
           backendArgs: options.backendArgs,
@@ -735,6 +737,7 @@ function buildOutputMetadata(options: ResolvedCliOptions, cwd: string): {
   readonly model: string | null;
   readonly requestedEffort: string | null;
   readonly permissionMode: string | null;
+  readonly requestedPermissionMode: string | null;
   readonly mcpServers?: readonly unknown[];
   readonly contextWindow: number | null;
 } {
@@ -744,6 +747,7 @@ function buildOutputMetadata(options: ResolvedCliOptions, cwd: string): {
     model: options.model,
     requestedEffort: options.reasoningEffort,
     permissionMode: options.permissionMode,
+    requestedPermissionMode: options.nativePermissionMode,
     contextWindow: null,
     mcpServers: [],
   };

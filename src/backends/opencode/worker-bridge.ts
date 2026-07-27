@@ -22,6 +22,7 @@ export class OpenCodeWorkerBridge implements BackendWorkerBridge {
       model: request.model ?? null,
       reasoningEffort: request.reasoningEffort ?? null,
       executionMode: request.executionMode ?? null,
+      nativeExecutionMode: request.nativeExecutionMode ?? null,
       tools: request.tools ?? null,
       jsonSchema: request.jsonSchema ?? null,
       backendArgs: request.binArgs ?? [],

@@ -38,6 +38,7 @@ export interface StreamJsonWorkerOutputMetadata {
   readonly cwd: string;
   readonly model: string | null;
   readonly permissionMode: string | null;
+  readonly requestedPermissionMode: string | null;
   readonly mcpServers?: readonly unknown[];
   readonly contextWindow: number | null;
 }
@@ -162,6 +163,7 @@ async function runStreamJsonWorkerLinesWithLock(input: {
         model: input.options.model,
         reasoningEffort: input.options.reasoningEffort,
         executionMode: input.options.permissionMode,
+        nativeExecutionMode: input.options.nativePermissionMode,
         tools: input.options.tools,
         jsonSchema: input.options.jsonSchema,
         timeoutMs: input.options.timeoutMs,
@@ -245,6 +247,7 @@ async function runStreamJsonWorkerLinesWithLock(input: {
           backend: input.options.backend,
           model: input.options.model,
           requestedEffort: input.options.reasoningEffort,
+          requestedPermissionMode: input.options.nativePermissionMode,
           structuredOutputToolUseId,
           suppressAssistantSnapshots: emittedAssistantSnapshots,
           previouslyEmittedAssistantEvents: emittedAssistantEvents,
@@ -256,6 +259,7 @@ async function runStreamJsonWorkerLinesWithLock(input: {
           backend: input.options.backend,
           model: input.options.model,
           requestedEffort: input.options.reasoningEffort,
+          requestedPermissionMode: input.options.nativePermissionMode,
           warnings: verboseWarnings,
         });
       }

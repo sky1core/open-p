@@ -4,6 +4,7 @@ export interface KiroAcpArgsOptions {
   readonly model?: string | null;
   readonly reasoningEffort?: string | null;
   readonly executionMode?: string | null;
+  readonly nativeExecutionMode?: string | null;
   readonly tools?: string | null;
   readonly backendArgs?: readonly string[] | null;
 }
@@ -24,6 +25,11 @@ export function buildKiroAcpArgs(options: KiroAcpArgsOptions): KiroAcpArgsResult
 
   const tools = options.tools;
   const toolsProvided = tools !== null && tools !== undefined;
+  // Kiro has no permission-mode selector: --trust-all-tools is one boolean and --trust-tools names
+  // individual tools. Neither is a mode, so a native value has nowhere to land.
+  if (options.nativeExecutionMode) {
+    throw new OpenPError('Kiro has no permission mode selector', EXIT_CODES.unsupportedOption);
+  }
   const trustAllToolsRequested = resolveTrustAllTools(options.executionMode);
   const trustAllTools = !toolsProvided && trustAllToolsRequested;
   if (toolsProvided && tools.length > 0) {

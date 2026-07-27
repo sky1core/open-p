@@ -38,6 +38,7 @@ export interface OpenCodeArgsOptions {
   readonly model: string | null;
   readonly reasoningEffort: string | null;
   readonly executionMode: string | null;
+  readonly nativeExecutionMode?: string | null;
   readonly tools: string | null;
   readonly jsonSchema: string | null;
   readonly backendArgs: readonly string[];
@@ -62,6 +63,11 @@ export function buildOpenCodeArgs(input: {
 
   if (input.options.reasoningEffort) {
     args.push('--variant', input.options.reasoningEffort);
+  }
+  // OpenCode's CLI carries one boolean; its permission model lives in the caller's config files and
+  // in OPENCODE_PERMISSION, neither of which open-p writes.
+  if (input.options.nativeExecutionMode) {
+    throw new OpenPError('OpenCode has no permission mode selector', EXIT_CODES.unsupportedOption);
   }
   if (input.options.executionMode === 'danger-full-access') {
     args.push('--dangerously-skip-permissions');

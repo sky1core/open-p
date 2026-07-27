@@ -498,8 +498,7 @@ export function buildClaudeCodeArgs(options: BackendRunOptions, extraArgs: reado
   }
   const permissionMode = resolveInteractivePermissionMode({
     permissionMode: options.permissionMode,
-    tools: options.tools,
-    backendArgs: options.backendArgs,
+    nativePermissionMode: options.nativePermissionMode,
   });
   if (permissionMode) {
     args.push('--permission-mode', permissionMode);

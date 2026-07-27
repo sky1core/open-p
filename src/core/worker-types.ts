@@ -18,6 +18,7 @@ export interface WorkerTurnRequest {
   readonly model?: string | null;
   readonly reasoningEffort?: string | null;
   readonly executionMode?: string | null;
+  readonly nativeExecutionMode?: string | null;
   readonly tools?: string | null;
   readonly jsonSchema?: string | null;
   readonly bin?: string | null;
@@ -55,6 +56,7 @@ export interface WorkerTurnDiagnostics {
   readonly rawUsage?: Record<string, unknown> | null;
   readonly model?: string | null;
   readonly effort?: string | null;
+  readonly permissionMode?: string | null;
   readonly contextWindow: number | null;
   readonly lastSubturnUsage?: BackendUsage | null;
   readonly lastSubturnContextTokens: number | null;
@@ -117,6 +119,7 @@ export interface LaunchSignature {
   readonly model: string | null;
   readonly reasoningEffort: string | null;
   readonly executionMode: string | null;
+  readonly nativeExecutionMode: string | null;
   readonly tools: string | null;
   readonly jsonSchema: string | null;
   readonly env: Readonly<Record<string, string>>;

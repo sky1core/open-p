@@ -22,6 +22,9 @@ export interface CliOptions {
   readonly model: string | null;
   readonly reasoningEffort: string | null;
   readonly permissionMode: string | null;
+  // The backend's own permission-mode value, kept apart from the trusted-tool intent above because
+  // the two mean different things: this one is opaque and reaches the backend unchanged.
+  readonly nativePermissionMode: string | null;
   readonly tools: string | null;
   readonly jsonSchema: string | null;
   readonly streaming: boolean;
@@ -49,6 +52,7 @@ const VALUE_FLAGS = new Set([
   '--output-format',
   '--model',
   '--effort',
+  '--permission-mode',
   '--tools',
   '--json-schema',
   '--run-id',
@@ -71,6 +75,7 @@ export function parseCliArgs(argv: readonly string[], knownBackends?: ReadonlySe
   let model: string | null = null;
   let reasoningEffort: string | null = null;
   let permissionMode: string | null = null;
+  let nativePermissionMode: string | null = null;
   let tools: string | null = null;
   let jsonSchema: string | null = null;
   let streaming = false;
@@ -111,6 +116,12 @@ export function parseCliArgs(argv: readonly string[], knownBackends?: ReadonlySe
         continue;
       }
       if (arg === '--dangerously-skip-permissions') {
+        if (nativePermissionMode !== null) {
+          throw new OpenPError(
+            '--dangerously-skip-permissions and --permission-mode both set the permission mode',
+            EXIT_CODES.usage,
+          );
+        }
         permissionMode = 'danger-full-access';
         continue;
       }
@@ -135,6 +146,15 @@ export function parseCliArgs(argv: readonly string[], knownBackends?: ReadonlySe
         validateSessionId(value, arg);
         backendSessionId = value;
         resume = true;
+        break;
+      case '--permission-mode':
+        if (permissionMode !== null) {
+          throw new OpenPError(
+            '--dangerously-skip-permissions and --permission-mode both set the permission mode',
+            EXIT_CODES.usage,
+          );
+        }
+        nativePermissionMode = value;
         break;
       case '--timeout':
         timeoutMs = parseTimeoutMs(value);
@@ -203,6 +223,7 @@ export function parseCliArgs(argv: readonly string[], knownBackends?: ReadonlySe
     model,
     reasoningEffort,
     permissionMode,
+    nativePermissionMode,
     tools,
     jsonSchema,
     streaming,

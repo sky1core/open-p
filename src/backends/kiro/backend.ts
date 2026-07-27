@@ -39,6 +39,7 @@ export class KiroBackend implements Backend {
       model: options.model,
       reasoningEffort: options.reasoningEffort,
       executionMode: options.permissionMode,
+      nativeExecutionMode: options.nativePermissionMode,
       tools: options.tools,
       backendArgs: options.backendArgs,
     });

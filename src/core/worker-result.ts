@@ -41,6 +41,7 @@ export function toWorkerTurnResult(
       ...(result.diagnostics.rawUsage ? { rawUsage: result.diagnostics.rawUsage } : {}),
       ...(result.diagnostics.model ? { model: result.diagnostics.model } : {}),
       ...(result.diagnostics.effort ? { effort: result.diagnostics.effort } : {}),
+      ...(result.diagnostics.permissionMode ? { permissionMode: result.diagnostics.permissionMode } : {}),
       contextWindow: result.diagnostics.contextWindow ?? null,
       ...(lastSubturnUsage ? { lastSubturnUsage } : {}),
       lastSubturnContextTokens,

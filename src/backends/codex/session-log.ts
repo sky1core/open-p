@@ -11,6 +11,7 @@ import { type CodexNativeAssistantClassification, CodexNativeAssistantClassifier
 export interface CodexSessionDiagnostics {
   readonly model: string | null;
   readonly effort: string | null;
+  readonly permissionMode: string | null;
   readonly inputTokens: number | null;
   readonly outputTokens: number | null;
   readonly cacheReadInputTokens: number | null;
@@ -30,6 +31,7 @@ export interface CodexSessionLogResult {
   };
   readonly model: string | null;
   readonly effort: string | null;
+  readonly permissionMode: string | null;
   readonly contextWindow: number | null;
   readonly lastSubturnUsage: {
     readonly inputTokens: number | null;
@@ -248,6 +250,9 @@ interface CodexSegmentAttribution {
   // Records whose output belongs to a concurrently running other turn. Only ever populated for
   // concurrent segments; empty for the single-caller-turn segments that are the common case.
   readonly foreignRecordIndexes: ReadonlySet<number>;
+  // The turn this segment's caller belongs to. Records that state turn settings rather than
+  // produce output bind to this. `null` when the caller carried no turn evidence.
+  readonly ownTurnKey: string | null;
 }
 
 // Active-turn boundary counting and, for concurrent segments only, output attribution.
@@ -266,9 +271,9 @@ interface CodexSegmentAttribution {
 // absorb that turn's output. Output records are bound to a turn only by evidence carried on the
 // record: a passthrough `turn_id`, an `event_msg agent_message`'s mirror partner passthrough, or an
 // `event_msg` tool artifact's lifecycle `turn_id`. Open-window position is not used as output
-// evidence: measured against passthrough ground truth over the 2026-06..07 corpus it misbinds real
-// records (16 disagreements while more than one window is open, including this turn's own
-// interleaved message while another turn's window is on top). A concurrent segment holding any
+// evidence: in observed concurrent session logs it misbinds real records while more than one
+// window is open, including this turn's own interleaved message while another turn's window is on
+// top. A concurrent segment holding any
 // output record without that evidence is therefore not resolvable and keeps failing exactly as it
 // does today, rather than guessing and answering from the wrong turn.
 function analyzeSegmentAttribution(
@@ -323,7 +328,7 @@ function analyzeSegmentAttribution(
   if (callerTurnKeys.size <= 1) {
     // Single caller turn: every output in the segment is this turn's, so nothing is filtered and no
     // attribution evidence is required.
-    return { ownTurnCallerCount, foreignRecordIndexes: new Set() };
+    return { ownTurnCallerCount, foreignRecordIndexes: new Set(), ownTurnKey };
   }
 
   if (unattributableOutputIndexes.length > 0) {
@@ -338,7 +343,7 @@ function analyzeSegmentAttribution(
   for (const [index, turnKey] of outputTurnByIndex) {
     if (turnKey !== ownTurnKey) foreignRecordIndexes.add(index);
   }
-  return { ownTurnCallerCount, foreignRecordIndexes };
+  return { ownTurnCallerCount, foreignRecordIndexes, ownTurnKey };
 }
 
 // The turn a record's output belongs to: `undefined` when the record produces no output, `null`
@@ -396,6 +401,7 @@ export function extractSessionLogResult(rawLog: string): CodexSessionLogResult {
   let lastFinalResponseItemText: string | null = null;
   let currentTurnModel: string | null = null;
   let currentTurnEffort: string | null = null;
+  let currentTurnPermissionMode: string | null = null;
   let latestTokenCount: CodexSessionDiagnostics | null = null;
   let hasCompletionEvidence = false;
   // Classify once so the attribution pre-pass and the extraction loop below make identical
@@ -427,12 +433,24 @@ export function extractSessionLogResult(rawLog: string): CodexSessionLogResult {
     const assistantClassification = classifications[index]!;
 
     if (type === 'turn_context') {
+      // This record settles what the turn ran under, and it produces no output, so the output
+      // attribution above never reaches it. Taking another turn's would report that turn's model,
+      // effort, and sandbox policy as this turn's. The record names the turn it belongs to and the
+      // segment's caller names its own, so the settings are this turn's exactly when those agree.
+      // Every other combination is either another turn's record or one this turn has no way to
+      // claim, and reporting nothing is the only answer that cannot describe a turn that never ran.
+      if (readLifecycleTurnId(payload ?? {}) !== attribution.ownTurnKey) {
+        continue;
+      }
       currentTurnModel = payload && typeof payload.model === 'string' && payload.model.trim()
         ? payload.model.trim()
         : null;
       currentTurnEffort = payload && typeof payload.effort === 'string' && payload.effort.trim()
         ? payload.effort.trim()
         : null;
+      // The sandbox policy Codex settled on for the turn. A managed requirements file can put it
+      // somewhere other than what was asked for, and this record is where that shows.
+      currentTurnPermissionMode = readCodexSandboxPolicyType(payload);
       continue;
     }
 
@@ -518,7 +536,7 @@ export function extractSessionLogResult(rawLog: string): CodexSessionLogResult {
         commentaryEvents.push(toolSnapshot);
       }
       if (payload.type === 'token_count') {
-        const tokenDiag = extractTokenCountFromPayload(payload, currentTurnModel, currentTurnEffort);
+        const tokenDiag = extractTokenCountFromPayload(payload, currentTurnModel, currentTurnEffort, currentTurnPermissionMode);
         if (tokenDiag) {
           latestTokenCount = tokenDiag;
           tokenCountUsageSum = addSubturnUsage(tokenCountUsageSum, tokenDiag);
@@ -587,6 +605,7 @@ export function extractSessionLogResult(rawLog: string): CodexSessionLogResult {
     usage,
     model: currentTurnModel,
     effort: currentTurnEffort,
+    permissionMode: currentTurnPermissionMode,
     contextWindow: latestTokenCount?.contextWindow ?? null,
     lastSubturnUsage: latestTokenCount
       ? {
@@ -617,6 +636,7 @@ function extractTokenCountFromPayload(
   payload: Record<string, unknown>,
   model: string | null,
   effort: string | null,
+  permissionMode: string | null,
 ): CodexSessionDiagnostics | null {
   const info = asObject(payload.info);
   if (!info) return null;
@@ -629,6 +649,7 @@ function extractTokenCountFromPayload(
   return {
     model,
     effort,
+    permissionMode,
     inputTokens: normalizeCodexInputTokens(rawInputTokens, cacheReadInputTokens),
     outputTokens: typeof usage?.output_tokens === 'number' ? usage.output_tokens : null,
     cacheReadInputTokens,
@@ -674,76 +695,9 @@ function asObject(value: unknown): Record<string, unknown> | null {
   return null;
 }
 
-export function extractLatestTokenCount(rawLog: string): CodexSessionDiagnostics | null {
-  const lines = rawLog.split(/\r?\n/);
-  let currentTurnModel: string | null = null;
-  let currentTurnEffort: string | null = null;
-  let latest: CodexSessionDiagnostics | null = null;
-
-  for (const rawLine of lines) {
-    const line = rawLine.trim();
-    if (!line) continue;
-
-    let event: Record<string, unknown>;
-    try {
-      event = JSON.parse(line) as Record<string, unknown>;
-    } catch {
-      continue;
-    }
-
-    const payload = event.payload && typeof event.payload === 'object' && !Array.isArray(event.payload)
-      ? event.payload as Record<string, unknown>
-      : null;
-
-    if (isCodexTurnBoundary(event, payload)) {
-      currentTurnModel = null;
-      currentTurnEffort = null;
-      continue;
-    }
-
-    if (event.type === 'turn_context') {
-      currentTurnModel = payload && typeof payload.model === 'string' && payload.model.trim()
-        ? payload.model.trim()
-        : null;
-      currentTurnEffort = payload && typeof payload.effort === 'string' && payload.effort.trim()
-        ? payload.effort.trim()
-        : null;
-      continue;
-    }
-
-    if (!payload || payload.type !== 'token_count') continue;
-
-    const info = payload.info && typeof payload.info === 'object' && !Array.isArray(payload.info)
-      ? payload.info as Record<string, unknown>
-      : null;
-    if (!info) continue;
-
-    const usage = info.last_token_usage && typeof info.last_token_usage === 'object'
-      ? info.last_token_usage as Record<string, unknown>
-      : null;
-
-    const rawInputTokens = typeof usage?.input_tokens === 'number' ? usage.input_tokens : null;
-    const cacheReadInputTokens = typeof usage?.cached_input_tokens === 'number' ? usage.cached_input_tokens : null;
-    const contextWindow = typeof info.model_context_window === 'number' ? info.model_context_window : null;
-
-    if (rawInputTokens === null || rawInputTokens <= 0) continue;
-
-    latest = {
-      model: currentTurnModel,
-      effort: currentTurnEffort,
-      inputTokens: normalizeCodexInputTokens(rawInputTokens, cacheReadInputTokens),
-      outputTokens: typeof usage?.output_tokens === 'number' ? usage.output_tokens : null,
-      cacheReadInputTokens,
-      contextWindow,
-    };
-  }
-
-  return latest;
-}
-
-function isCodexTurnBoundary(event: Record<string, unknown>, payload: Record<string, unknown> | null): boolean {
-  if (event.type === 'turn.completed') {
-    return true;
-  }
-  return event.type === 'event_msg' && payload?.type === 'task_complete';
+function readCodexSandboxPolicyType(payload: Record<string, unknown> | null): string | null {
+  const policy = payload && typeof payload.sandbox_policy === 'object' && payload.sandbox_policy !== null
+    ? payload.sandbox_policy as Record<string, unknown>
+    : null;
+  return policy && typeof policy.type === 'string' && policy.type.trim() ? policy.type.trim() : null;
 }

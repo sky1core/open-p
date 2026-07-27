@@ -481,6 +481,7 @@ async function bootstrapSeedTarget(input: SeedRunInput): Promise<string> {
       model: input.options.model,
       reasoningEffort: input.options.reasoningEffort,
       permissionMode: null,
+      nativePermissionMode: null,
       tools: null,
       jsonSchema: null,
       backendArgs: [],

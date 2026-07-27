@@ -23,6 +23,7 @@ export interface OpenCodeTurnInput {
   readonly model: string | null;
   readonly reasoningEffort: string | null;
   readonly executionMode: string | null;
+  readonly nativeExecutionMode?: string | null;
   readonly tools: string | null;
   readonly jsonSchema: string | null;
   readonly backendArgs: readonly string[];
@@ -45,6 +46,7 @@ export async function runOpenCodeTurn(input: OpenCodeTurnInput): Promise<OpenCod
       model: input.model,
       reasoningEffort: input.reasoningEffort,
       executionMode: input.executionMode,
+      nativeExecutionMode: input.nativeExecutionMode ?? null,
       tools: input.tools,
       jsonSchema: input.jsonSchema,
       backendArgs: input.backendArgs,

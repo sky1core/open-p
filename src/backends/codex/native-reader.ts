@@ -80,10 +80,10 @@ async function confirmStableCodexNativeFile(path: string, before: Buffer): Promi
 }
 
 // The first session_meta record carries the file's own identity and must match the requested
-// session. `payload.id` is the authoritative identity: the 2026-06..07 full census (3,438
-// rollouts) observed it on 3,438/3,438 first metas, always equal to the filename session id.
-// `payload.session_id` is thread-lineage metadata, not this rollout's identity — absent 2,039,
-// equal to `id` 925, different from `id` 474 (CLI 0.142.0+ resume/fork lineage) — so it is never
+// session. `payload.id` is the authoritative identity: every observed first meta carries it,
+// always equal to the filename session id. `payload.session_id` is thread-lineage metadata, not
+// this rollout's identity — observed absent, equal to `id`, and different from `id` (CLI 0.142.0+
+// resume/fork lineage) — so it is never
 // identity-compared (nor type-checked) while `payload.id` is present, and serves as the identity
 // only when `payload.id` is absent (legacy shape). `codex exec resume`/fork rewrites replay the
 // parent thread's history into the new rollout, including the parent's session_meta records, so
@@ -213,7 +213,7 @@ export function extractCodexNativeTurns(logText: string): readonly NativeSession
     if (payload.type !== 'message') {
       // Non-message response_items (reasoning, function_call, function_call_output,
       // custom_tool_call, ...) attribute for window-tail tracking only. Attribution to an
-      // already-settled window is unobserved in the corpus, so the record is discarded without
+      // already-settled window has not been observed in real session logs, so the record is discarded without
       // failing the file; its content is never read.
       const turnId = readTurnId(payload) ?? openWindowTop();
       if (turnId === null) continue;
