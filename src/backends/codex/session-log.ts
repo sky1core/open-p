@@ -10,6 +10,7 @@ import { type CodexNativeAssistantClassification, CodexNativeAssistantClassifier
 
 export interface CodexSessionDiagnostics {
   readonly model: string | null;
+  readonly effort: string | null;
   readonly inputTokens: number | null;
   readonly outputTokens: number | null;
   readonly cacheReadInputTokens: number | null;
@@ -28,6 +29,7 @@ export interface CodexSessionLogResult {
     readonly cacheReadInputTokens: number | null;
   };
   readonly model: string | null;
+  readonly effort: string | null;
   readonly contextWindow: number | null;
   readonly lastSubturnUsage: {
     readonly inputTokens: number | null;
@@ -393,6 +395,7 @@ export function extractSessionLogResult(rawLog: string): CodexSessionLogResult {
   const commentaryEvents: AssistantEventSnapshot[] = [];
   let lastFinalResponseItemText: string | null = null;
   let currentTurnModel: string | null = null;
+  let currentTurnEffort: string | null = null;
   let latestTokenCount: CodexSessionDiagnostics | null = null;
   let hasCompletionEvidence = false;
   // Classify once so the attribution pre-pass and the extraction loop below make identical
@@ -426,6 +429,9 @@ export function extractSessionLogResult(rawLog: string): CodexSessionLogResult {
     if (type === 'turn_context') {
       currentTurnModel = payload && typeof payload.model === 'string' && payload.model.trim()
         ? payload.model.trim()
+        : null;
+      currentTurnEffort = payload && typeof payload.effort === 'string' && payload.effort.trim()
+        ? payload.effort.trim()
         : null;
       continue;
     }
@@ -512,7 +518,7 @@ export function extractSessionLogResult(rawLog: string): CodexSessionLogResult {
         commentaryEvents.push(toolSnapshot);
       }
       if (payload.type === 'token_count') {
-        const tokenDiag = extractTokenCountFromPayload(payload, currentTurnModel);
+        const tokenDiag = extractTokenCountFromPayload(payload, currentTurnModel, currentTurnEffort);
         if (tokenDiag) {
           latestTokenCount = tokenDiag;
           tokenCountUsageSum = addSubturnUsage(tokenCountUsageSum, tokenDiag);
@@ -580,6 +586,7 @@ export function extractSessionLogResult(rawLog: string): CodexSessionLogResult {
     hasCompletionEvidence,
     usage,
     model: currentTurnModel,
+    effort: currentTurnEffort,
     contextWindow: latestTokenCount?.contextWindow ?? null,
     lastSubturnUsage: latestTokenCount
       ? {
@@ -609,6 +616,7 @@ function extractSummaryText(payload: Record<string, unknown>): string | null {
 function extractTokenCountFromPayload(
   payload: Record<string, unknown>,
   model: string | null,
+  effort: string | null,
 ): CodexSessionDiagnostics | null {
   const info = asObject(payload.info);
   if (!info) return null;
@@ -620,6 +628,7 @@ function extractTokenCountFromPayload(
   const cacheReadInputTokens = typeof usage?.cached_input_tokens === 'number' ? usage.cached_input_tokens : null;
   return {
     model,
+    effort,
     inputTokens: normalizeCodexInputTokens(rawInputTokens, cacheReadInputTokens),
     outputTokens: typeof usage?.output_tokens === 'number' ? usage.output_tokens : null,
     cacheReadInputTokens,
@@ -668,6 +677,7 @@ function asObject(value: unknown): Record<string, unknown> | null {
 export function extractLatestTokenCount(rawLog: string): CodexSessionDiagnostics | null {
   const lines = rawLog.split(/\r?\n/);
   let currentTurnModel: string | null = null;
+  let currentTurnEffort: string | null = null;
   let latest: CodexSessionDiagnostics | null = null;
 
   for (const rawLine of lines) {
@@ -687,12 +697,16 @@ export function extractLatestTokenCount(rawLog: string): CodexSessionDiagnostics
 
     if (isCodexTurnBoundary(event, payload)) {
       currentTurnModel = null;
+      currentTurnEffort = null;
       continue;
     }
 
     if (event.type === 'turn_context') {
       currentTurnModel = payload && typeof payload.model === 'string' && payload.model.trim()
         ? payload.model.trim()
+        : null;
+      currentTurnEffort = payload && typeof payload.effort === 'string' && payload.effort.trim()
+        ? payload.effort.trim()
         : null;
       continue;
     }
@@ -716,6 +730,7 @@ export function extractLatestTokenCount(rawLog: string): CodexSessionDiagnostics
 
     latest = {
       model: currentTurnModel,
+      effort: currentTurnEffort,
       inputTokens: normalizeCodexInputTokens(rawInputTokens, cacheReadInputTokens),
       outputTokens: typeof usage?.output_tokens === 'number' ? usage.output_tokens : null,
       cacheReadInputTokens,

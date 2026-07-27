@@ -51,6 +51,7 @@ export interface CodexTurnExecutionResult {
   readonly assistantEvents: readonly AssistantEventSnapshot[];
   readonly usage: BackendUsage;
   readonly model: string | null;
+  readonly effort: string | null;
   readonly contextWindow: number | null;
   readonly lastSubturnUsage: BackendUsage | null;
   readonly lastSubturnContextTokens: number | null;
@@ -183,6 +184,10 @@ export async function executeCodexTurn(input: CodexTurnExecutionInput): Promise<
       assistantEvents: resultSource.assistantEvents,
       usage,
       model: resultSource.model ?? input.model,
+      // Codex states the effort it ran with on the session log's turn_context record. Unlike model
+      // just above, a missing value stays null: filling it from the request would make the field
+      // always agree with what was asked and hide a backend that ran something else.
+      effort: resultSource.effort,
       contextWindow: resultSource.contextWindow,
       lastSubturnUsage,
       lastSubturnContextTokens: addNullable(

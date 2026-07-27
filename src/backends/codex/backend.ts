@@ -66,6 +66,7 @@ export class CodexBackend implements Backend {
           usage: result.usage,
           rawUsage: null,
           model: result.model,
+          effort: result.effort,
           contextWindow: result.contextWindow,
           lastSubturnUsage: result.lastSubturnUsage,
           lastSubturnContextTokens: result.lastSubturnContextTokens,
