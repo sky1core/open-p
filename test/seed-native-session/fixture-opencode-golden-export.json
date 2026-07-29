@@ -1,0 +1,128 @@
+{
+  "info": {
+    "id": "ses_openpseedtest0000000002",
+    "version": "1.17.11",
+    "slug": "fixture-opencode-session",
+    "title": "Fixture OpenCode Session",
+    "agent": "fixture-agent",
+    "model": {
+      "providerID": "fixture-provider",
+      "id": "fixture-model",
+      "modelID": "fixture-model"
+    },
+    "modelID": "fixture-model",
+    "providerID": "fixture-provider",
+    "mode": "fixture-mode",
+    "path": {
+      "cwd": "/fixture/workspace",
+      "root": "/fixture/workspace"
+    },
+    "cost": 0,
+    "tokens": {
+      "input": 0,
+      "output": 0,
+      "cache": {
+        "read": 0,
+        "write": 0
+      },
+      "reasoning": 0
+    },
+    "time": {
+      "created": 1784030100000,
+      "updated": 1784030102000
+    }
+  },
+  "messages": [
+    {
+      "info": {
+        "id": "msg_000000000101AAAAAAAAAAAAAA",
+        "sessionID": "ses_openpseedtest0000000002",
+        "role": "user",
+        "agent": "fixture-agent",
+        "model": {
+          "providerID": "fixture-provider",
+          "id": "fixture-model",
+          "modelID": "fixture-model"
+        },
+        "modelID": "fixture-model",
+        "providerID": "fixture-provider",
+        "mode": "fixture-mode",
+        "path": {
+          "cwd": "/fixture/workspace",
+          "root": "/fixture/workspace"
+        },
+        "cost": 0,
+        "tokens": {
+          "input": 0,
+          "output": 0,
+          "cache": {
+            "read": 0,
+            "write": 0
+          },
+          "reasoning": 0
+        },
+        "time": {
+          "created": 1784030100000
+        }
+      },
+      "parts": [
+        {
+          "id": "prt_000000000102AAAAAAAAAAAAAA",
+          "sessionID": "ses_openpseedtest0000000002",
+          "messageID": "msg_000000000101AAAAAAAAAAAAAA",
+          "type": "text",
+          "text": "fixture opencode prompt alpha"
+        }
+      ]
+    },
+    {
+      "info": {
+        "id": "msg_000000000103AAAAAAAAAAAAAA",
+        "sessionID": "ses_openpseedtest0000000002",
+        "role": "assistant",
+        "parentID": "msg_000000000101AAAAAAAAAAAAAA",
+        "agent": "fixture-agent",
+        "model": {
+          "providerID": "fixture-provider",
+          "id": "fixture-model",
+          "modelID": "fixture-model"
+        },
+        "modelID": "fixture-model",
+        "providerID": "fixture-provider",
+        "mode": "fixture-mode",
+        "path": {
+          "cwd": "/fixture/workspace",
+          "root": "/fixture/workspace"
+        },
+        "cost": 0,
+        "tokens": {
+          "input": 0,
+          "output": 0,
+          "cache": {
+            "read": 0,
+            "write": 0
+          },
+          "reasoning": 0
+        },
+        "finish": "stop",
+        "time": {
+          "created": 1784030101000,
+          "completed": 1784030102000
+        }
+      },
+      "parts": [
+        {
+          "id": "prt_000000000104AAAAAAAAAAAAAA",
+          "sessionID": "ses_openpseedtest0000000002",
+          "messageID": "msg_000000000103AAAAAAAAAAAAAA",
+          "type": "text",
+          "text": "FIXTURE_OPENCODE_OK",
+          "time": {
+            "start": 1784030101000,
+            "end": 1784030102000
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -10,10 +10,8 @@
 .*
 !/.gitignore
 
-# Tests and development scripts are kept local. Nothing published consumes them: the npm package
-# ships only dist/ and README.md, and no CI runs here. Publishing files with no reader is a
-# surface that has to be audited forever for no return.
-test/
+# Development scripts are kept local. Nothing published consumes them: the npm package ships only
+# dist/ and README.md.
 scripts/
 
 node_modules/

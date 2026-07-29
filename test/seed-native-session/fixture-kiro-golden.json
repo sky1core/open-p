@@ -1,0 +1,97 @@
+{
+  "session_id": "00000000-0000-4000-8000-000000000301",
+  "session_state": {
+    "version": "v1",
+    "rts_model_state": {
+      "conversation_id": "00000000-0000-4000-8000-000000000301"
+    },
+    "conversation_metadata": {
+      "user_turn_metadatas": [
+        {
+          "message_ids": [
+            "00000000-0000-4000-8000-000000000021",
+            "00000000-0000-4000-8000-000000000022"
+          ],
+          "end_reason": "UserTurnEnd",
+          "end_timestamp": "2026-07-14T11:53:31.000Z",
+          "user_prompt_length": 25,
+          "loop_id": {
+            "kind": "fixture",
+            "rand": 1001
+          },
+          "result": {
+            "Ok": {
+              "id": "00000000-0000-4000-8000-000000000022",
+              "role": "assistant",
+              "content": [
+                {
+                  "kind": "text",
+                  "data": "FIXTURE_TOKEN_A"
+                }
+              ],
+              "meta": {
+                "timestamp": 1784030011
+              }
+            }
+          }
+        },
+        {
+          "message_ids": [
+            "00000000-0000-4000-8000-000000000023",
+            "00000000-0000-4000-8000-000000000024"
+          ],
+          "end_reason": "UserTurnEnd",
+          "end_timestamp": "2026-07-14T11:53:32.000Z",
+          "user_prompt_length": 24,
+          "loop_id": {
+            "kind": "fixture",
+            "rand": 1002
+          },
+          "result": {
+            "Ok": {
+              "id": "00000000-0000-4000-8000-000000000024",
+              "role": "assistant",
+              "content": [
+                {
+                  "kind": "text",
+                  "data": "FIXTURE_TOKEN_B"
+                }
+              ],
+              "meta": {
+                "timestamp": 1784030012
+              }
+            }
+          }
+        },
+        {
+          "message_ids": [
+            "00000000-0000-4000-8000-000000000029",
+            "00000000-0000-4000-8000-000000000033"
+          ],
+          "end_reason": "UserTurnEnd",
+          "end_timestamp": "2026-07-14T11:53:33.000Z",
+          "user_prompt_length": 25,
+          "loop_id": {
+            "kind": "fixture",
+            "rand": 1003
+          },
+          "result": {
+            "Ok": {
+              "id": "00000000-0000-4000-8000-000000000033",
+              "role": "assistant",
+              "content": [
+                {
+                  "kind": "text",
+                  "data": "FIXTURE_TOKEN_C"
+                }
+              ],
+              "meta": {
+                "timestamp": 1784030013
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

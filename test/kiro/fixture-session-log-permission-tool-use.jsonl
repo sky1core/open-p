@@ -1,0 +1,6 @@
+{"version":"v1","kind":"Prompt","data":{"content":[{"kind":"text","data":"fixture prompt: 권한이 필요한 파일 쓰기를 시도하라"}],"meta":{"timestamp":1767225600000}}}
+{"version":"v1","kind":"AssistantMessage","data":{"content":[{"kind":"text","data":"fixture 진행: fixture-input.txt를 읽고 fixture-output.txt 쓰기를 시도한다."},{"kind":"toolUse","data":{"toolUseId":"tooluse_fixture_011","name":"read","input":{"path":"/fixture/workspace/fixture-input.txt"}}}]}}
+{"version":"v1","kind":"ToolResults","data":{"content":[{"kind":"toolResult","data":{"toolUseId":"tooluse_fixture_011","content":[{"kind":"text","data":"4\n9\n"}]}}]}}
+{"version":"v1","kind":"AssistantMessage","data":{"content":[{"kind":"text","data":"fixture 진행: 읽기는 성공했고 이제 파일 쓰기를 요청한다."},{"kind":"toolUse","data":{"toolUseId":"tooluse_fixture_012","name":"write","input":{"path":"/fixture/workspace/fixture-output.txt","text":"fixture output\n"}}}]}}
+{"version":"v1","kind":"ToolResults","data":{"content":[{"kind":"toolResult","data":{"toolUseId":"tooluse_fixture_012","content":[{"kind":"text","data":"fixture tool use denied by permission policy"}]}}]}}
+{"version":"v1","kind":"AssistantMessage","data":{"content":[{"kind":"text","data":"fixture 결과: 쓰기 권한이 거부되어 fixture-output.txt를 저장하지 못했다.\n\n- 읽기: 성공 (값 4, 9)\n- 쓰기: 권한 거부"}]}}

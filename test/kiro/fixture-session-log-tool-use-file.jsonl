@@ -1,0 +1,6 @@
+{"version":"v1","kind":"Prompt","data":{"content":[{"kind":"text","data":"fixture prompt: 숫자 파일 합계를 구해 파일로 저장하라"}],"meta":{"timestamp":1767225600000}}}
+{"version":"v1","kind":"AssistantMessage","data":{"content":[{"kind":"text","data":"fixture 진행: fixture-numbers.txt를 읽어 합계를 계산한다."},{"kind":"toolUse","data":{"toolUseId":"tooluse_fixture_001","name":"read","input":{"path":"/fixture/workspace/fixture-numbers.txt"}}}]}}
+{"version":"v1","kind":"ToolResults","data":{"content":[{"kind":"toolResult","data":{"toolUseId":"tooluse_fixture_001","content":[{"kind":"text","data":"3\n5\n7\n"}]}}]}}
+{"version":"v1","kind":"AssistantMessage","data":{"content":[{"kind":"text","data":"fixture 진행: 값 3개(3, 5, 7)를 읽었다. 합계를 fixture-sum.txt에 기록한다."},{"kind":"toolUse","data":{"toolUseId":"tooluse_fixture_002","name":"write","input":{"path":"/fixture/workspace/fixture-sum.txt","text":"sum=15\n"}}}]}}
+{"version":"v1","kind":"ToolResults","data":{"content":[{"kind":"toolResult","data":{"toolUseId":"tooluse_fixture_002","content":[{"kind":"text","data":"fixture write ok"}]}}]}}
+{"version":"v1","kind":"AssistantMessage","data":{"content":[{"kind":"text","data":"fixture 결과: fixture-numbers.txt의 합계는 sum=15 이다.\n\n- 입력 값: 3, 5, 7\n- 저장 위치: /fixture/workspace/fixture-sum.txt"}]}}

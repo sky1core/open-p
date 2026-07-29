@@ -1,0 +1,397 @@
+{
+  "info": {
+    "id": "ses_openpcompactfixture0001",
+    "version": "1.17.11",
+    "slug": "fixture-opencode-compacted",
+    "title": "Fixture OpenCode Compacted Session",
+    "agent": "fixture-agent",
+    "model": {
+      "providerID": "fixture-provider",
+      "id": "fixture-model",
+      "modelID": "fixture-model"
+    },
+    "modelID": "fixture-model",
+    "providerID": "fixture-provider",
+    "mode": "fixture-mode",
+    "path": {
+      "cwd": "/fixture/workspace",
+      "root": "/fixture/workspace"
+    },
+    "cost": 0,
+    "tokens": {
+      "input": 0,
+      "output": 0,
+      "cache": {
+        "read": 0,
+        "write": 0
+      },
+      "reasoning": 0
+    },
+    "time": {
+      "created": 1784030200000,
+      "updated": 1784030209000
+    }
+  },
+  "messages": [
+    {
+      "info": {
+        "id": "msg_000000000201AAAAAAAAAAAAAA",
+        "sessionID": "ses_openpcompactfixture0001",
+        "role": "user",
+        "agent": "fixture-agent",
+        "model": {
+          "providerID": "fixture-provider",
+          "id": "fixture-model",
+          "modelID": "fixture-model"
+        },
+        "modelID": "fixture-model",
+        "providerID": "fixture-provider",
+        "mode": "fixture-mode",
+        "path": {
+          "cwd": "/fixture/workspace",
+          "root": "/fixture/workspace"
+        },
+        "cost": 0,
+        "tokens": {
+          "input": 0,
+          "output": 0,
+          "cache": {
+            "read": 0,
+            "write": 0
+          },
+          "reasoning": 0
+        },
+        "time": {
+          "created": 1784030200000
+        }
+      },
+      "parts": [
+        {
+          "id": "prt_000000000202AAAAAAAAAAAAAA",
+          "sessionID": "ses_openpcompactfixture0001",
+          "messageID": "msg_000000000201AAAAAAAAAAAAAA",
+          "type": "text",
+          "text": "fixture compact prompt alpha"
+        }
+      ]
+    },
+    {
+      "info": {
+        "id": "msg_000000000203AAAAAAAAAAAAAA",
+        "sessionID": "ses_openpcompactfixture0001",
+        "role": "assistant",
+        "parentID": "msg_000000000201AAAAAAAAAAAAAA",
+        "agent": "fixture-agent",
+        "model": {
+          "providerID": "fixture-provider",
+          "id": "fixture-model",
+          "modelID": "fixture-model"
+        },
+        "modelID": "fixture-model",
+        "providerID": "fixture-provider",
+        "mode": "fixture-mode",
+        "path": {
+          "cwd": "/fixture/workspace",
+          "root": "/fixture/workspace"
+        },
+        "cost": 0,
+        "tokens": {
+          "input": 0,
+          "output": 0,
+          "cache": {
+            "read": 0,
+            "write": 0
+          },
+          "reasoning": 0
+        },
+        "finish": "stop",
+        "time": {
+          "created": 1784030201000,
+          "completed": 1784030202000
+        }
+      },
+      "parts": [
+        {
+          "id": "prt_000000000204AAAAAAAAAAAAAA",
+          "sessionID": "ses_openpcompactfixture0001",
+          "messageID": "msg_000000000203AAAAAAAAAAAAAA",
+          "type": "text",
+          "text": "FIXTURE_COMPACT_ANSWER_A",
+          "time": {
+            "start": 1784030201000,
+            "end": 1784030202000
+          }
+        }
+      ]
+    },
+    {
+      "info": {
+        "id": "msg_000000000205AAAAAAAAAAAAAA",
+        "sessionID": "ses_openpcompactfixture0001",
+        "role": "user",
+        "agent": "fixture-agent",
+        "model": {
+          "providerID": "fixture-provider",
+          "id": "fixture-model",
+          "modelID": "fixture-model"
+        },
+        "modelID": "fixture-model",
+        "providerID": "fixture-provider",
+        "mode": "fixture-mode",
+        "path": {
+          "cwd": "/fixture/workspace",
+          "root": "/fixture/workspace"
+        },
+        "cost": 0,
+        "tokens": {
+          "input": 0,
+          "output": 0,
+          "cache": {
+            "read": 0,
+            "write": 0
+          },
+          "reasoning": 0
+        },
+        "time": {
+          "created": 1784030203000
+        }
+      },
+      "parts": [
+        {
+          "id": "prt_000000000206AAAAAAAAAAAAAA",
+          "sessionID": "ses_openpcompactfixture0001",
+          "messageID": "msg_000000000205AAAAAAAAAAAAAA",
+          "type": "text",
+          "text": "fixture compact prompt beta"
+        }
+      ]
+    },
+    {
+      "info": {
+        "id": "msg_000000000207AAAAAAAAAAAAAA",
+        "sessionID": "ses_openpcompactfixture0001",
+        "role": "assistant",
+        "parentID": "msg_000000000205AAAAAAAAAAAAAA",
+        "agent": "fixture-agent",
+        "model": {
+          "providerID": "fixture-provider",
+          "id": "fixture-model",
+          "modelID": "fixture-model"
+        },
+        "modelID": "fixture-model",
+        "providerID": "fixture-provider",
+        "mode": "fixture-mode",
+        "path": {
+          "cwd": "/fixture/workspace",
+          "root": "/fixture/workspace"
+        },
+        "cost": 0,
+        "tokens": {
+          "input": 0,
+          "output": 0,
+          "cache": {
+            "read": 0,
+            "write": 0
+          },
+          "reasoning": 0
+        },
+        "finish": "stop",
+        "time": {
+          "created": 1784030203001,
+          "completed": 1784030203002
+        }
+      },
+      "parts": [
+        {
+          "id": "prt_000000000208AAAAAAAAAAAAAA",
+          "sessionID": "ses_openpcompactfixture0001",
+          "messageID": "msg_000000000207AAAAAAAAAAAAAA",
+          "type": "text",
+          "text": "FIXTURE_COMPACT_ANSWER_B",
+          "time": {
+            "start": 1784030203001,
+            "end": 1784030203002
+          }
+        }
+      ]
+    },
+    {
+      "info": {
+        "id": "msg_000000000209AAAAAAAAAAAAAA",
+        "sessionID": "ses_openpcompactfixture0001",
+        "role": "user",
+        "agent": "fixture-agent",
+        "model": {
+          "providerID": "fixture-provider",
+          "id": "fixture-model",
+          "modelID": "fixture-model"
+        },
+        "modelID": "fixture-model",
+        "providerID": "fixture-provider",
+        "mode": "fixture-mode",
+        "path": {
+          "cwd": "/fixture/workspace",
+          "root": "/fixture/workspace"
+        },
+        "cost": 0,
+        "tokens": {
+          "input": 0,
+          "output": 0,
+          "cache": {
+            "read": 0,
+            "write": 0
+          },
+          "reasoning": 0
+        },
+        "time": {
+          "created": 1784030204000
+        }
+      },
+      "parts": [
+        {
+          "id": "prt_00000000020aAAAAAAAAAAAAAA",
+          "sessionID": "ses_openpcompactfixture0001",
+          "messageID": "msg_000000000209AAAAAAAAAAAAAA",
+          "type": "compaction"
+        }
+      ]
+    },
+    {
+      "info": {
+        "id": "msg_00000000020bAAAAAAAAAAAAAA",
+        "sessionID": "ses_openpcompactfixture0001",
+        "role": "assistant",
+        "parentID": "msg_000000000209AAAAAAAAAAAAAA",
+        "summary": true,
+        "agent": "fixture-agent",
+        "model": {
+          "providerID": "fixture-provider",
+          "id": "fixture-model",
+          "modelID": "fixture-model"
+        },
+        "modelID": "fixture-model",
+        "providerID": "fixture-provider",
+        "mode": "fixture-mode",
+        "path": {
+          "cwd": "/fixture/workspace",
+          "root": "/fixture/workspace"
+        },
+        "cost": 0,
+        "tokens": {
+          "input": 0,
+          "output": 0,
+          "cache": {
+            "read": 0,
+            "write": 0
+          },
+          "reasoning": 0
+        },
+        "finish": "stop",
+        "time": {
+          "created": 1784030204001,
+          "completed": 1784030204002
+        }
+      },
+      "parts": [
+        {
+          "id": "prt_00000000020cAAAAAAAAAAAAAA",
+          "sessionID": "ses_openpcompactfixture0001",
+          "messageID": "msg_00000000020bAAAAAAAAAAAAAA",
+          "type": "text",
+          "text": "## Goal\nfixture compact summary"
+        }
+      ]
+    },
+    {
+      "info": {
+        "id": "msg_00000000020dAAAAAAAAAAAAAA",
+        "sessionID": "ses_openpcompactfixture0001",
+        "role": "user",
+        "agent": "fixture-agent",
+        "model": {
+          "providerID": "fixture-provider",
+          "id": "fixture-model",
+          "modelID": "fixture-model"
+        },
+        "modelID": "fixture-model",
+        "providerID": "fixture-provider",
+        "mode": "fixture-mode",
+        "path": {
+          "cwd": "/fixture/workspace",
+          "root": "/fixture/workspace"
+        },
+        "cost": 0,
+        "tokens": {
+          "input": 0,
+          "output": 0,
+          "cache": {
+            "read": 0,
+            "write": 0
+          },
+          "reasoning": 0
+        },
+        "time": {
+          "created": 1784030205000
+        }
+      },
+      "parts": [
+        {
+          "id": "prt_00000000020eAAAAAAAAAAAAAA",
+          "sessionID": "ses_openpcompactfixture0001",
+          "messageID": "msg_00000000020dAAAAAAAAAAAAAA",
+          "type": "text",
+          "text": "fixture compact prompt gamma"
+        }
+      ]
+    },
+    {
+      "info": {
+        "id": "msg_00000000020fAAAAAAAAAAAAAA",
+        "sessionID": "ses_openpcompactfixture0001",
+        "role": "assistant",
+        "parentID": "msg_00000000020dAAAAAAAAAAAAAA",
+        "agent": "fixture-agent",
+        "model": {
+          "providerID": "fixture-provider",
+          "id": "fixture-model",
+          "modelID": "fixture-model"
+        },
+        "modelID": "fixture-model",
+        "providerID": "fixture-provider",
+        "mode": "fixture-mode",
+        "path": {
+          "cwd": "/fixture/workspace",
+          "root": "/fixture/workspace"
+        },
+        "cost": 0,
+        "tokens": {
+          "input": 0,
+          "output": 0,
+          "cache": {
+            "read": 0,
+            "write": 0
+          },
+          "reasoning": 0
+        },
+        "finish": "stop",
+        "time": {
+          "created": 1784030205001,
+          "completed": 1784030205002
+        }
+      },
+      "parts": [
+        {
+          "id": "prt_000000000210AAAAAAAAAAAAAA",
+          "sessionID": "ses_openpcompactfixture0001",
+          "messageID": "msg_00000000020fAAAAAAAAAAAAAA",
+          "type": "text",
+          "text": "FIXTURE_COMPACT_ANSWER_C",
+          "time": {
+            "start": 1784030205001,
+            "end": 1784030205002
+          }
+        }
+      ]
+    }
+  ]
+}

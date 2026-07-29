@@ -1,0 +1,6 @@
+{"type":"turn_context","payload":{"model":"fixture-codex-model","cwd":"/fixture/workspace"}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"fixture prompt: 구조화된 출력으로만 답하라"}]}}
+{"type":"event_msg","payload":{"type":"user_message","message":"fixture prompt: 구조화된 출력으로만 답하라"}}
+{"type":"event_msg","payload":{"type":"agent_message","message":"{\"answer\":\"fixture structured answer: open-p 호환 레이어가 fixture 백엔드 턴을 실행하고 구조화된 출력을 반환했다.\",\"stdoutRelation\":\"fixture stdout relation: 같은 fixture 턴이 stdout 표면과 session log 표면 양쪽에 기록된다.\",\"checks\":[{\"name\":\"fixture-check-jsonl\",\"passed\":true},{\"name\":\"fixture-check-session-log\",\"passed\":true}]}"}}
+{"type":"event_msg","payload":{"type":"token_count","info":{"model_context_window":200000,"last_token_usage":{"input_tokens":4200,"cached_input_tokens":1200,"output_tokens":350,"total_tokens":4550}}}}
+{"type":"event_msg","payload":{"type":"task_complete"}}

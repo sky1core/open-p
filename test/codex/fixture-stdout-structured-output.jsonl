@@ -1,0 +1,3 @@
+{"type":"thread.started","thread_id":"019e0000-0000-7000-8000-000000000003"}
+{"type":"item.completed","item":{"id":"item_fixture_021","type":"agent_message","text":"{\"answer\":\"fixture structured answer: open-p 호환 레이어가 fixture 백엔드 턴을 실행하고 구조화된 출력을 반환했다.\",\"stdoutRelation\":\"fixture stdout relation: 같은 fixture 턴이 stdout 표면과 session log 표면 양쪽에 기록된다.\",\"checks\":[{\"name\":\"fixture-check-jsonl\",\"passed\":true},{\"name\":\"fixture-check-session-log\",\"passed\":true}]}"}}
+{"type":"turn.completed","usage":{"input_tokens":4200,"cached_input_tokens":1200,"output_tokens":350}}
