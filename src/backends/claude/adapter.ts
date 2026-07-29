@@ -10,8 +10,11 @@ import type { Backend } from '../../core/backend.js';
 import type { BackendRunOptions, TurnRequest, TurnResult, TurnResultWarning } from '../../core/types.js';
 import type { PtyProvider, PtySession } from '../../runners/types.js';
 import {
+  ClaudeCodeSelectionPromptError,
   escapeClaudeComposerShellModeToggle,
-  readinessTimeoutMs,
+  isClaudeCodeEmptyInputReady,
+  isClaudeCodeSelectionPromptError,
+  readClaudeCodeSelectionPromptScreen,
   waitForClaudeCodeInputReady,
 } from './interactive.js';
 import { rejectStructuredClaudeCodeBackendArgs } from './args-validation.js';
@@ -20,6 +23,8 @@ import {
   findRecentClaudeCodeSessionLog,
   getFileSize,
   hasClaudeCodeCallerUserTurnInSessionLogSegment,
+  inspectClaudeCodeCallerUserTurnInSessionLogSegment,
+  createClaudeCodeSessionLogWaitState,
   isMissingCallerAfterLocalCommandError,
   isMissingCallerAfterPromptSubmissionError,
   MissingCallerAfterPromptSubmissionError,
@@ -46,7 +51,8 @@ import {
 import { extractPromptLocalCommandName } from './prompt-command.js';
 import {
   captureClaudeInputDraftSurface,
-  captureClaudeInputDraftFingerprint,
+  ClaudePromptSubmissionTransportError,
+  isClaudePromptSubmissionTransportError,
   sameClaudeInputDraftFingerprint,
   type ClaudeInputDraftFingerprint,
   waitForChangedClaudeInputDraftSurface,
@@ -61,9 +67,9 @@ import {
 //   with it disallowed the model asks via plain answer text instead).
 // The disable levers are live-verified against Claude Code's PTY turn lifecycle.
 
-const PROMPT_SUBMISSION_CALLER_GRACE_MS = 750;
-const PROMPT_SUBMISSION_RECOVERY_VERIFY_GRACE_MS = 750;
-const PROMPT_DRAFT_RENDER_GRACE_MS = 400;
+const PROMPT_SUBMISSION_CALLER_GRACE_MS = 5_000;
+const PROMPT_SUBMISSION_RECOVERY_VERIFY_GRACE_MS = 5_000;
+const PROMPT_DRAFT_RENDER_GRACE_MS = 5_000;
 
 export interface ClaudeCodeBackendOptions {
   readonly backendId?: string;
@@ -143,7 +149,16 @@ export class ClaudeCodeBackend implements Backend {
     });
 
     let primaryError: unknown = null;
+    let inputUnsafeForExit = false;
+    let promptInputUnconfirmed = false;
     const interrupter = createClaudePtyInterrupter(pty);
+    const requestTurnStop = (): void => {
+      if (promptInputUnconfirmed) {
+        interrupter.requestForceStop();
+        return;
+      }
+      interrupter.requestGracefulStop();
+    };
     const forceHandler = (): void => {
       interrupter.requestForceStop();
     };
@@ -175,8 +190,10 @@ export class ClaudeCodeBackend implements Backend {
       }
       const result = await runAbortableOperation({
         signal: options.signal,
+        awaitOperationAfterAbort: true,
+        preserveOperationErrorAfterAbort: isMissingTurnBoundaryOpenPError,
         interrupt: () => {
-          if (shouldTerminateOnAbort(options.signal)) {
+          if (promptInputUnconfirmed || shouldTerminateOnAbort(options.signal)) {
             interrupter.requestForceStop();
             return;
           }
@@ -189,11 +206,29 @@ export class ClaudeCodeBackend implements Backend {
           let retryLocalCommandTranscriptPromptIds: ReadonlySet<string> = new Set();
           let initialSubmitDone = false;
           let recoverySubmitDone = false;
-          let initialSubmitRecoveryDisabled = false;
-          let recoveryVerificationDisabled = false;
           let postWriteDraftFingerprint: ClaudeInputDraftFingerprint | null = null;
+          let safetyLogPath = existingLogPath;
+          let safetyOffset = 0;
+          let safetyLocalCommandTranscriptPromptIds: ReadonlySet<string> = new Set();
+          const sessionLogWaitState = createClaudeCodeSessionLogWaitState();
           const promptLocalCommandName = extractPromptLocalCommandName(request.prompt);
-          for (;;) {
+          const dischargePromptSubmissionFailure = (
+            error: MissingCallerAfterPromptSubmissionError,
+            submissionAttempted = true,
+          ): Promise<OpenPError> => {
+            inputUnsafeForExit = true;
+            return dischargeResendSafetyBeforeThrow(pty, error, {
+              expectedLogPath,
+              cwd: options.cwd,
+              discoveryStartedAtMs,
+              excludedLogPaths,
+              configDir: this.configDir,
+              promptLocalCommandName,
+              submissionAttempted,
+            });
+          };
+          try {
+            for (;;) {
             let activeLogPath: string | null;
             if (retryInitialOffset !== null) {
               activeLogPath = retryLogPath ?? existingLogPath;
@@ -203,6 +238,9 @@ export class ClaudeCodeBackend implements Backend {
               activeLogPath = retryLogPath ?? existingLogPath;
             }
             const initialOffset = retryInitialOffset ?? await getFileSize(activeLogPath ?? expectedLogPath);
+            safetyLogPath = activeLogPath;
+            safetyOffset = initialOffset;
+            safetyLocalCommandTranscriptPromptIds = retryLocalCommandTranscriptPromptIds;
             let lastPublishedIntermediate: string | null = null;
             const publishIntermediateText = (text: string): void => {
               if (!shouldPublishIntermediateText(text, lastPublishedIntermediate)) {
@@ -216,30 +254,71 @@ export class ClaudeCodeBackend implements Backend {
                 turnDeadlineMs,
                 request.turnId,
                 () => {
-                  interrupter.requestGracefulStop();
+                  requestTurnStop();
                 },
               );
-              await waitForClaudeCodeInputReady(pty, readinessTimeoutMs(readinessAttemptTimeoutMs));
-              postWriteDraftFingerprint = await submitPrompt(pty, request.prompt, () => {
-                throwIfAborted(options.signal);
-                return remainingTurnTimeoutMs(
-                  turnDeadlineMs,
-                  request.turnId,
+              // Only a session being started fresh can be facing the workspace trust prompt: the
+              // prompt is a first-run gate on the directory, and a session being resumed already
+              // ran a turn there. The distinction matters because a resumed session paints its own
+              // transcript onto the screen, and the trust check reads the whole screen -- so any
+              // transcript quoting the words it looks for would otherwise be answered as if Claude
+              // Code had asked the question.
+              await waitForClaudeCodeInputReady(pty, readinessAttemptTimeoutMs, {
+                confirmTrustPrompt: !options.resume,
+              });
+              try {
+                postWriteDraftFingerprint = await submitPrompt(
+                  pty,
+                  request.prompt,
                   () => {
-                    interrupter.requestGracefulStop();
+                    throwIfAborted(options.signal);
+                    return remainingTurnTimeoutMs(
+                      turnDeadlineMs,
+                      request.turnId,
+                      requestTurnStop,
+                    );
+                  },
+                  () => {
+                    promptInputUnconfirmed = true;
                   },
                 );
-              });
+              } catch (error) {
+                if (!isClaudePromptSubmissionTransportError(error)) {
+                  throw error;
+                }
+                const safetyResult = await dischargePromptSubmissionFailure(
+                  new MissingCallerAfterPromptSubmissionError(
+                    request.turnId,
+                    activeLogPath,
+                    initialOffset,
+                  ),
+                  error.submissionAttempted,
+                );
+                if (
+                  safetyResult.reasonCode === ARTIFACT_REJECTION_REASONS.promptNotExecuted
+                ) {
+                  throw error.cause;
+                }
+                throw safetyResult;
+              }
+              if (postWriteDraftFingerprint === null) {
+                throw await dischargePromptSubmissionFailure(
+                  new MissingCallerAfterPromptSubmissionError(
+                    request.turnId,
+                    activeLogPath,
+                    initialOffset,
+                  ),
+                  false,
+                );
+              }
               initialSubmitDone = true;
             }
-            const waitAttemptTimeoutMs = remainingTurnTimeoutMs(
-              turnDeadlineMs,
-              request.turnId,
-              () => {
-                interrupter.requestGracefulStop();
-              },
-            );
             try {
+              const waitAttemptTimeoutMs = remainingTurnTimeoutMs(
+                turnDeadlineMs,
+                request.turnId,
+                requestTurnStop,
+              );
               const result = await waitForClaudeCodeTurnResult({
                 sessionId: nativeSessionId,
                 turnId: request.turnId,
@@ -255,6 +334,13 @@ export class ClaudeCodeBackend implements Backend {
                 structuredOutputRequested: request.jsonSchema !== null && request.jsonSchema !== undefined,
                 structuredOutputJsonSchema: request.jsonSchema,
                 isBackendAlive: () => pty.isAlive(),
+                onCallerUserTurnObserved: () => {
+                  promptInputUnconfirmed = false;
+                },
+                // A backend parked on a selection prompt stays alive, so liveness alone reports it
+                // as a turn still running. This is the reading that tells the two apart.
+                readBackendSelectionPromptScreen: () => readClaudeCodeSelectionPromptScreen(pty),
+                waitState: sessionLogWaitState,
                 onIntermediateText: options.onIntermediateText
                   ? (text) => {
                       publishIntermediateText(text);
@@ -267,13 +353,11 @@ export class ClaudeCodeBackend implements Backend {
                   : undefined,
                 onIntermediateAssistantSnapshot: options.onIntermediateAssistantSnapshot,
                 promptLocalCommandName,
-                recoveryAttempt: recoverySubmitDone && !recoveryVerificationDisabled,
-                recoveryMissingCallerLogIdleGraceMs: recoverySubmitDone && !recoveryVerificationDisabled
+                recoveryAttempt: recoverySubmitDone,
+                recoveryMissingCallerLogIdleGraceMs: recoverySubmitDone
                   ? PROMPT_SUBMISSION_RECOVERY_VERIFY_GRACE_MS
                   : undefined,
-                missingCallerAfterSubmitGraceMs: !recoverySubmitDone &&
-                    !initialSubmitRecoveryDisabled &&
-                    postWriteDraftFingerprint !== null
+                missingCallerAfterSubmitGraceMs: !recoverySubmitDone
                   ? PROMPT_SUBMISSION_CALLER_GRACE_MS
                   : null,
                 initialLocalCommandTranscriptPromptIds: retryInitialOffset !== null
@@ -295,22 +379,66 @@ export class ClaudeCodeBackend implements Backend {
                   ptySessionId: pty.id,
                 }),
                 onTimeout: () => {
-                  interrupter.requestGracefulStop();
+                  requestTurnStop();
                 },
               });
+              promptInputUnconfirmed = false;
               return result;
             } catch (error) {
               if (!isMissingCallerAfterPromptSubmissionError(error)) {
+                if (promptInputUnconfirmed) {
+                  const safetyResult = await dischargePromptSubmissionFailure(
+                    new MissingCallerAfterPromptSubmissionError(
+                      request.turnId,
+                      activeLogPath,
+                      initialOffset,
+                    ),
+                  );
+                  if (
+                    safetyResult.reasonCode === ARTIFACT_REJECTION_REASONS.promptNotExecuted
+                  ) {
+                    throw error;
+                  }
+                  throw safetyResult;
+                }
                 throw error;
               }
               if (recoverySubmitDone) {
-                if (await isSameVisibleDraft(pty, postWriteDraftFingerprint)) {
-                  throw await dischargeResendSafetyBeforeThrow(pty, error);
-                }
-                recoveryVerificationDisabled = true;
                 retryLogPath = error.logPath ?? activeLogPath;
                 retryInitialOffset = error.nextOffset;
                 retryLocalCommandTranscriptPromptIds = error.localCommandTranscriptPromptIds;
+                if (await hasCallerUserTurnAtRecoveryOffset(
+                  retryLogPath,
+                  expectedLogPath,
+                  retryInitialOffset,
+                  retryLocalCommandTranscriptPromptIds,
+                )) {
+                  continue;
+                }
+                const recoverySurface = await captureClaudeInputDraftSurface(pty);
+                const recoveryDraftStillVisible = sameClaudeInputDraftFingerprint(
+                  postWriteDraftFingerprint,
+                  recoverySurface?.fingerprint ?? null,
+                );
+                if (
+                  recoverySurface !== null &&
+                  (recoveryDraftStillVisible || recoverySurface.kind !== 'menu')
+                ) {
+                  sessionLogWaitState.selectionPromptStallObservations = 0;
+                }
+                const backendReadyForNewInput = !recoveryDraftStillVisible &&
+                  await isClaudeCodeEmptyInputReady(pty);
+                if (recoveryDraftStillVisible || backendReadyForNewInput) {
+                  if (await hasCallerUserTurnAtRecoveryOffset(
+                    retryLogPath,
+                    expectedLogPath,
+                    retryInitialOffset,
+                    retryLocalCommandTranscriptPromptIds,
+                  )) {
+                    continue;
+                  }
+                  throw await dischargePromptSubmissionFailure(error);
+                }
                 continue;
               }
               retryLogPath = error.logPath ?? activeLogPath;
@@ -324,7 +452,17 @@ export class ClaudeCodeBackend implements Backend {
               )) {
                 continue;
               }
-              const stableDraft = await isSameVisibleDraft(pty, postWriteDraftFingerprint);
+              const recoverySurface = await captureClaudeInputDraftSurface(pty);
+              const stableDraft = sameClaudeInputDraftFingerprint(
+                postWriteDraftFingerprint,
+                recoverySurface?.fingerprint ?? null,
+              );
+              if (
+                recoverySurface !== null &&
+                (stableDraft || recoverySurface.kind !== 'menu')
+              ) {
+                sessionLogWaitState.selectionPromptStallObservations = 0;
+              }
               if (stableDraft && retryLogPath === null && nativeSessionId === null) {
                 retryLogPath = await findRecentClaudeCodeSessionLog(
                   options.cwd,
@@ -343,7 +481,23 @@ export class ClaudeCodeBackend implements Backend {
                 continue;
               }
               if (stableDraft) {
-                await pty.submit();
+                try {
+                  throwIfAborted(options.signal);
+                  remainingTurnTimeoutMs(
+                    turnDeadlineMs,
+                    request.turnId,
+                    requestTurnStop,
+                  );
+                  await pty.submit();
+                } catch (submitError) {
+                  const safetyResult = await dischargePromptSubmissionFailure(error);
+                  if (
+                    safetyResult.reasonCode === ARTIFACT_REJECTION_REASONS.promptNotExecuted
+                  ) {
+                    throw submitError;
+                  }
+                  throw safetyResult;
+                }
                 recoverySubmitDone = true;
                 continue;
               }
@@ -355,11 +509,46 @@ export class ClaudeCodeBackend implements Backend {
               )) {
                 continue;
               }
-              if (isMissingCallerAfterLocalCommandError(error)) {
-                throw await dischargeResendSafetyBeforeThrow(pty, error);
+              if (await isClaudeCodeEmptyInputReady(pty)) {
+                if (await hasCallerUserTurnAtRecoveryOffset(
+                  retryLogPath,
+                  expectedLogPath,
+                  retryInitialOffset,
+                  retryLocalCommandTranscriptPromptIds,
+                )) {
+                  continue;
+                }
+                throw await dischargePromptSubmissionFailure(error);
               }
-              initialSubmitRecoveryDisabled = true;
+              if (isMissingCallerAfterLocalCommandError(error)) {
+                throw await dischargePromptSubmissionFailure(error);
+              }
             }
+            }
+          } catch (error) {
+            if (isClaudeCodeSelectionPromptError(error)) {
+              inputUnsafeForExit = true;
+              await forcePtyStopWithEscalation(pty, DEFAULT_TERMINATE_GRACE_MS)
+                .catch(() => undefined);
+              throw error;
+            }
+            if (promptInputUnconfirmed && !inputUnsafeForExit) {
+              const safetyResult = await dischargePromptSubmissionFailure(
+                new MissingCallerAfterPromptSubmissionError(
+                  request.turnId,
+                  safetyLogPath,
+                  safetyOffset,
+                  safetyLocalCommandTranscriptPromptIds,
+                ),
+              );
+              if (
+                safetyResult.reasonCode === ARTIFACT_REJECTION_REASONS.promptNotExecuted
+              ) {
+                throw error;
+              }
+              throw safetyResult;
+            }
+            throw error;
           }
         },
       });
@@ -398,9 +587,11 @@ export class ClaudeCodeBackend implements Backend {
     } finally {
       try {
         if (primaryError !== CLEANUP_ALREADY_HANDLED) {
-          // Failure path: exitPtyAfterTurn only escalates/propagates here; it emits
-          // warnings and debug entries solely when the turn itself succeeded.
-          await exitPtyAfterTurn(pty, primaryError);
+          if (!inputUnsafeForExit) {
+            // Failure path: exitPtyAfterTurn only escalates/propagates here; it emits
+            // warnings and debug entries solely when the turn itself succeeded.
+            await exitPtyAfterTurn(pty, primaryError);
+          }
         }
       } finally {
         interrupter.clear();
@@ -412,6 +603,11 @@ export class ClaudeCodeBackend implements Backend {
 }
 
 const CLEANUP_ALREADY_HANDLED = Symbol('cleanup already handled');
+
+function isMissingTurnBoundaryOpenPError(error: unknown): boolean {
+  return error instanceof OpenPError &&
+    error.reasonCode === ARTIFACT_REJECTION_REASONS.missingTurnBoundary;
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -437,21 +633,53 @@ async function submitPrompt(
   pty: PtySession,
   prompt: string,
   assertCanSubmit: () => number,
+  onWriteAttempted: () => void,
 ): Promise<ClaudeInputDraftFingerprint | null> {
   assertCanSubmit();
-  const beforeWriteSurface = await captureClaudeInputDraftSurface(pty);
-  await pty.write(escapeClaudeComposerShellModeToggle(prompt));
-  const remainingMs = assertCanSubmit();
-  const draftFingerprint = await waitForChangedClaudeInputDraftSurface(
-    pty,
-    beforeWriteSurface,
-    remainingMs === 0
-      ? PROMPT_DRAFT_RENDER_GRACE_MS
-      : Math.min(PROMPT_DRAFT_RENDER_GRACE_MS, remainingMs),
-  );
-  assertCanSubmit();
-  await pty.submit();
-  return draftFingerprint;
+  let submissionAttempted = false;
+  try {
+    let beforeWriteSurface = await captureClaudeInputDraftSurface(pty);
+    if (
+      beforeWriteSurface?.kind === 'ambiguous' &&
+      await isClaudeCodeEmptyInputReady(pty)
+    ) {
+      beforeWriteSurface = { fingerprint: null, kind: 'empty' };
+    }
+    if (beforeWriteSurface?.kind !== 'empty') {
+      if (beforeWriteSurface?.kind === 'menu') {
+        throw new ClaudeCodeSelectionPromptError(
+          'Claude Code changed to an interactive selection prompt immediately before prompt input; open-p did not write or submit the caller prompt.',
+          EXIT_CODES.backendStartFailed,
+        );
+      }
+      throw new OpenPError(
+        'Claude Code input surface was not exact and empty immediately before prompt input; open-p did not write or submit the caller prompt.',
+        EXIT_CODES.backendStartFailed,
+      );
+    }
+    assertCanSubmit();
+    onWriteAttempted();
+    await pty.write(escapeClaudeComposerShellModeToggle(prompt));
+    const remainingMs = assertCanSubmit();
+    const draftFingerprint = await waitForChangedClaudeInputDraftSurface(
+      pty,
+      beforeWriteSurface,
+      remainingMs === 0
+        ? PROMPT_DRAFT_RENDER_GRACE_MS
+        : Math.min(PROMPT_DRAFT_RENDER_GRACE_MS, remainingMs),
+      assertCanSubmit,
+    );
+    if (draftFingerprint === null) {
+      assertCanSubmit();
+      return null;
+    }
+    assertCanSubmit();
+    submissionAttempted = true;
+    await pty.submit();
+    return draftFingerprint;
+  } catch (error) {
+    throw new ClaudePromptSubmissionTransportError(error, submissionAttempted);
+  }
 }
 
 async function hasCallerUserTurnAtRecoveryOffset(
@@ -467,16 +695,6 @@ async function hasCallerUserTurnAtRecoveryOffset(
       initialOffset,
       initialLocalCommandTranscriptPromptIds,
     );
-}
-
-async function isSameVisibleDraft(
-  pty: Pick<PtySession, 'captureCursorLine'>,
-  postWriteDraftFingerprint: ClaudeInputDraftFingerprint | null,
-): Promise<boolean> {
-  return sameClaudeInputDraftFingerprint(
-    postWriteDraftFingerprint,
-    await captureClaudeInputDraftFingerprint(pty),
-  );
 }
 
 function shouldPublishIntermediateText(text: string, previousText: string | null): boolean {
@@ -516,17 +734,25 @@ export function buildClaudeCodeArgs(options: BackendRunOptions, extraArgs: reado
   return args;
 }
 
-// `prompt_not_executed` promises the caller that the preempted prompt can never run, which is only
-// true once the backend process is gone. Shut the PTY down before the error becomes caller-visible;
-// if the process survives termination escalation, downgrade to a reason code with no resend guarantee.
+interface PromptSubmissionSafetyContext {
+  readonly expectedLogPath: string | null;
+  readonly cwd: string;
+  readonly discoveryStartedAtMs: number | null;
+  readonly excludedLogPaths: ReadonlySet<string> | undefined;
+  readonly configDir: string | null;
+  readonly promptLocalCommandName: string | null;
+  readonly submissionAttempted: boolean;
+}
+
+// `prompt_not_executed` promises the caller that the preempted prompt can never run. Do not type a
+// graceful `/exit` into an unconfirmed input surface: it can combine with a late-rendering draft and
+// submit the caller's prompt. Terminate without sending input, then recheck the scoped log.
 async function dischargeResendSafetyBeforeThrow(
   pty: PtySession,
   error: MissingCallerAfterPromptSubmissionError,
+  context: PromptSubmissionSafetyContext,
 ): Promise<OpenPError> {
-  await pty.exit().catch(() => undefined);
-  if (await pty.isAlive().catch(() => true)) {
-    await forcePtyStopWithEscalation(pty, DEFAULT_TERMINATE_GRACE_MS).catch(() => undefined);
-  }
+  await forcePtyStopWithEscalation(pty, DEFAULT_TERMINATE_GRACE_MS).catch(() => undefined);
   if (await pty.isAlive().catch(() => true)) {
     return new OpenPError(
       `Claude Code backend did not terminate after prompt submission was not confirmed for turn ${error.turnId}; the prompt may still execute. Resubmitting is not known to be safe.`,
@@ -534,7 +760,53 @@ async function dischargeResendSafetyBeforeThrow(
       ARTIFACT_REJECTION_REASONS.missingTurnBoundary,
     );
   }
+  let finalLogPath = error.logPath ?? context.expectedLogPath;
+  if (
+    finalLogPath === null &&
+    context.submissionAttempted &&
+    context.discoveryStartedAtMs !== null
+  ) {
+    finalLogPath = await findRecentClaudeCodeSessionLog(
+      context.cwd,
+      context.discoveryStartedAtMs,
+      context.excludedLogPaths ?? new Set(),
+      context.configDir,
+      context.promptLocalCommandName,
+    ).catch(() => null);
+  }
+  if (finalLogPath === null) {
+    return context.submissionAttempted
+      ? missingPromptSubmissionBoundaryError(error.turnId)
+      : error;
+  }
+  const inspection = await inspectClaudeCodeCallerUserTurnInSessionLogSegment(
+    finalLogPath,
+    error.nextOffset,
+    error.localCommandTranscriptPromptIds,
+  );
+  if (inspection.sawCallerUserTurn) {
+    return new OpenPError(
+      `Claude Code recorded a caller user turn while the backend was shutting down after unconfirmed prompt submission for turn ${error.turnId}; the prompt may have started executing, so resubmitting is not known to be safe.`,
+      EXIT_CODES.protocolViolation,
+      ARTIFACT_REJECTION_REASONS.missingTurnBoundary,
+    );
+  }
+  if (
+    !inspection.readable ||
+    inspection.hasIncompleteTail ||
+    inspection.hasMalformedRecord
+  ) {
+    return missingPromptSubmissionBoundaryError(error.turnId);
+  }
   return error;
+}
+
+function missingPromptSubmissionBoundaryError(turnId: string): OpenPError {
+  return new OpenPError(
+    `Claude Code could not establish a complete final caller boundary after unconfirmed prompt submission for turn ${turnId}; the prompt may have started executing, so resubmitting is not known to be safe.`,
+    EXIT_CODES.protocolViolation,
+    ARTIFACT_REJECTION_REASONS.missingTurnBoundary,
+  );
 }
 
 export async function exitPtyAfterTurn(

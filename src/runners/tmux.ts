@@ -283,6 +283,87 @@ export class TmuxSession implements PtySession {
     return line.stdout.replace(/\r?\n$/, '');
   }
 
+  async captureCursorSurface(): Promise<{
+    readonly line: string;
+    readonly cursorRow: number;
+    readonly cursorColumn: number;
+  }> {
+    const firstPosition = await this.captureCursorPosition();
+    const firstLine = await this.captureLineAt(firstPosition.row);
+    const secondPosition = await this.captureCursorPosition();
+    if (
+      secondPosition.row !== firstPosition.row ||
+      secondPosition.column !== firstPosition.column
+    ) {
+      throw new OpenPError(
+        `tmux session ${this.sessionName} cursor moved while its input surface was captured`,
+        EXIT_CODES.backendStartFailed,
+      );
+    }
+    const secondLine = await this.captureLineAt(secondPosition.row);
+    const finalPosition = await this.captureCursorPosition();
+    if (
+      finalPosition.row !== secondPosition.row ||
+      finalPosition.column !== secondPosition.column ||
+      secondLine !== firstLine
+    ) {
+      throw new OpenPError(
+        `tmux session ${this.sessionName} input surface changed while it was captured`,
+        EXIT_CODES.backendStartFailed,
+      );
+    }
+    return {
+      line: secondLine,
+      cursorRow: finalPosition.row,
+      cursorColumn: finalPosition.column,
+    };
+  }
+
+  async moveCursorToEnd(): Promise<void> {
+    await execFileText(this.tmuxBin, ['send-keys', '-t', this.sessionName, 'End']);
+  }
+
+  async moveCursorToStart(): Promise<void> {
+    await execFileText(this.tmuxBin, ['send-keys', '-t', this.sessionName, 'Home']);
+  }
+
+  private async captureCursorPosition(): Promise<{ readonly row: number; readonly column: number }> {
+    const cursor = await execFileText(this.tmuxBin, [
+      'display-message',
+      '-p',
+      '-t',
+      this.sessionName,
+      '#{cursor_y}:#{cursor_x}',
+    ]);
+    const [rawRow, rawColumn, ...rest] = cursor.stdout.trim().split(':');
+    const row = Number.parseInt(rawRow ?? '', 10);
+    const column = Number.parseInt(rawColumn ?? '', 10);
+    if (
+      rest.length > 0 ||
+      !Number.isSafeInteger(row) ||
+      row < 0 ||
+      !Number.isSafeInteger(column) ||
+      column < 0
+    ) {
+      throw new OpenPError(`tmux session ${this.sessionName} returned invalid cursor position`, EXIT_CODES.backendStartFailed);
+    }
+    return { row, column };
+  }
+
+  private async captureLineAt(cursorRow: number): Promise<string> {
+    const line = await execFileText(this.tmuxBin, [
+      'capture-pane',
+      '-p',
+      '-t',
+      this.sessionName,
+      '-S',
+      String(cursorRow),
+      '-E',
+      String(cursorRow),
+    ]);
+    return line.stdout.replace(/\r?\n$/, '');
+  }
+
   private async resolvePanePid(): Promise<number | null> {
     try {
       const result = await execFileText(this.tmuxBin, ['display-message', '-p', '-t', this.sessionName, '#{pane_pid}']);

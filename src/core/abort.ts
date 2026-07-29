@@ -9,6 +9,8 @@ export interface AbortableOperationOptions<T> {
   readonly interrupt: () => Promise<void> | void;
   readonly operation: () => Promise<T>;
   readonly getInterruptedDraft?: () => string | null;
+  readonly awaitOperationAfterAbort?: boolean;
+  readonly preserveOperationErrorAfterAbort?: (error: unknown) => boolean;
 }
 
 export function createAbortError(
@@ -44,6 +46,37 @@ export async function runAbortableOperation<T>(options: AbortableOperationOption
   }
 
   let abortListener: (() => void) | null = null;
+  if (options.awaitOperationAfterAbort === true) {
+    let deferredAbortError: OpenPAbortError | null = null;
+    abortListener = () => {
+      deferredAbortError = createAbortError(
+        'operation aborted',
+        options.getInterruptedDraft?.() ?? null,
+      );
+      void Promise.resolve(options.interrupt()).catch(() => undefined);
+    };
+    signal.addEventListener('abort', abortListener, { once: true });
+    try {
+      try {
+        const result = await options.operation();
+        if (deferredAbortError !== null) {
+          throw deferredAbortError;
+        }
+        return result;
+      } catch (error) {
+        if (
+          deferredAbortError !== null &&
+          options.preserveOperationErrorAfterAbort?.(error) !== true
+        ) {
+          throw deferredAbortError;
+        }
+        throw error;
+      }
+    } finally {
+      signal.removeEventListener('abort', abortListener);
+    }
+  }
+
   const abortPromise = new Promise<never>((_, reject) => {
     abortListener = () => {
       void Promise.resolve(options.interrupt()).catch(() => undefined);

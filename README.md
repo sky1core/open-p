@@ -145,6 +145,10 @@ The Claude backend runs through a PTY-backed interactive Claude Code session and
 
 To keep one `openp` invocation mapped to one synchronous prompt turn, the Claude backend disables background/monitor workflows and blocking interactive question tools at launch.
 
+The workspace trust prompt is confirmed only when a session starts fresh. A resumed session replays its own transcript onto the screen, and the trust check reads the whole screen, so a transcript that happens to quote the prompt's wording would otherwise be answered as if Claude Code had asked — pressing Enter into whatever the session is really showing. A resumed session has already passed that first-run gate, so nothing is lost by not offering it.
+
+Claude Code can still stop a turn on a selection prompt it wants a person to answer — a usage limit reached mid-turn reads this way. The process stays alive, so the turn would otherwise wait out `--timeout`, or wait indefinitely without one. `openp` will not answer such a prompt, because the choices can carry a cost or change an account; once the prompt remains visible and the session log has stood still for five minutes, the turn exits `11` unless the caller's shorter timeout has already expired. The error carries the backend screen when it is available. A quiet long-running tool call does not show a selection prompt, so log inactivity alone does not fail the turn.
+
 ### Backend Instances
 
 Claude and Codex support configured instances: derived backend ids that run with a separate account/config home. Each instance keeps its own login, settings, and session logs, so you can keep independent local CLI profiles side by side.

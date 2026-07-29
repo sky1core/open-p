@@ -18,6 +18,7 @@ import {
   rememberLocalCommandTranscriptPromptId,
 } from './turn-boundary-predicates.js';
 import { extractPromptLocalCommandName } from './prompt-command.js';
+import { ClaudeCodeSelectionPromptError } from './interactive.js';
 import type {
   AssistantContentBlock,
   AssistantEventSnapshot,
@@ -32,8 +33,34 @@ const MAX_ASSISTANT_REPLAY_DELAY_MS = 100;
 const MISSING_CALLER_LOG_IDLE_GRACE_MS = 1_000;
 const RECOVERY_MISSING_CALLER_LOG_IDLE_GRACE_MS = 10_000;
 const SESSION_LOG_IDLE_DIAGNOSTIC_INTERVAL_MS = 30_000;
+// How long the session log must stand still before a visible selection prompt is read as a stalled
+// turn rather than as a draft sitting in the composer, which looks the same on the input line.
+// Log inactivity alone is not failure evidence: the visible selection prompt is also required, so
+// a quiet long-running tool call keeps waiting. Five minutes leaves room for a slow write without
+// leaving a human-blocked turn to run out an unbounded timeout.
+const SELECTION_PROMPT_STALL_GRACE_MS = 300_000;
+// How many readings in a row must find the prompt before the turn is failed, so one bad screen
+// capture cannot end a live turn.
+export const SELECTION_PROMPT_STALL_CONFIRMATIONS = 2;
+
+// Whether the log has been quiet long enough that a visible selection prompt means a stopped turn
+// rather than a draft sitting in the composer, which is the same text on the input line.
+export function sessionLogHasStoodStill(msSinceProgress: number, graceMs: number): boolean {
+  return msSinceProgress >= graceMs;
+}
+
+// Readings only add up while the same stall lasts: a poll during which the log advanced, or one
+// that finds no selection prompt, puts the count back to zero. Without that, readings taken during
+// unrelated stalls -- separated by the turn writing more of its answer -- would add up to a
+// failure for a turn that had gone back to work in between.
+export function nextSelectionPromptStallObservations(
+  previousObservations: number,
+  sessionLogStoodStill: boolean,
+  sawSelectionPrompt: boolean,
+): number {
+  return sessionLogStoodStill && sawSelectionPrompt ? previousObservations + 1 : 0;
+}
 const CLAUDE_POST_COMPLETION_GRACE_MS = 15_000;
-const CLAUDE_SESSION_LOG_DISCOVERY_TIMEOUT_MS = 120_000;
 
 export interface ClaudeCodeSessionLogIdleDiagnostic {
   readonly turnId: string;
@@ -50,6 +77,41 @@ export interface ClaudeCodeLocalCommandNameMismatchDiagnostic {
   readonly promptLocalCommandName: string;
   readonly loggedCommandName: string;
   readonly logPath: string | null;
+}
+
+export interface ClaudeCodeSessionLogWaitState {
+  lastProgressAtMs: number;
+  lastIdleDiagnosticAtMs: number;
+  selectionPromptStallObservations: number;
+  progressLogPath: string | null;
+  highestObservedOffset: number;
+}
+
+export function createClaudeCodeSessionLogWaitState(): ClaudeCodeSessionLogWaitState {
+  const now = Date.now();
+  return {
+    lastProgressAtMs: now,
+    lastIdleDiagnosticAtMs: now,
+    selectionPromptStallObservations: 0,
+    progressLogPath: null,
+    highestObservedOffset: 0,
+  };
+}
+
+export function recordClaudeCodeSessionLogProgress(
+  waitState: ClaudeCodeSessionLogWaitState,
+  logPath: string,
+  nextOffset: number,
+): boolean {
+  if (
+    waitState.progressLogPath === logPath &&
+    nextOffset <= waitState.highestObservedOffset
+  ) {
+    return false;
+  }
+  waitState.progressLogPath = logPath;
+  waitState.highestObservedOffset = nextOffset;
+  return true;
 }
 
 export class MissingCallerAfterPromptSubmissionError extends OpenPError {
@@ -223,6 +285,10 @@ export async function waitForClaudeCodeTurnResult(options: {
   readonly structuredOutputRequested?: boolean;
   readonly structuredOutputJsonSchema?: unknown;
   readonly isBackendAlive?: () => Promise<boolean>;
+  readonly onCallerUserTurnObserved?: () => void;
+  readonly readBackendSelectionPromptScreen?: () => Promise<string | null>;
+  readonly selectionPromptStallGraceMs?: number;
+  readonly waitState?: ClaudeCodeSessionLogWaitState;
   readonly sessionLogIdleDiagnosticIntervalMs?: number;
   readonly postCompletionGraceMs?: number;
   readonly sessionLogDiscoveryTimeoutMs?: number;
@@ -250,7 +316,7 @@ export async function waitForClaudeCodeTurnResult(options: {
   const deadline = options.timeoutMs === 0 ? null : Date.now() + options.timeoutMs;
   const discoveryDeadline = resolveDiscoveryDeadlineMs(
     deadline,
-    options.sessionLogDiscoveryTimeoutMs ?? CLAUDE_SESSION_LOG_DISCOVERY_TIMEOUT_MS,
+    options.sessionLogDiscoveryTimeoutMs ?? 0,
     options.knownLogPath,
   );
   const postCompletionGraceMs = options.postCompletionGraceMs ?? CLAUDE_POST_COMPLETION_GRACE_MS;
@@ -280,12 +346,13 @@ export async function waitForClaudeCodeTurnResult(options: {
   let processedRawEventCount = 0;
   let nextFallbackDiscoveryAtMs = options.knownLogPath ? Date.now() + SESSION_LOG_DISCOVERY_POLL_INTERVAL_MS : Date.now();
   let timeoutNotified = false;
-  let lastSessionLogProgressAtMs = Date.now();
-  let lastSessionLogIdleDiagnosticAtMs = Date.now();
+  const waitState = options.waitState ?? createClaudeCodeSessionLogWaitState();
   let completionWithoutResultObserved = false;
   let turnCompletionObserved = false;
   const sessionLogIdleDiagnosticIntervalMs =
     options.sessionLogIdleDiagnosticIntervalMs ?? SESSION_LOG_IDLE_DIAGNOSTIC_INTERVAL_MS;
+  const selectionPromptStallGraceMs =
+    options.selectionPromptStallGraceMs ?? SELECTION_PROMPT_STALL_GRACE_MS;
   const notifyTimeout = async (): Promise<void> => {
     if (timeoutNotified) {
       return;
@@ -345,7 +412,7 @@ export async function waitForClaudeCodeTurnResult(options: {
       throw new MissingCallerAfterLocalCommandError(
         options.turnId,
         logPath,
-        offset,
+        completeJsonlRecordBoundaryOffset(offset, remainder),
         new Set(activeTurnLocalCommandPromptIds),
       );
     }
@@ -366,7 +433,7 @@ export async function waitForClaudeCodeTurnResult(options: {
       throw new MissingCallerAfterPromptSubmissionError(
         options.turnId,
         logPath,
-        offset,
+        completeJsonlRecordBoundaryOffset(offset, remainder),
         new Set(activeTurnLocalCommandPromptIds),
       );
     }
@@ -376,14 +443,14 @@ export async function waitForClaudeCodeTurnResult(options: {
       return;
     }
     const now = Date.now();
-    const idleMs = now - lastSessionLogProgressAtMs;
+    const idleMs = now - waitState.lastProgressAtMs;
     if (idleMs < sessionLogIdleDiagnosticIntervalMs) {
       return;
     }
-    if (now - lastSessionLogIdleDiagnosticAtMs < sessionLogIdleDiagnosticIntervalMs) {
+    if (now - waitState.lastIdleDiagnosticAtMs < sessionLogIdleDiagnosticIntervalMs) {
       return;
     }
-    lastSessionLogIdleDiagnosticAtMs = now;
+    waitState.lastIdleDiagnosticAtMs = now;
     await options.onSessionLogIdle?.({
       turnId: options.turnId,
       stage: resolveSessionLogWaitStage(logPath, sawCallerUserTurn),
@@ -394,11 +461,45 @@ export async function waitForClaudeCodeTurnResult(options: {
       sawCallerUserTurn,
     });
   };
+  // A backend showing a selection prompt is waiting for a person, and openp answering it would be
+  // choosing on the caller's behalf -- the choices can carry a cost or change an account. So the
+  // turn is failed rather than answered, and only once the log has also stood still long enough
+  // that nothing is in flight: on the input line a selection prompt and a draft beginning with a
+  // number are the same text, and a draft belongs to a turn that is still working. Two consecutive
+  // readings are required so one bad screen capture cannot end a live turn. This check runs during
+  // log discovery as well as after binding the log: discovery has no openp-owned deadline, so a
+  // backend that stops on a human prompt before creating its log must still fail closed.
+  const assertBackendIsNotStalledOnSelectionPrompt = async (): Promise<void> => {
+    if (!options.readBackendSelectionPromptScreen || selectionPromptStallGraceMs <= 0) {
+      return;
+    }
+    const standingStill = sessionLogHasStoodStill(
+      Date.now() - waitState.lastProgressAtMs,
+      selectionPromptStallGraceMs,
+    );
+    const screen = standingStill ? await options.readBackendSelectionPromptScreen() : null;
+    waitState.selectionPromptStallObservations = nextSelectionPromptStallObservations(
+      waitState.selectionPromptStallObservations,
+      standingStill,
+      screen !== null,
+    );
+    if (
+      screen === null ||
+      waitState.selectionPromptStallObservations < SELECTION_PROMPT_STALL_CONFIRMATIONS
+    ) {
+      return;
+    }
+    throw new ClaudeCodeSelectionPromptError(
+      `Claude Code stopped turn ${options.turnId} on an interactive selection prompt that open-p cannot answer, ` +
+        `and the session log has not advanced since. Answer it in the backend session; the choices below say what it is asking.${screen}`,
+      EXIT_CODES.backendStartFailed,
+    );
+  };
   const assertPostCompletionIdleGrace = (): void => {
     if (!completionWithoutResultObserved || postCompletionGraceMs < 0) {
       return;
     }
-    if (Date.now() - lastSessionLogProgressAtMs >= postCompletionGraceMs) {
+    if (Date.now() - waitState.lastProgressAtMs >= postCompletionGraceMs) {
       throw new OpenPError(
         `Claude Code session log completed turn ${options.turnId} without a scoped result artifact`,
         EXIT_CODES.protocolViolation,
@@ -411,6 +512,7 @@ export async function waitForClaudeCodeTurnResult(options: {
     if (!logPath) {
       logPath = await discoverClaudeCodeSessionLog(options);
       if (!logPath) {
+        await assertBackendIsNotStalledOnSelectionPrompt();
         if (discoveryDeadline !== null && Date.now() >= discoveryDeadline) {
           const sessionLabel = options.sessionId ? `session ${options.sessionId}` : 'a backend-generated session id';
           throw new OpenPError(
@@ -460,8 +562,11 @@ export async function waitForClaudeCodeTurnResult(options: {
     const chunk = await readNewText(logPath, offset);
     offset = chunk.nextOffset;
     if (chunk.text) {
-      lastSessionLogProgressAtMs = Date.now();
-      lastSessionLogIdleDiagnosticAtMs = lastSessionLogProgressAtMs;
+      if (recordClaudeCodeSessionLogProgress(waitState, logPath, chunk.nextOffset)) {
+        waitState.lastProgressAtMs = Date.now();
+        waitState.lastIdleDiagnosticAtMs = waitState.lastProgressAtMs;
+        waitState.selectionPromptStallObservations = 0;
+      }
       const combined = remainder + chunk.text;
       const parts = combined.split('\n');
       remainder = parts.pop() ?? '';
@@ -496,6 +601,7 @@ export async function waitForClaudeCodeTurnResult(options: {
               isTaskNotification: event.type === 'user' && isClaudeCodeTaskNotificationLine(line),
             })) {
               sawCallerUserTurn = true;
+              options.onCallerUserTurnObserved?.();
               callerUserTurnLineIndex = lines.length;
               completionWithoutResultObserved = false;
               preCallerTerminalLocalCommandObservedAtMs = null;
@@ -573,6 +679,7 @@ export async function waitForClaudeCodeTurnResult(options: {
     if (await backendExited(options.isBackendAlive)) {
       throw new OpenPError(`backend exited during active turn ${options.turnId}`, EXIT_CODES.backendExited);
     }
+    await assertBackendIsNotStalledOnSelectionPrompt();
     assertCallerUserTurnDidNotDisappear();
     assertCallerUserTurnAppearedAfterSubmit();
     assertPostCompletionIdleGrace();
@@ -674,23 +781,84 @@ export async function hasClaudeCodeCallerUserTurnInSessionLogSegment(
   offset: number,
   initialLocalCommandTranscriptPromptIds: ReadonlySet<string> = new Set(),
 ): Promise<boolean> {
-  const chunk = await readNewText(logPath, offset);
+  return (await inspectClaudeCodeCallerUserTurnInSessionLogSegment(
+    logPath,
+    offset,
+    initialLocalCommandTranscriptPromptIds,
+  )).sawCallerUserTurn;
+}
+
+export interface ClaudeCodeCallerUserTurnSegmentInspection {
+  readonly readable: boolean;
+  readonly sawCallerUserTurn: boolean;
+  readonly hasIncompleteTail: boolean;
+  readonly hasMalformedRecord: boolean;
+}
+
+export async function inspectClaudeCodeCallerUserTurnInSessionLogSegment(
+  logPath: string,
+  offset: number,
+  initialLocalCommandTranscriptPromptIds: ReadonlySet<string> = new Set(),
+): Promise<ClaudeCodeCallerUserTurnSegmentInspection> {
+  let chunk: { readonly text: string; readonly nextOffset: number };
+  try {
+    const pathStat = await stat(logPath);
+    if (!pathStat.isFile() || pathStat.size < offset) {
+      return {
+        readable: false,
+        sawCallerUserTurn: false,
+        hasIncompleteTail: false,
+        hasMalformedRecord: false,
+      };
+    }
+    chunk = await readNewText(logPath, offset);
+  } catch {
+    return {
+      readable: false,
+      sawCallerUserTurn: false,
+      hasIncompleteTail: false,
+      hasMalformedRecord: false,
+    };
+  }
   if (!chunk.text) {
-    return false;
+    return {
+      readable: true,
+      sawCallerUserTurn: false,
+      hasIncompleteTail: false,
+      hasMalformedRecord: false,
+    };
   }
   const localCommandTranscriptPromptIds = new Set(initialLocalCommandTranscriptPromptIds);
   const parts = chunk.text.split('\n');
-  parts.pop();
+  const incompleteTail = parts.pop() ?? '';
+  let hasMalformedRecord = false;
   for (const line of parts) {
-    const event = parseLineObject(line);
+    if (line.trim().length === 0) {
+      continue;
+    }
+    const event = parseJsonObjectLine(line);
+    if (event === null) {
+      hasMalformedRecord = true;
+      continue;
+    }
     rememberLocalCommandTranscriptPromptId(localCommandTranscriptPromptIds, event);
     if (isCallerUserTurn(event, localCommandTranscriptPromptIds, {
       isTaskNotification: event.type === 'user' && isClaudeCodeTaskNotificationLine(line),
     })) {
-      return true;
+      return {
+        readable: true,
+        sawCallerUserTurn: true,
+        hasIncompleteTail: incompleteTail.length > 0,
+        hasMalformedRecord,
+      };
     }
   }
-  return false;
+  return {
+    readable: true,
+    sawCallerUserTurn: false,
+    hasIncompleteTail: incompleteTail.length > 0,
+    hasMalformedRecord,
+  };
 }
 
 export async function getFileSize(path: string | null): Promise<number> {
@@ -1278,6 +1446,10 @@ export async function readNewText(path: string, offset: number): Promise<{ text:
   });
 }
 
+function completeJsonlRecordBoundaryOffset(offset: number, remainder: string): number {
+  return Math.max(0, offset - Buffer.byteLength(remainder, 'utf8'));
+}
+
 function decodeCompleteUtf8Prefix(buffer: Buffer, offset: number): { text: string; nextOffset: number } {
   const incompleteBytes = incompleteUtf8SuffixLength(buffer);
   const completeLength = buffer.length - incompleteBytes;
@@ -1413,6 +1585,10 @@ function assistantContentTimestampMs(line: string): number | null {
 }
 
 function parseLineObject(line: string): Record<string, unknown> {
+  return parseJsonObjectLine(line) ?? {};
+}
+
+function parseJsonObjectLine(line: string): Record<string, unknown> | null {
   try {
     const value = JSON.parse(line);
     if (value && typeof value === 'object' && !Array.isArray(value)) {
@@ -1421,7 +1597,7 @@ function parseLineObject(line: string): Record<string, unknown> {
   } catch {
     // Non-JSON lines are ignored by callers.
   }
-  return {};
+  return null;
 }
 
 function assertValidSessionId(sessionId: string): void {

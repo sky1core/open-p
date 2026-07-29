@@ -9,6 +9,12 @@ export interface PtyStartOptions {
   readonly unsetEnv?: readonly string[];
 }
 
+export interface PtyCursorSurface {
+  readonly line: string;
+  readonly cursorRow: number;
+  readonly cursorColumn: number;
+}
+
 export interface PtySession {
   readonly id: string;
   write(input: string): Promise<void>;
@@ -19,6 +25,9 @@ export interface PtySession {
   isAlive(): Promise<boolean>;
   captureText(): Promise<string>;
   captureCursorLine(): Promise<string>;
+  captureCursorSurface?(): Promise<PtyCursorSurface>;
+  moveCursorToStart?(): Promise<void>;
+  moveCursorToEnd?(): Promise<void>;
 }
 
 export interface PtyProvider {
