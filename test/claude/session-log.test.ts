@@ -1441,28 +1441,6 @@ test('normal prompt never matches a local-command group that has no command-name
   );
 });
 
-test('recovery attempt fails after bounded local-command idle grace without new log events', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'openp-session-log-local-command-'));
-  const logPath = join(dir, 'session.jsonl');
-  await writeFile(logPath, '');
-
-  await assert.rejects(
-    () => waitForClaudeCodeTurnResult({
-      sessionId: '11111111-1111-4111-8111-111111111111',
-      turnId: 'turn-1',
-      timeoutMs: 10_000,
-      initialOffset: 0,
-      knownLogPath: logPath,
-      recoveryAttempt: true,
-      recoveryMissingCallerLogIdleGraceMs: 25,
-      isBackendAlive: async () => true,
-    }),
-    (error) => error instanceof OpenPError &&
-      error.exitCode === EXIT_CODES.protocolViolation &&
-      error.reasonCode === 'prompt_not_executed',
-  );
-});
-
 test('recovery caller scan preserves local-command prompt ids from the failed attempt', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'openp-session-log-local-command-'));
   const logPath = join(dir, 'session.jsonl');
@@ -1516,14 +1494,10 @@ test('recovery wait preserves local-command prompt ids from the failed attempt',
       timeoutMs: 500,
       initialOffset: Buffer.byteLength(prefix, 'utf8'),
       knownLogPath: logPath,
-      recoveryAttempt: true,
-      recoveryMissingCallerLogIdleGraceMs: 25,
       initialLocalCommandTranscriptPromptIds: new Set(['compact-command']),
       isBackendAlive: async () => true,
     }),
-    (error) => error instanceof OpenPError &&
-      error.exitCode === EXIT_CODES.protocolViolation &&
-      error.reasonCode === 'prompt_not_executed',
+    (error) => error instanceof OpenPError && error.exitCode === EXIT_CODES.timeout,
   );
 });
 
@@ -1571,8 +1545,6 @@ test('recovery result parsing preserves local-command prompt ids from the failed
     timeoutMs: 500,
     initialOffset: Buffer.byteLength(prefix, 'utf8'),
     knownLogPath: logPath,
-    recoveryAttempt: true,
-    recoveryMissingCallerLogIdleGraceMs: 25,
     initialLocalCommandTranscriptPromptIds: new Set(['compact-command']),
     isBackendAlive: async () => true,
   });
@@ -1624,8 +1596,6 @@ test('recovery result parsing preserves local-command prompt ids after the calle
     timeoutMs: 500,
     initialOffset: Buffer.byteLength(prefix, 'utf8'),
     knownLogPath: logPath,
-    recoveryAttempt: true,
-    recoveryMissingCallerLogIdleGraceMs: 25,
     initialLocalCommandTranscriptPromptIds: new Set(['compact-command']),
     isBackendAlive: async () => true,
   });

@@ -31,7 +31,6 @@ const SESSION_LOG_DISCOVERY_POLL_INTERVAL_MS = 250;
 const ACTIVE_TURN_LOG_POLL_INTERVAL_MS = 25;
 const MAX_ASSISTANT_REPLAY_DELAY_MS = 100;
 const MISSING_CALLER_LOG_IDLE_GRACE_MS = 1_000;
-const RECOVERY_MISSING_CALLER_LOG_IDLE_GRACE_MS = 10_000;
 const SESSION_LOG_IDLE_DIAGNOSTIC_INTERVAL_MS = 30_000;
 // How long the session log must stand still before a visible selection prompt is read as a stalled
 // turn rather than as a draft sitting in the composer, which looks the same on the input line.
@@ -294,9 +293,6 @@ export async function waitForClaudeCodeTurnResult(options: {
   readonly sessionLogDiscoveryTimeoutMs?: number;
   readonly onIntermediateText?: (text: string, source: IntermediateTextSource) => void;
   readonly promptLocalCommandName?: string | null;
-  readonly recoveryAttempt?: boolean;
-  readonly recoveryMissingCallerLogIdleGraceMs?: number;
-  readonly missingCallerAfterSubmitGraceMs?: number | null;
   readonly initialLocalCommandTranscriptPromptIds?: ReadonlySet<string>;
   readonly onIntermediateReasoning?: (
     text: string,
@@ -320,9 +316,7 @@ export async function waitForClaudeCodeTurnResult(options: {
     options.knownLogPath,
   );
   const postCompletionGraceMs = options.postCompletionGraceMs ?? CLAUDE_POST_COMPLETION_GRACE_MS;
-  const missingCallerLogIdleGraceMs = options.recoveryAttempt === true
-    ? options.recoveryMissingCallerLogIdleGraceMs ?? RECOVERY_MISSING_CALLER_LOG_IDLE_GRACE_MS
-    : MISSING_CALLER_LOG_IDLE_GRACE_MS;
+  const missingCallerLogIdleGraceMs = MISSING_CALLER_LOG_IDLE_GRACE_MS;
   let logPath = options.knownLogPath;
   let offset = options.initialOffset;
   let remainder = '';
@@ -335,11 +329,7 @@ export async function waitForClaudeCodeTurnResult(options: {
   let lastAssistantEventProcessedAtMs: number | null = null;
   let sawCallerUserTurn = false;
   let callerUserTurnLineIndex: number | null = null;
-  let preCallerTerminalLocalCommandObservedAtMs: number | null = options.recoveryAttempt === true ? Date.now() : null;
-  let callerMissingAfterSubmitObservedAtMs: number | null =
-    options.missingCallerAfterSubmitGraceMs === null || options.missingCallerAfterSubmitGraceMs === undefined
-      ? null
-      : Date.now();
+  let preCallerTerminalLocalCommandObservedAtMs: number | null = null;
   const activeTurnLocalCommandPromptIds = new Set(options.initialLocalCommandTranscriptPromptIds ?? []);
   const preCallerLocalCommandGroups = new Map<string, LocalCommandTranscriptGroup>();
   let mostRecentPreCallerCommandGroup: LocalCommandTranscriptGroup | null = null;
@@ -410,27 +400,6 @@ export async function waitForClaudeCodeTurnResult(options: {
     }
     if (Date.now() - preCallerTerminalLocalCommandObservedAtMs >= missingCallerLogIdleGraceMs) {
       throw new MissingCallerAfterLocalCommandError(
-        options.turnId,
-        logPath,
-        completeJsonlRecordBoundaryOffset(offset, remainder),
-        new Set(activeTurnLocalCommandPromptIds),
-      );
-    }
-  };
-  const assertCallerUserTurnAppearedAfterSubmit = (): void => {
-    if (
-      sawCallerUserTurn ||
-      callerMissingAfterSubmitObservedAtMs === null ||
-      preCallerTerminalLocalCommandObservedAtMs !== null
-    ) {
-      return;
-    }
-    const graceMs = options.missingCallerAfterSubmitGraceMs;
-    if (graceMs === null || graceMs === undefined) {
-      return;
-    }
-    if (Date.now() - callerMissingAfterSubmitObservedAtMs >= graceMs) {
-      throw new MissingCallerAfterPromptSubmissionError(
         options.turnId,
         logPath,
         completeJsonlRecordBoundaryOffset(offset, remainder),
@@ -536,7 +505,6 @@ export async function waitForClaudeCodeTurnResult(options: {
             throw new OpenPError(`backend exited while waiting for session log for turn ${options.turnId}`, EXIT_CODES.backendExited);
           }
           assertCallerUserTurnDidNotDisappear();
-          assertCallerUserTurnAppearedAfterSubmit();
           await reportSessionLogIdleIfNeeded();
           await sleepUntilDiscoveryDeadline(SESSION_LOG_DISCOVERY_POLL_INTERVAL_MS, discoveryDeadline);
           continue;
@@ -597,7 +565,6 @@ export async function waitForClaudeCodeTurnResult(options: {
             if (submittedLocalCommandPromptEcho || submittedLocalCommandCaveat) {
               preCallerTerminalLocalCommandObservedAtMs = null;
             } else if (isCallerUserTurn(event, activeTurnLocalCommandPromptIds, {
-              // Guarded so non-user lines skip the raw-line reparse inside the notification check.
               isTaskNotification: event.type === 'user' && isClaudeCodeTaskNotificationLine(line),
             })) {
               sawCallerUserTurn = true;
@@ -605,7 +572,6 @@ export async function waitForClaudeCodeTurnResult(options: {
               callerUserTurnLineIndex = lines.length;
               completionWithoutResultObserved = false;
               preCallerTerminalLocalCommandObservedAtMs = null;
-              callerMissingAfterSubmitObservedAtMs = null;
             } else if (!sawCallerUserTurn) {
               const preCallerLocalCommandObservation = observePreCallerLocalCommandEvent({
                 event,
@@ -681,7 +647,6 @@ export async function waitForClaudeCodeTurnResult(options: {
     }
     await assertBackendIsNotStalledOnSelectionPrompt();
     assertCallerUserTurnDidNotDisappear();
-    assertCallerUserTurnAppearedAfterSubmit();
     assertPostCompletionIdleGrace();
     await reportSessionLogIdleIfNeeded();
     await waitForLogChange(logPath, ACTIVE_TURN_LOG_POLL_INTERVAL_MS);

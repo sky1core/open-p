@@ -217,7 +217,8 @@ async function waitForRestoredClaudeInputDraftFingerprint(
       !sameClaudeInputDraftFingerprint(startFingerprint, fingerprint)
     ) {
       // End moved the caret, but the draft changed while the first candidate was being proved.
-      // Let the outer loop take the new stable candidate instead of waiting out the whole grace.
+      // Let the outer loop take the new stable candidate instead of waiting out the rest of the
+      // caller budget.
       return null;
     }
     const remainingMs = deadline - Date.now();

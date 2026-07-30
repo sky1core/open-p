@@ -377,7 +377,7 @@ test('single-turn does not submit a changed status row as the written caller dra
           prompt: SYNTHETIC_PROMPT,
           jsonSchema: null,
         },
-        adapterResumeOptions(environment.cwd),
+        { ...adapterResumeOptions(environment.cwd), timeoutMs: 8_000 },
       ),
       isPromptNotExecutedFailure,
     );
@@ -762,7 +762,7 @@ test('persistent recovery submit exception with a recorded caller is non-resend-
   });
 });
 
-test('single-turn resume fails closed when submission returns to an empty input without a caller turn', async () => {
+test('single-turn resume keeps waiting when submission returns to an empty input without a caller turn', async () => {
   await withSyntheticClaudeEnvironment('adapter-dropped-submission', async (environment) => {
     const session = new SyntheticTurnSession(
       environment.logPath,
@@ -773,7 +773,7 @@ test('single-turn resume fails closed when submission returns to an empty input 
       configDir: environment.configDir,
     });
     const controller = new AbortController();
-    const abortTimer = setTimeout(() => controller.abort(), 15_000);
+    const abortTimer = setTimeout(() => controller.abort(), 8_000);
 
     try {
       await assert.rejects(
@@ -788,7 +788,7 @@ test('single-turn resume fails closed when submission returns to an empty input 
             signal: controller.signal,
           },
         ),
-        isPromptNotExecutedFailure,
+        (error) => error instanceof Error && error.name === 'AbortError',
       );
     } finally {
       clearTimeout(abortTimer);
@@ -799,7 +799,7 @@ test('single-turn resume fails closed when submission returns to an empty input 
   });
 });
 
-test('single-turn resume keeps missing-caller detection when no draft fingerprint was captured', async () => {
+test('single-turn resume fails resend-safe when the draft never renders within the caller budget', async () => {
   await withSyntheticClaudeEnvironment('adapter-no-draft-fingerprint', async (environment) => {
     const session = new SyntheticTurnSession(
       environment.logPath,
@@ -817,7 +817,7 @@ test('single-turn resume keeps missing-caller detection when no draft fingerprin
           prompt: SYNTHETIC_PROMPT,
           jsonSchema: null,
         },
-        adapterResumeOptions(environment.cwd),
+        { ...adapterResumeOptions(environment.cwd), timeoutMs: 8_000 },
       ),
       isPromptNotExecutedFailure,
     );
@@ -827,7 +827,7 @@ test('single-turn resume keeps missing-caller detection when no draft fingerprin
   });
 });
 
-test('persistent resume fails closed when submission returns to an empty input without a caller turn', async () => {
+test('persistent resume fails resend-safe when the draft never renders within the caller budget', async () => {
   await withSyntheticClaudeEnvironment('persistent-dropped-submission', async (environment) => {
     const session = new SyntheticTurnSession(
       environment.logPath,
@@ -839,7 +839,7 @@ test('persistent resume fails closed when submission returns to an empty input w
     try {
       await assert.rejects(
         process.sendTurn(SYNTHETIC_PROMPT, {
-          timeoutMs: 0,
+          timeoutMs: 8_000,
           debugLog: null,
           jsonSchema: null,
         }),
@@ -854,7 +854,7 @@ test('persistent resume fails closed when submission returns to an empty input w
   });
 });
 
-test('single-turn resume fails closed when a recovery submit returns to an empty input', async () => {
+test('single-turn resume keeps waiting after a recovery submit returns to an empty input', async () => {
   await withSyntheticClaudeEnvironment('adapter-dropped-recovery', async (environment) => {
     const session = new SyntheticTurnSession(
       environment.logPath,
@@ -865,7 +865,7 @@ test('single-turn resume fails closed when a recovery submit returns to an empty
       configDir: environment.configDir,
     });
     const controller = new AbortController();
-    const abortTimer = setTimeout(() => controller.abort(), 15_000);
+    const abortTimer = setTimeout(() => controller.abort(), 8_000);
 
     try {
       await assert.rejects(
@@ -880,7 +880,7 @@ test('single-turn resume fails closed when a recovery submit returns to an empty
             signal: controller.signal,
           },
         ),
-        isPromptNotExecutedFailure,
+        (error) => error instanceof Error && error.name === 'AbortError',
       );
     } finally {
       clearTimeout(abortTimer);
@@ -891,7 +891,7 @@ test('single-turn resume fails closed when a recovery submit returns to an empty
   });
 });
 
-test('persistent resume fails closed when a recovery submit returns to an empty input', async () => {
+test('persistent resume keeps waiting after a recovery submit returns to an empty input', async () => {
   await withSyntheticClaudeEnvironment('persistent-dropped-recovery', async (environment) => {
     const session = new SyntheticTurnSession(
       environment.logPath,
@@ -899,6 +899,8 @@ test('persistent resume fails closed when a recovery submit returns to an empty 
       'recovery-drop-to-empty',
     );
     const process = await startSyntheticPersistentProcess(environment, session);
+    const controller = new AbortController();
+    const abortTimer = setTimeout(() => controller.abort(), 8_000);
 
     try {
       await assert.rejects(
@@ -906,10 +908,12 @@ test('persistent resume fails closed when a recovery submit returns to an empty 
           timeoutMs: 0,
           debugLog: null,
           jsonSchema: null,
+          signal: controller.signal,
         }),
-        isPromptNotExecutedFailure,
+        (error) => error instanceof Error && error.name === 'AbortError',
       );
     } finally {
+      clearTimeout(abortTimer);
       await process.shutdown();
     }
 
@@ -936,7 +940,7 @@ test('single-turn does not claim resend safety when a caller turn appears during
           prompt: SYNTHETIC_PROMPT,
           jsonSchema: null,
         },
-        adapterResumeOptions(environment.cwd),
+        { ...adapterResumeOptions(environment.cwd), timeoutMs: 8_000 },
       ),
       (error) => error instanceof OpenPError &&
         error.exitCode === EXIT_CODES.protocolViolation &&
@@ -960,7 +964,7 @@ test('persistent process does not claim resend safety when a caller turn appears
     try {
       await assert.rejects(
         process.sendTurn(SYNTHETIC_PROMPT, {
-          timeoutMs: 0,
+          timeoutMs: 8_000,
           debugLog: null,
           jsonSchema: null,
         }),
@@ -995,7 +999,7 @@ test('single-turn does not claim resend safety when shutdown leaves a partial ca
           prompt: SYNTHETIC_PROMPT,
           jsonSchema: null,
         },
-        adapterResumeOptions(environment.cwd),
+        { ...adapterResumeOptions(environment.cwd), timeoutMs: 8_000 },
       ),
       isMissingTurnBoundaryFailure,
     );
@@ -1020,7 +1024,7 @@ test('single-turn does not claim resend safety when shutdown leaves a malformed 
           prompt: SYNTHETIC_PROMPT,
           jsonSchema: null,
         },
-        adapterResumeOptions(environment.cwd),
+        { ...adapterResumeOptions(environment.cwd), timeoutMs: 8_000 },
       ),
       isMissingTurnBoundaryFailure,
     );
@@ -1088,6 +1092,7 @@ test('single-turn fresh submission does not claim resend safety without a final 
         {
           ...adapterResumeOptions(environment.cwd),
           resume: false,
+          timeoutMs: 8_000,
         },
       ),
       isMissingTurnBoundaryFailure,
@@ -1432,6 +1437,14 @@ class SyntheticTurnSession implements PtySession {
       this.outcome === 'recovery-submit-throws-after-caller' &&
       this.submitCount === 1
     ) {
+      // A pre-caller local-command group whose terminal output never completes a Local Command
+      // Turn is what arms the one observation-based recovery submit.
+      await appendFile(
+        this.logPath,
+        `${syntheticPreCallerLocalCommandEvents(this.cwd)
+          .map((event) => JSON.stringify(event))
+          .join('\n')}\n`,
+      );
       return;
     }
     if (
@@ -1454,6 +1467,12 @@ class SyntheticTurnSession implements PtySession {
       throw new Error('synthetic submit failure');
     }
     if (this.outcome === 'recovery-drop-to-empty' && this.submitCount === 1) {
+      await appendFile(
+        this.logPath,
+        `${syntheticPreCallerLocalCommandEvents(this.cwd)
+          .map((event) => JSON.stringify(event))
+          .join('\n')}\n`,
+      );
       return;
     }
     this.draft = null;
@@ -1895,6 +1914,34 @@ function syntheticCompletedTurnEvents(cwd: string): object[] {
       sessionId: SYNTHETIC_SESSION_ID,
       cwd,
       durationMs: 1,
+    },
+  ];
+}
+
+function syntheticPreCallerLocalCommandEvents(cwd: string): object[] {
+  return [
+    {
+      type: 'user',
+      uuid: 'synthetic-local-command-caveat',
+      sessionId: SYNTHETIC_SESSION_ID,
+      cwd,
+      promptId: 'synthetic-local-command',
+      isMeta: true,
+      message: {
+        role: 'user',
+        content: '<local-command-caveat>Caveat</local-command-caveat>',
+      },
+    },
+    {
+      type: 'user',
+      uuid: 'synthetic-local-command-stdout',
+      sessionId: SYNTHETIC_SESSION_ID,
+      cwd,
+      promptId: 'synthetic-local-command',
+      message: {
+        role: 'user',
+        content: '<local-command-stdout>synthetic command output</local-command-stdout>',
+      },
     },
   ];
 }

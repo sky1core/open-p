@@ -680,33 +680,7 @@ test('single-turn retry submits an existing input draft instead of writing the p
   );
 });
 
-test('single-turn recovery resubmits stable wrapped draft when the initial submit is not accepted', async () => {
-  await withSingleTurnBackend(
-    'openp-claude-adapter-lost-submit-draft-',
-    (logPath, cwd, sessionId) => new LostInitialSubmitStableDraftSession(
-      logPath,
-      cwd,
-      sessionId,
-      'continuation cursor row from wrapped prompt',
-    ),
-    async ({ backend, cwd, session, sessionId }) => {
-      const result = await backend.runTurn(
-        {
-          turnId: '22222222-2222-4222-8222-222222222233',
-          prompt: 'a long prompt that wraps to another row',
-          jsonSchema: null,
-        },
-        adapterRunOptions(cwd, sessionId, 12_000),
-      );
-
-      assert.equal(result.text, 'single-turn recovered after lost initial submit');
-      assert.equal(session.submitCount, 2);
-      assert.deepEqual(session.writes, ['a long prompt that wraps to another row']);
-    },
-  );
-});
-
-test('single-turn recovery captures a draft that renders after the old fixed delay', async () => {
+test('single-turn waits for a late-rendering draft and submits it exactly once', async () => {
   await withSingleTurnBackend(
     'openp-claude-adapter-delayed-draft-render-',
     (logPath, cwd, sessionId) => new LostInitialSubmitStableDraftSession(
@@ -717,24 +691,28 @@ test('single-turn recovery captures a draft that renders after the old fixed del
       { draftRenderDelayMs: 250 },
     ),
     async ({ backend, cwd, session, sessionId }) => {
-      const result = await backend.runTurn(
-        {
-          turnId: '22222222-2222-4222-8222-222222222240',
-          prompt: 'delayed draft',
-          jsonSchema: null,
-        },
-        adapterRunOptions(cwd, sessionId, 12_000),
+      await assert.rejects(
+        () => backend.runTurn(
+          {
+            turnId: '22222222-2222-4222-8222-222222222240',
+            prompt: 'delayed draft',
+            jsonSchema: null,
+          },
+          adapterRunOptions(cwd, sessionId, 8_000),
+        ),
+        (error) => error instanceof OpenPError &&
+          error.exitCode === EXIT_CODES.protocolViolation &&
+          error.reasonCode === 'missing_turn_boundary',
       );
-
-      assert.equal(result.text, 'single-turn recovered after lost initial submit');
-      assert.equal(session.submitCount, 2);
+      assert.equal(session.submitCount, 1);
       assert.deepEqual(session.writes, ['delayed draft']);
-      // Recovering a draft that is already on screen proves nothing about waiting for one that is
+      // Submitting a draft that is already on screen proves nothing about waiting for one that is
       // not, so the draft has to have been polled at least once before it rendered.
       assert.ok(
         session.draftNotYetRenderedCount >= 1,
         'the draft must have been read as not-yet-rendered before it appeared',
       );
+      assert.equal(session.captureAfterFirstSubmitCount, 0);
     },
   );
 });
@@ -799,7 +777,7 @@ test('single-turn refuses a pre-existing placeholder before writing caller input
   );
 });
 
-test('single-turn recovery does not resubmit when caller boundary appears during draft check', async () => {
+test('single-turn confirms a late caller record without reading the screen after submit', async () => {
   await withSingleTurnBackend(
     'openp-claude-adapter-lost-submit-late-caller-',
     (logPath, cwd, sessionId) => new LostInitialSubmitStableDraftSession(
@@ -807,10 +785,7 @@ test('single-turn recovery does not resubmit when caller boundary appears during
       cwd,
       sessionId,
       '❯ prompt draft',
-      {
-        appendCallerDuringFirstPostSubmitCapture: true,
-        appendCallerOnlyDuringFirstPostSubmitCapture: true,
-      },
+      { appendCallerOnAliveProbeAfterSubmit: 3 },
     ),
     async ({ backend, cwd, session, sessionId }) => {
       const result = await backend.runTurn(
@@ -825,90 +800,37 @@ test('single-turn recovery does not resubmit when caller boundary appears during
       assert.equal(result.text, 'single-turn late caller after initial submit');
       assert.equal(session.submitCount, 1);
       assert.deepEqual(session.writes, ['prompt draft']);
+      assert.equal(session.captureAfterFirstSubmitCount, 0);
     },
   );
 });
 
-const singleTurnSessionLogWaitCases = [
-  {
-    name: 'draft surface changes',
-    tempPrefix: 'openp-claude-adapter-lost-submit-changed-',
-    turnId: '22222222-2222-4222-8222-222222222235',
-    options: { currentLineAfterFirstSubmit: 'Generating response...' },
-  },
-  {
-    name: 'draft surface is ambiguous',
-    tempPrefix: 'openp-claude-adapter-lost-submit-ambiguous-',
-    turnId: '22222222-2222-4222-8222-222222222236',
-    options: { currentLineAfterFirstSubmit: '  ❯ 1. No, exit' },
-  },
-  {
-    name: 'cursor line reading fails',
-    tempPrefix: 'openp-claude-adapter-lost-submit-read-failure-',
-    turnId: '22222222-2222-4222-8222-222222222237',
-    options: { throwOnFirstPostSubmitCapture: true },
-  },
-] as const;
-
-test('single-turn recovery keeps session-log wait for non-resendable draft surfaces', async () => {
-  for (const waitCase of singleTurnSessionLogWaitCases) {
-    await withSingleTurnBackend(
-      waitCase.tempPrefix,
-      (logPath, cwd, sessionId) => new LostInitialSubmitStableDraftSession(
-        logPath,
-        cwd,
-        sessionId,
-        '❯ prompt draft',
-        waitCase.options,
-      ),
-      async ({ backend, cwd, session, sessionId }) => {
-        await assert.rejects(
-          () => backend.runTurn(
-            {
-              turnId: waitCase.turnId,
-              prompt: 'prompt draft',
-              jsonSchema: null,
-            },
-            adapterRunOptions(cwd, sessionId, 1_500),
-          ),
-          (error) => error instanceof OpenPError &&
-            error.exitCode === EXIT_CODES.protocolViolation &&
-            error.reasonCode === 'missing_turn_boundary',
-          waitCase.name,
-        );
-        assert.equal(session.submitCount, 1, waitCase.name);
-        assert.deepEqual(session.writes, ['prompt draft'], waitCase.name);
-      },
-    );
-  }
-});
-
-test('single-turn fresh recovery does not claim resend safety when the final log path is unresolved', async () => {
+test('single-turn waits out the caller budget after a lost submit without reading the screen', async () => {
   await withSingleTurnBackend(
-    'openp-claude-adapter-lost-submit-second-failure-',
+    'openp-claude-adapter-lost-submit-stable-',
     (logPath, cwd, sessionId) => new LostInitialSubmitStableDraftSession(
       logPath,
       cwd,
       sessionId,
       '❯ prompt draft',
-      { secondSubmitWritesResult: false },
     ),
     async ({ backend, cwd, session, sessionId }) => {
       await assert.rejects(
         () => backend.runTurn(
           {
-            turnId: '22222222-2222-4222-8222-222222222238',
+            turnId: '22222222-2222-4222-8222-222222222235',
             prompt: 'prompt draft',
             jsonSchema: null,
           },
-          adapterRunOptions(cwd, sessionId, 15_000),
+          adapterRunOptions(cwd, sessionId, 1_500),
         ),
         (error) => error instanceof OpenPError &&
           error.exitCode === EXIT_CODES.protocolViolation &&
           error.reasonCode === 'missing_turn_boundary',
       );
-      assert.equal(session.submitCount, 2);
+      assert.equal(session.submitCount, 1);
       assert.deepEqual(session.writes, ['prompt draft']);
+      assert.equal(session.captureAfterFirstSubmitCount, 0);
     },
   );
 });
@@ -1276,6 +1198,7 @@ class LostInitialSubmitStableDraftSession implements PtySession {
   readonly writes: string[] = [];
   captureAfterFirstSubmitCount = 0;
   draftNotYetRenderedCount = 0;
+  private alivePollsAfterSubmit = 0;
   private alive = true;
   private lastWrite = '';
   private pendingCallerCompletion = false;
@@ -1290,11 +1213,7 @@ class LostInitialSubmitStableDraftSession implements PtySession {
       readonly unchangedLineAcrossWrite?: string;
       readonly draftRenderDelayMs?: number;
       readonly writeDelayMs?: number;
-      readonly currentLineAfterFirstSubmit?: string;
-      readonly appendCallerDuringFirstPostSubmitCapture?: boolean;
-      readonly appendCallerOnlyDuringFirstPostSubmitCapture?: boolean;
-      readonly secondSubmitWritesResult?: boolean;
-      readonly throwOnFirstPostSubmitCapture?: boolean;
+      readonly appendCallerOnAliveProbeAfterSubmit?: number;
     } = {},
   ) {}
 
@@ -1309,38 +1228,6 @@ class LostInitialSubmitStableDraftSession implements PtySession {
 
   async submit(): Promise<void> {
     this.submitCount += 1;
-    if (this.submitCount === 1) {
-      return;
-    }
-    if (this.options.secondSubmitWritesResult === false) {
-      return;
-    }
-    await appendFile(this.logPath, [
-      eventLine({
-        type: 'user',
-        cwd: this.cwd,
-        sessionId: this.sessionId,
-        uuid: 'active-user',
-        message: { content: this.lastWrite },
-      }),
-      eventLine({
-        type: 'assistant',
-        cwd: this.cwd,
-        sessionId: this.sessionId,
-        parentUuid: 'active-user',
-        message: {
-          content: [{ type: 'text', text: 'single-turn recovered after lost initial submit' }],
-          stop_reason: 'end_turn',
-        },
-      }),
-      eventLine({
-        type: 'system',
-        subtype: 'turn_duration',
-        cwd: this.cwd,
-        sessionId: this.sessionId,
-        durationMs: 10,
-      }),
-    ].join('\n') + '\n');
   }
 
   async interrupt(): Promise<void> {}
@@ -1355,6 +1242,24 @@ class LostInitialSubmitStableDraftSession implements PtySession {
   }
 
   async isAlive(): Promise<boolean> {
+    if (
+      this.options.appendCallerOnAliveProbeAfterSubmit !== undefined &&
+      this.submitCount >= 1 &&
+      !this.pendingCallerCompletion
+    ) {
+      this.alivePollsAfterSubmit += 1;
+      if (this.alivePollsAfterSubmit === this.options.appendCallerOnAliveProbeAfterSubmit) {
+        this.pendingCallerCompletion = true;
+        await appendFile(this.logPath, eventLine({
+          type: 'user',
+          cwd: this.cwd,
+          sessionId: this.sessionId,
+          uuid: 'active-user',
+          message: { content: this.lastWrite },
+        }) + '\n');
+        return this.alive;
+      }
+    }
     if (this.pendingCallerCompletion) {
       this.pendingCallerCompletion = false;
       await appendFile(this.logPath, [
@@ -1395,47 +1300,8 @@ class LostInitialSubmitStableDraftSession implements PtySession {
       }
       return this.lastWrite ? this.draftLine : '❯';
     }
-    if (this.submitCount === 1) {
+    if (this.submitCount >= 1) {
       this.captureAfterFirstSubmitCount += 1;
-      if (this.options.throwOnFirstPostSubmitCapture) {
-        throw new Error('cursor read failed');
-      }
-      if (this.options.appendCallerDuringFirstPostSubmitCapture && this.captureAfterFirstSubmitCount === 1) {
-        const events = [
-          eventLine({
-            type: 'user',
-            cwd: this.cwd,
-            sessionId: this.sessionId,
-            uuid: 'active-user',
-            message: { content: this.lastWrite },
-          }),
-        ];
-        if (this.options.appendCallerOnlyDuringFirstPostSubmitCapture) {
-          this.pendingCallerCompletion = true;
-        } else {
-          events.push(
-            eventLine({
-              type: 'assistant',
-              cwd: this.cwd,
-              sessionId: this.sessionId,
-              parentUuid: 'active-user',
-              message: {
-                content: [{ type: 'text', text: 'single-turn late caller after initial submit' }],
-                stop_reason: 'end_turn',
-              },
-            }),
-            eventLine({
-              type: 'system',
-              subtype: 'turn_duration',
-              cwd: this.cwd,
-              sessionId: this.sessionId,
-              durationMs: 10,
-            }),
-          );
-        }
-        await appendFile(this.logPath, events.join('\n') + '\n');
-      }
-      return this.options.currentLineAfterFirstSubmit ?? this.draftLine;
     }
     return this.draftLine;
   }

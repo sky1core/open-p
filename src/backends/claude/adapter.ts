@@ -67,10 +67,6 @@ import {
 //   with it disallowed the model asks via plain answer text instead).
 // The disable levers are live-verified against Claude Code's PTY turn lifecycle.
 
-const PROMPT_SUBMISSION_CALLER_GRACE_MS = 5_000;
-const PROMPT_SUBMISSION_RECOVERY_VERIFY_GRACE_MS = 5_000;
-const PROMPT_DRAFT_RENDER_GRACE_MS = 5_000;
-
 export interface ClaudeCodeBackendOptions {
   readonly backendId?: string;
   readonly configDir?: string | null;
@@ -353,13 +349,6 @@ export class ClaudeCodeBackend implements Backend {
                   : undefined,
                 onIntermediateAssistantSnapshot: options.onIntermediateAssistantSnapshot,
                 promptLocalCommandName,
-                recoveryAttempt: recoverySubmitDone,
-                recoveryMissingCallerLogIdleGraceMs: recoverySubmitDone
-                  ? PROMPT_SUBMISSION_RECOVERY_VERIFY_GRACE_MS
-                  : undefined,
-                missingCallerAfterSubmitGraceMs: !recoverySubmitDone
-                  ? PROMPT_SUBMISSION_CALLER_GRACE_MS
-                  : null,
                 initialLocalCommandTranscriptPromptIds: retryInitialOffset !== null
                   ? retryLocalCommandTranscriptPromptIds
                   : undefined,
@@ -661,16 +650,24 @@ async function submitPrompt(
     onWriteAttempted();
     await pty.write(escapeClaudeComposerShellModeToggle(prompt));
     const remainingMs = assertCanSubmit();
-    const draftFingerprint = await waitForChangedClaudeInputDraftSurface(
-      pty,
-      beforeWriteSurface,
-      remainingMs === 0
-        ? PROMPT_DRAFT_RENDER_GRACE_MS
-        : Math.min(PROMPT_DRAFT_RENDER_GRACE_MS, remainingMs),
-      assertCanSubmit,
-    );
+    // Do not rethrow the budget expiry here: nothing was submitted, and rethrowing would report
+    // a resend-safe turn as a plain timeout. The null fingerprint carries it to the resend-safe
+    // prompt_not_executed path.
+    let draftFingerprint: ClaudeInputDraftFingerprint | null;
+    try {
+      draftFingerprint = await waitForChangedClaudeInputDraftSurface(
+        pty,
+        beforeWriteSurface,
+        remainingMs === 0 ? Number.POSITIVE_INFINITY : remainingMs,
+        assertCanSubmit,
+      );
+    } catch (error) {
+      if (error instanceof OpenPError && error.exitCode === EXIT_CODES.timeout) {
+        return null;
+      }
+      throw error;
+    }
     if (draftFingerprint === null) {
-      assertCanSubmit();
       return null;
     }
     assertCanSubmit();
