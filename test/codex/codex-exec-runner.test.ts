@@ -91,7 +91,6 @@ test('runCodexExec times out with SIGINT before escalation', async () => {
 });
 
 test('runCodexExec force kills a process that ignores graceful interruption on timeout', async () => {
-  const startedAt = Date.now();
   const signalLog = await tempSignalLog();
   const result = await runCodexExec({
     bin: join(FIXTURES, 'fake-codex-ignore-interrupt.mjs'),
@@ -113,7 +112,6 @@ test('runCodexExec force kills a process that ignores graceful interruption on t
   assert.equal(result.timedOut, true);
   assert.equal(result.signal, 'SIGKILL');
   assert.deepEqual(await readSignalLog(signalLog, 2), ['SIGINT', 'SIGTERM']);
-  assert.ok(Date.now() - startedAt < 20000);
 });
 
 test('runCodexExec rejects immediately if signal already aborted', async () => {

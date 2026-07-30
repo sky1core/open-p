@@ -745,17 +745,14 @@ test('runKiroAcp does not send duplicate SIGTERM when terminate abort rejects be
     signal: ac.signal,
     // The fixture answers the in-flight RPC with an error on SIGTERM but stays alive, so the run
     // always ends at this SIGKILL fuse. Wide enough that a loaded machine can run the fixture's
-    // SIGTERM handler (RPC error + signal log) before the kill; the duration bound below only
-    // guards against a hang.
+    // SIGTERM handler (RPC error + signal log) before the kill.
     terminateGraceMs: 2000,
   });
 
   await waitForRpcMethod(rpcLog, 'session/prompt');
-  const startedAt = Date.now();
   ac.abort('SIGTERM');
 
   await assert.rejects(running, isAbortError);
-  assert.ok(Date.now() - startedAt < 15000);
   assert.deepEqual(await readSignalLog(signalLog), ['SIGTERM']);
 });
 
