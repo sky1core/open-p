@@ -14,7 +14,12 @@
     "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
     "build": "npm run clean && tsc -p tsconfig.build.json && chmod +x dist/src/cli.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "prepare": "npm run build"
+    "prepare": "npm run build",
+    "test": "tsx --test --test-concurrency=1 test/*/*.test.ts",
+    "test:claude": "tsx --test --test-concurrency=1 test/claude/*.test.ts",
+    "test:codex": "tsx --test --test-concurrency=1 test/codex/*.test.ts",
+    "test:kiro": "tsx --test --test-concurrency=1 test/kiro/*.test.ts",
+    "test:opencode": "tsx --test --test-concurrency=1 test/opencode/*.test.ts"
   },
   "engines": {
     "node": ">=20"
