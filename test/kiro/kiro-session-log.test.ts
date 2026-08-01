@@ -410,10 +410,11 @@ test('waitForKiroTurnResult defers an incomplete trailing JSONL record during fl
       sessionId,
       fromOffset: 0,
       env: { HOME: home },
-      // The deadline is an upper bound, not a wait: the poll resolves on the first read after the
-      // completing append lands. Keep it generous so a loaded machine cannot delay the 10ms append
-      // past the deadline and turn the deferral under test into a deadline rejection.
+      // The deadline is an upper bound: the wait closes one flush window after the completing
+      // append lands. Keep it generous so a loaded machine cannot delay the 10ms append past the
+      // deadline and turn the deferral under test into a deadline rejection.
       deadlineMs: Date.now() + 5000,
+      flushWindowMs: 200,
       intervalMs: 5,
     });
     assert.equal(result.text, 'done');
@@ -447,6 +448,7 @@ test('waitForKiroTurnResult rejects an incomplete trailing JSONL record after fl
       fromOffset: 0,
       env: { HOME: home },
       deadlineMs: Date.now() + 20,
+      flushWindowMs: 60_000,
       intervalMs: 5,
     }),
     (error) => error instanceof OpenPError &&

@@ -225,6 +225,12 @@ test('kiro CLI debug log records artifact rejection reason code on error', async
     join(repoRoot, 'src/cli.ts'),
     'kiro',
     '--debug-log',
+    // The caller budget is what ends this wait: with no session log ever written, a non-slash
+    // turn reports the missing log only when its own --timeout budget expires. Wide enough that
+    // backend boot plus the prompt on a loaded machine cannot spend it before completion, which
+    // would misclassify this turn as a timeout instead of exit 41.
+    '--timeout',
+    '30',
     'hello',
   ], projectRoot, env);
   const entries = await readDebugEntries(debugLogPath);

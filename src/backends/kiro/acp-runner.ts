@@ -15,7 +15,7 @@ import { isKiroSlashCommandPrompt } from './prompt-command.js';
 
 type JsonObject = Record<string, unknown>;
 type JsonRpcId = string | number;
-const KIRO_SESSION_LOG_FLUSH_GRACE_MS = 1000;
+const KIRO_SESSION_LOG_FLUSH_WINDOW_MS = 1000;
 
 export interface KiroAcpRunOptions {
   readonly bin: string;
@@ -156,16 +156,24 @@ class KiroAcpClient {
     this.completed = true;
     clearTimeout(this.timeoutTimer);
 
+    // A slash turn may legitimately produce no scoped log record (the chunk fallback is its
+    // contract), so its wait stays bounded by the flush window. A non-slash turn must not judge
+    // record absence on elapsed time — a slow flush and a missing result look identical before
+    // the caller budget runs out, so only that budget may end the wait empty-handed.
+    const logWaitDeadlineMs = isSlashCommandTurn
+      ? Math.min(
+          timeoutDeadlineMs ?? Number.POSITIVE_INFINITY,
+          Date.now() + KIRO_SESSION_LOG_FLUSH_WINDOW_MS,
+        )
+      : timeoutDeadlineMs ?? Number.POSITIVE_INFINITY;
     let turnResult: Awaited<ReturnType<typeof waitForKiroTurnResult>>;
     try {
       turnResult = await waitForKiroTurnResult({
         sessionId: promptSessionId,
         fromOffset: promptLogOffset,
         env: this.options.env,
-        deadlineMs: Math.min(
-          timeoutDeadlineMs ?? Number.POSITIVE_INFINITY,
-          Date.now() + KIRO_SESSION_LOG_FLUSH_GRACE_MS,
-        ),
+        deadlineMs: logWaitDeadlineMs,
+        flushWindowMs: KIRO_SESSION_LOG_FLUSH_WINDOW_MS,
         throwIfStopped: () => this.throwIfInterruptedOrTimedOut(),
       });
     } catch (error: unknown) {

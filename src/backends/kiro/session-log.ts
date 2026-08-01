@@ -53,6 +53,7 @@ export async function waitForKiroTurnResultText(options: {
   readonly fromOffset: number;
   readonly env?: NodeJS.ProcessEnv;
   readonly deadlineMs: number;
+  readonly flushWindowMs: number;
   readonly intervalMs?: number;
   readonly throwIfStopped?: () => void;
 }): Promise<string | null> {
@@ -65,6 +66,7 @@ export async function waitForKiroTurnResult(options: {
   readonly fromOffset: number;
   readonly env?: NodeJS.ProcessEnv;
   readonly deadlineMs: number;
+  readonly flushWindowMs: number;
   readonly intervalMs?: number;
   readonly throwIfStopped?: () => void;
 }): Promise<{
@@ -87,17 +89,40 @@ export async function waitForKiroTurnResult(options: {
   };
   let sawLog = false;
   let sawScopedRecords = false;
+  // The flush window opens on the first read that yields assistant content, not on scoped records
+  // in general: the Prompt boundary record lands at submission time, so it proves nothing about
+  // whether the assistant result has flushed. Before any content the wait may only end at
+  // deadlineMs — absence of a result is not decidable from elapsed time alone.
+  let flushAnchorMs: number | null = null;
+  let lastObservedSize: number | null = null;
+
+  const closeAtMs = (): number => flushAnchorMs === null
+    ? options.deadlineMs
+    : Math.min(options.deadlineMs, flushAnchorMs + options.flushWindowMs);
 
   for (;;) {
     options.throwIfStopped?.();
-    const allowIncompleteTrailingLine = Date.now() < options.deadlineMs;
+    const allowIncompleteTrailingLine = Date.now() < closeAtMs();
     let snapshot = await readKiroTurnResultText(
       options.sessionId,
       options.fromOffset,
       options.env,
       allowIncompleteTrailingLine,
     );
-    if (allowIncompleteTrailingLine && Date.now() >= options.deadlineMs) {
+    const hasContent = snapshot.text !== null || snapshot.assistantEvents.length > 0;
+    if (flushAnchorMs === null) {
+      if (hasContent) {
+        flushAnchorMs = Date.now();
+      }
+    } else if (snapshot.size !== null && lastObservedSize !== null && snapshot.size > lastObservedSize) {
+      // The log grew after content appeared: the backend is still flushing, so re-open the window
+      // instead of truncating a trickling multi-record result at the original close.
+      flushAnchorMs = Date.now();
+    }
+    if (snapshot.size !== null) {
+      lastObservedSize = snapshot.size;
+    }
+    if (allowIncompleteTrailingLine && Date.now() >= closeAtMs()) {
       snapshot = await readKiroTurnResultText(options.sessionId, options.fromOffset, options.env, false);
     }
     sawLog ||= snapshot.logFound;
@@ -112,7 +137,7 @@ export async function waitForKiroTurnResult(options: {
     }
     options.throwIfStopped?.();
     const now = Date.now();
-    if (now >= options.deadlineMs) {
+    if (now >= closeAtMs()) {
       if (lastResult.text !== null || lastResult.assistantEvents.length > 0) {
         return lastResult;
       }
@@ -128,7 +153,7 @@ export async function waitForKiroTurnResult(options: {
         sawScopedRecords,
       };
     }
-    await new Promise((resolve) => setTimeout(resolve, Math.min(intervalMs, options.deadlineMs - now)));
+    await new Promise((resolve) => setTimeout(resolve, Math.min(intervalMs, closeAtMs() - now)));
   }
 }
 

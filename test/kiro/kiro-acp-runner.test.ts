@@ -301,6 +301,27 @@ test('runKiroAcp waits for delayed Kiro session log within the turn timeout', as
   assert.equal(result.content, 'partial answer');
 });
 
+// Distinguishing input: the assistant record lands 2.5s after completion — outside the flush
+// window, inside the caller budget. Closing the empty wait at completion plus the flush window
+// (the removed behavior) fails this test with missing_completion.
+test('runKiroAcp keeps waiting for an assistant record that flushes after the window but before the caller budget', async () => {
+  const result = await runKiroAcp({
+    bin: FIXTURE,
+    args: ['acp'],
+    cwd: process.cwd(),
+    prompt: 'hello',
+    sessionId: null,
+    isFirstTurn: true,
+    // Wide enough that backend boot on a loaded machine cannot spend the budget before the
+    // delayed append lands; the assertion is about the late record being accepted, not a race.
+    timeoutMs: 30_000,
+    trustAllTools: false,
+    env: env('assistant-log-after-window'),
+  });
+
+  assert.equal(result.content, 'partial answer');
+});
+
 test('runKiroAcp waits for Kiro session log to settle before returning result content', async () => {
   const result = await runKiroAcp({
     bin: FIXTURE,
@@ -317,14 +338,13 @@ test('runKiroAcp waits for Kiro session log to settle before returning result co
   assert.equal(result.content, 'A\n\nB');
 });
 
-// Pre-fix this only failed when the flush-window deadline coincided with the timeout timer (the
-// deadline can never fall after the timer), which needs slow startup relative to timeoutMs, so a
-// reintroduced race is not reliably detected here; the assertion pins the required behavior:
-// a completed turn must not be reported as a timeout.
+// Pre-fix this only failed when the log-wait deadline coincided with the timeout timer, which
+// needs the assistant record to straggle right up to the caller budget, so a reintroduced race
+// is not reliably detected here; the assertion pins the required behavior: a completed turn must
+// not be reported as a timeout.
 // Named for what it checks: a prompt that finishes inside the caller's budget returns its scoped
-// result. It does not cover the post-completion timer clear -- that only matters when the deadline
-// falls inside the flush window, which is at most KIRO_SESSION_LOG_FLUSH_GRACE_MS (1s) wide and
-// starts at backend boot, so no fixed budget can place the deadline inside it reliably.
+// result. It does not cover the post-completion timer clear -- no fixed budget can reliably place
+// the deadline at the straggling-flush race point.
 test('runKiroAcp returns the scoped result for a prompt that completes inside the turn budget', async () => {
   const result = await runKiroAcp({
     bin: await writePromptCompleteBeforeTimeoutKiroBin(),

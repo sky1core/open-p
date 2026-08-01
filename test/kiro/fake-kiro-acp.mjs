@@ -320,6 +320,8 @@ for await (const line of input) {
       };
       if (behavior === 'delayed-log') {
         setTimeout(() => appendSessionLog(sessionId, assistantLogEvent), 150);
+      } else if (behavior === 'assistant-log-after-window') {
+        setTimeout(() => appendSessionLog(sessionId, assistantLogEvent), 2500);
       } else if (behavior === 'multi-log-delayed') {
         appendSessionLog(sessionId, assistantLogEvent);
         setTimeout(() => appendSessionLog(sessionId, {

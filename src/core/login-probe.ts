@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { buildChildEnv } from './command.js';
 import { EXIT_CODES, OpenPError } from './errors.js';
 
-const LOGIN_PROBE_TIMEOUT_MS = 5_000;
+const LOGIN_PROBE_TIMEOUT_MS = 30_000;
 const LOGIN_PROBE_OUTPUT_LIMIT_BYTES = 64 * 1024;
 const LOGIN_PROBE_CLOSE_GRACE_MS = 250;
 
